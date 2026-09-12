@@ -95,9 +95,10 @@ The run is stored under `.graphviagent/` in the current directory. Exit status i
 
 ```bash
 graphviagent serve .
+graphviagent serve . --open
 ```
 
-Then open [http://127.0.0.1:8765](http://127.0.0.1:8765). Leave the terminal running.
+`--open` launches the browser. Or open [http://127.0.0.1:8765](http://127.0.0.1:8765) yourself. Leave the terminal running.
 
 ```bash
 graphviagent serve . --port 9000

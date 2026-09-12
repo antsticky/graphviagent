@@ -87,6 +87,7 @@ def main(argv: list[str] | None = None) -> None:
     serve_p.add_argument("path", nargs="?", default=".")
     serve_p.add_argument("--host", default="127.0.0.1")
     serve_p.add_argument("--port", type=int, default=8765)
+    serve_p.add_argument("--open", action="store_true", help="open the UI in a browser")
 
     run_p = sub.add_parser("run", help="record a run without the browser")
     run_p.add_argument("file", help="pipeline file or stem")
@@ -101,7 +102,7 @@ def main(argv: list[str] | None = None) -> None:
         root = Path(args.path).resolve()
         if not root.exists():
             raise SystemExit(f"path not found: {root}")
-        serve(root, host=args.host, port=args.port)
+        serve(root, host=args.host, port=args.port, open_browser=args.open)
         return
     if args.command == "run":
         raise SystemExit(_cmd_run(args.file, args.input, Path.cwd()))

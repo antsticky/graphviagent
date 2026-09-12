@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import webbrowser
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -2030,10 +2032,18 @@ class GraphVIHandler(BaseHTTPRequestHandler):
             self._json(400, {"error": str(exc)})
 
 
-def serve(workspace: Path, host: str = "127.0.0.1", port: int = 8765) -> None:
+def serve(
+    workspace: Path,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    open_browser: bool = False,
+) -> None:
     handler = partial(GraphVIHandler)
     GraphVIHandler.workspace = workspace.resolve()
     GraphVIHandler.cache = {}
     server = ThreadingHTTPServer((host, port), handler)
-    print(f"GraphVIAgent http://{host}:{port}  workspace={workspace}", flush=True)
+    url = f"http://{host}:{port}"
+    print(f"GraphVIAgent {url}  workspace={workspace}", flush=True)
+    if open_browser:
+        threading.Timer(0.4, lambda: webbrowser.open(url)).start()
     server.serve_forever()

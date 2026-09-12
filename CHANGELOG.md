@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1
+
+### Added
+
+- `graphviagent serve . --open` opens the UI in a browser
+
 ## 0.2.0
 
 Local debugger features for inspecting, comparing, and sharing LangGraph runs.

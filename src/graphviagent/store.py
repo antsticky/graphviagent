@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 
 STORE_DIRNAME = ".graphviagent"
@@ -89,3 +90,57 @@ def delete_run(workspace: Path, run_id: str) -> bool:
         path.unlink()
         return True
     return False
+
+
+def list_all_runs(
+    workspace: Path,
+    *,
+    include_steps: bool = False,
+    limit: int | None = None,
+) -> list[dict]:
+    root = store_root(workspace)
+    if not root.is_dir():
+        return []
+    runs: list[dict] = []
+    for folder in root.iterdir():
+        if folder.is_dir():
+            runs.extend(list_runs(workspace, folder.name, include_steps=include_steps))
+    runs.sort(key=lambda entry: entry.get("created_at") or "", reverse=True)
+    if limit is not None:
+        return runs[:limit]
+    return runs
+
+
+def delete_runs(workspace: Path, stem: str) -> int:
+    folder = store_root(workspace) / stem
+    if not folder.is_dir():
+        return 0
+    count = 0
+    for path in folder.glob("*.json"):
+        path.unlink()
+        count += 1
+    return count
+
+
+def import_run(workspace: Path, run: dict, *, fallback_stem: str, known_stems: list[str] | None = None) -> dict:
+    if not isinstance(run, dict):
+        raise ValueError("run must be a JSON object")
+    if not run.get("id"):
+        raise ValueError("run needs id")
+    if not isinstance(run.get("steps"), list):
+        raise ValueError("run needs steps")
+    clean = {
+        key: value
+        for key, value in run.items()
+        if key not in {"mermaid", "ascii"}
+    }
+    if load_run(workspace, str(clean["id"])):
+        clean["id"] = uuid4().hex
+    stem = str(clean.get("pipeline") or fallback_stem or "").strip()
+    allowed = set(known_stems or [])
+    if allowed and stem not in allowed:
+        stem = fallback_stem
+    if not stem:
+        raise ValueError("run needs a pipeline name")
+    clean["pipeline"] = stem
+    return save_run(workspace, stem, clean)

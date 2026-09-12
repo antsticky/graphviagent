@@ -3,9 +3,9 @@ from typing import Literal, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 EXAMPLES = [
-    {"a": 12, "b": 3, "op": "div"},
-    {"a": 12, "b": 0, "op": "div"},
-    {"a": 7, "b": 5, "op": "add"},
+    {"label": "12 / 3", "input": {"a": 12, "b": 3, "op": "div"}},
+    {"label": "divide by zero", "input": {"a": 12, "b": 0, "op": "div"}},
+    {"label": "7 + 5", "input": {"a": 7, "b": 5, "op": "add"}},
 ]
 
 

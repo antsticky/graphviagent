@@ -10,7 +10,15 @@ from graphviagent.discover import discover_pipelines
 from graphviagent.load import LoadedPipeline, load_pipeline
 from graphviagent.record import record_run, replay_step, resume_from_step
 from graphviagent.render import ascii_tree, unrolled_mermaid
-from graphviagent.store import delete_run, list_runs, load_run, save_run
+from graphviagent.store import (
+    delete_run,
+    delete_runs,
+    import_run,
+    list_all_runs,
+    list_runs,
+    load_run,
+    save_run,
+)
 
 FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
   <defs>
@@ -109,6 +117,7 @@ PAGE = r"""<!DOCTYPE html>
       color: var(--muted); font-size: 12px;
       font-family: "IBM Plex Mono", ui-monospace, monospace;
     }
+    .af-actions { display: flex; align-items: center; gap: 10px; }
     .af-grid { width: max-content; min-width: min-content; }
     .af-bars, .af-plays, .af-row, .af-days, .af-times {
       display: grid; align-items: end; column-gap: 3px;
@@ -203,12 +212,23 @@ PAGE = r"""<!DOCTYPE html>
     }
     .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0 8px; }
     textarea {
-      width: 100%; min-height: 88px; resize: vertical;
+      width: 100%; min-height: 88px; resize: none;
       background: var(--panel); color: var(--ink);
       border: 1px solid var(--line); border-radius: 8px;
       font-family: "IBM Plex Mono", ui-monospace, monospace;
-      font-size: 12px; padding: 10px; outline: none;
+      font-size: 12px; padding: 10px 10px 16px; outline: none;
     }
+    #input { display: block; height: 88px; }
+    .resize-s {
+      position: absolute; left: 0; right: 0; bottom: 0; height: 10px;
+      cursor: ns-resize; z-index: 3;
+    }
+    .resize-s::after {
+      content: ""; position: absolute; left: 50%; bottom: 4px;
+      width: 32px; height: 3px; margin-left: -16px; border-radius: 99px;
+      background: #3a3a44;
+    }
+    .copy-wrap:hover .resize-s::after { background: #5c5c66; }
     textarea:focus { border-color: var(--accent); }
     button.primary, button.ghost {
       height: 30px; padding: 0 12px; border-radius: 7px;
@@ -312,8 +332,19 @@ PAGE = r"""<!DOCTYPE html>
       font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px;
     }
     pre { white-space: pre-wrap; }
-    .json { line-height: 1.55; }
+    .json { line-height: 1.55; position: relative; }
     .json.empty { color: var(--muted); }
+    .copy-wrap { position: relative; }
+    .copy-btn {
+      position: absolute; top: 6px; right: 6px; z-index: 2;
+      height: 22px; padding: 0 8px; border-radius: 6px;
+      border: 1px solid var(--line); background: #1c1c22; color: var(--muted);
+      font: 500 10px Inter, sans-serif; cursor: pointer;
+      opacity: 0; pointer-events: none;
+    }
+    .json:hover .copy-btn, .cmp-a:hover .copy-btn, .cmp-b:hover .copy-btn,
+    .copy-wrap:hover .copy-btn { opacity: 1; pointer-events: auto; }
+    .copy-btn:hover { color: var(--ink); border-color: #45454f; }
     .j-node { margin: 0; color: inherit; }
     .j-node > summary {
       cursor: pointer; list-style: none;
@@ -374,7 +405,101 @@ PAGE = r"""<!DOCTYPE html>
     #nodeActions.visible { display: flex; }
     .tree-details { margin-top: 10px; color: var(--muted); }
     .tree-details > summary { cursor: pointer; font-size: 12px; }
-    @media (max-width: 900px) { .layout, .grid, .io { grid-template-columns: 1fr; } }
+    .chips { display: none; }
+    .chip {
+      height: 26px; padding: 0 10px; border-radius: 999px; cursor: pointer;
+      border: 1px solid var(--line); background: #1a1a20; color: var(--ink);
+      font: 500 11px Inter, sans-serif;
+    }
+    .chip:hover, .chip.active { border-color: var(--accent); color: #c4b5fd; }
+    .hist-tools { display: flex; gap: 6px; margin: 0 0 8px; }
+    .hist-tools input, .hist-tools select {
+      width: 100%; height: 28px; border-radius: 7px; border: 1px solid var(--line);
+      background: var(--panel); color: var(--ink); font: 12px Inter, sans-serif; padding: 0 8px;
+    }
+    .hist-tools select { width: 88px; flex: 0 0 88px; }
+    .history-box { min-height: 80px; border-radius: 8px; }
+    .history-box.drop { outline: 1px dashed var(--accent); background: var(--accent-dim); }
+    .thread { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+    .bubble {
+      border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: #141418;
+    }
+    .bubble-role {
+      font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+      color: #c4b5fd; margin-bottom: 4px;
+    }
+    .bubble-body { white-space: pre-wrap; color: #d4d4d8; font-size: 12px; }
+    .bubble-tool {
+      margin-top: 6px; color: var(--muted); font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 11px;
+    }
+    .cmp-filter {
+      display: flex; align-items: center; gap: 10px; margin: 0 0 14px; max-width: 360px;
+    }
+    .cmp-filter label {
+      font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+      text-transform: uppercase; color: var(--muted); white-space: nowrap;
+    }
+    .cmp-filter select {
+      flex: 1; min-width: 0; height: 34px; border-radius: 8px; border: 1px solid var(--line);
+      background: var(--panel); color: var(--ink); font: 12px Inter, sans-serif; padding: 0 8px;
+    }
+    .cmp-pickers {
+      display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 16px; margin-bottom: 22px; max-width: 100%;
+    }
+    .cmp-pick {
+      min-width: 0; overflow: hidden;
+      background: #17171c; border: 1px solid var(--line); border-radius: 10px;
+      padding: 12px 14px 14px;
+    }
+    .cmp-pick.run-a { border-color: #3d3566; }
+    .cmp-pick.run-b { border-color: #1e3a32; }
+    .cmp-pick label {
+      display: block; font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+      text-transform: uppercase; color: var(--muted); margin-bottom: 8px;
+    }
+    .cmp-pickers select {
+      display: block; width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;
+      height: 34px; border-radius: 8px; border: 1px solid var(--line);
+      background: var(--panel); color: var(--ink); font: 12px Inter, sans-serif;
+      padding: 0 28px 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .cmp-section {
+      background: #17171c; border: 1px solid var(--line); border-radius: 10px;
+      padding: 12px 14px 10px; margin: 0 0 14px; overflow: hidden; max-width: 100%;
+    }
+    .cmp-section h2 { margin-top: 0; }
+    .cmp-head, .cmp-row {
+      display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 16px; width: 100%; align-items: start;
+    }
+    .cmp-head {
+      padding: 0 0 8px; margin-bottom: 6px; border-bottom: 1px solid #2a2a32;
+      font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+      color: var(--muted);
+    }
+    .cmp-row { padding: 4px 0; }
+    .cmp-side {
+      display: grid; grid-template-columns: 88px minmax(0, 1fr);
+      gap: 8px; min-width: 0; align-items: start;
+    }
+    .cmp-row.changed .cmp-a, .cmp-row.changed .cmp-b { color: #fbbf24; }
+    .cmp-row.only-a .cmp-a { color: var(--danger); }
+    .cmp-row.only-b .cmp-b { color: #86efac; }
+    .cmp-k { color: var(--muted); font-size: 11px; padding-top: 8px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .cmp-a, .cmp-b {
+      position: relative;
+      font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px;
+      white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+      border-radius: 8px; padding: 8px 10px; min-height: 34px; min-width: 0;
+      width: 100%; max-width: 100%; box-sizing: border-box;
+      border: 1px solid #2a2a32;
+    }
+    .cmp-a { background: #16141f; }
+    .cmp-b { background: #121916; }
+    .cmp-a:empty::before, .cmp-b:empty::before { content: "—"; color: #5c5c66; }
+    @media (max-width: 900px) { .layout, .grid, .io, .cmp-pickers, .cmp-grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -384,13 +509,37 @@ PAGE = r"""<!DOCTYPE html>
       <nav class="nav">
         <button class="nav-link active" id="navTrace" type="button">Trace</button>
         <button class="nav-link" id="navPipelines" type="button">Pipelines</button>
+        <button class="nav-link" id="navCompare" type="button">Compare</button>
       </nav>
     </div>
   </header>
+  <section id="compareView" class="page" hidden>
+    <div class="page-inner">
+      <h1>Compare</h1>
+      <p class="lede">Pick two runs. Diff input, path, per-node output, and timing.</p>
+      <div class="cmp-filter">
+        <label for="cmpPipe">Pipeline</label>
+        <select id="cmpPipe">
+          <option value="all">all</option>
+        </select>
+      </div>
+      <div class="cmp-pickers">
+        <div class="cmp-pick run-a">
+          <label for="cmpA">Run A</label>
+          <select id="cmpA"></select>
+        </div>
+        <div class="cmp-pick run-b">
+          <label for="cmpB">Run B</label>
+          <select id="cmpB"></select>
+        </div>
+      </div>
+      <div id="cmpBoard"></div>
+    </div>
+  </section>
   <section id="pipelinesView" class="page" hidden>
     <div class="page-inner">
       <h1>Pipelines</h1>
-      <p class="lede">Airflow-style grid: duration bars, then tasks by run. Hover for the date. Click a cell or bar to open that run.</p>
+      <p class="lede">Hover for the date. Click a cell or bar to open that run.</p>
       <div id="pipeBoard"></div>
     </div>
   </section>
@@ -399,15 +548,31 @@ PAGE = r"""<!DOCTYPE html>
       <h2>Pipelines</h2>
       <div id="pipelines"></div>
       <h2>Runs</h2>
-      <div id="history" class="empty">Select a pipeline</div>
+      <div class="hist-tools">
+        <input id="runFilter" type="search" placeholder="input…"/>
+        <select id="runStatus">
+          <option value="all">all</option>
+          <option value="ok">success</option>
+          <option value="error">failed</option>
+        </select>
+      </div>
+      <div id="history" class="empty history-box">Select a pipeline</div>
+      <input id="importFile" type="file" accept="application/json,.json" hidden/>
     </aside>
     <main>
       <h2>Input</h2>
-      <textarea id="input">{}</textarea>
+      <div class="copy-wrap">
+        <textarea id="input">{}</textarea>
+        <button type="button" class="copy-btn">Copy</button>
+        <div class="resize-s" id="inputResize" aria-hidden="true"></div>
+      </div>
+      <div id="exampleChips" class="chips"></div>
       <div class="toolbar">
         <button class="primary" id="runBtn">Run</button>
         <button class="ghost" id="replayBtn" disabled>Replay step</button>
         <button class="ghost" id="replayFromBtn" disabled>Replay from</button>
+        <button class="ghost" id="exportBtn" disabled>Export</button>
+        <button class="ghost" id="importBtn">Import</button>
         <button class="ghost" id="deleteBtn">Delete run</button>
       </div>
       <p class="warn">Replay, Replay from, and Call node run node functions again. Side effects will fire.</p>
@@ -443,7 +608,10 @@ PAGE = r"""<!DOCTYPE html>
         <div class="pane">
           <h2>Node input <span id="ioName"></span></h2>
           <div id="stepIn" class="json empty">Double-click a node to inspect it.</div>
-          <textarea id="nodeInput" spellcheck="false"></textarea>
+          <div class="copy-wrap">
+            <textarea id="nodeInput" spellcheck="false"></textarea>
+            <button type="button" class="copy-btn">Copy</button>
+          </div>
           <div class="toolbar" id="nodeActions">
             <button class="primary" id="callBtn">Call node</button>
             <button class="ghost" id="replayFromHereBtn">Replay from here</button>
@@ -463,6 +631,9 @@ PAGE = r"""<!DOCTYPE html>
     let selectedStep = null;
     let nodeViewMode = "all";
     let currentView = "trace";
+    let historyRuns = [];
+    let scanKey = "";
+    let compareRuns = [];
 
     const $ = (id) => document.getElementById(id);
 
@@ -609,8 +780,18 @@ PAGE = r"""<!DOCTYPE html>
         const lastEl = document.createElement("div");
         lastEl.className = "af-last";
         lastEl.textContent = last ? runHoverText(last) : "No runs";
+        const actions = document.createElement("div");
+        actions.className = "af-actions";
+        const clear = document.createElement("button");
+        clear.type = "button";
+        clear.className = "ghost";
+        clear.textContent = "Clear";
+        clear.disabled = !newestFirst.length;
+        clear.onclick = () => clearPipelineRuns(p).catch((e) => alert(e.message));
+        actions.appendChild(lastEl);
+        actions.appendChild(clear);
         head.appendChild(title);
-        head.appendChild(lastEl);
+        head.appendChild(actions);
         card.appendChild(head);
         const grid = document.createElement("div");
         grid.className = "af-grid";
@@ -721,14 +902,23 @@ PAGE = r"""<!DOCTYPE html>
       });
     }
 
+    function viewFromHash() {
+      if (location.hash === "#/pipelines") return "pipelines";
+      if (location.hash === "#/compare") return "compare";
+      return "trace";
+    }
+
     function showView(name) {
-      currentView = name === "pipelines" ? "pipelines" : "trace";
+      currentView = name === "pipelines" || name === "compare" ? name : "trace";
       $("traceView").hidden = currentView !== "trace";
       $("pipelinesView").hidden = currentView !== "pipelines";
+      $("compareView").hidden = currentView !== "compare";
       $("navTrace").classList.toggle("active", currentView === "trace");
       $("navPipelines").classList.toggle("active", currentView === "pipelines");
+      $("navCompare").classList.toggle("active", currentView === "compare");
       if (currentView === "pipelines") renderPipeBoard();
-      const hash = currentView === "pipelines" ? "#/pipelines" : "#/trace";
+      if (currentView === "compare") loadCompare().catch((e) => alert(e.message));
+      const hash = "#/" + currentView;
       if (location.hash !== hash) location.hash = hash;
     }
 
@@ -758,6 +948,7 @@ PAGE = r"""<!DOCTYPE html>
         box.appendChild(btn);
       });
       if (currentView === "pipelines") renderPipeBoard();
+      if (fileId) renderExampleChips();
       if (!fileId && pipelines.length) selectPipeline(pipelines[0].id);
     }
 
@@ -765,37 +956,84 @@ PAGE = r"""<!DOCTYPE html>
       return pipelines.find((p) => p.id === fileId);
     }
 
+    function exampleInput(item) {
+      if (!item) return {};
+      if (item.input && typeof item.input === "object" && !Array.isArray(item.input)) return item.input;
+      return item;
+    }
+
+    function renderExampleChips() {
+      const box = $("exampleChips");
+      box.innerHTML = "";
+      const items = (pipeline() && pipeline().examples) || [];
+      items.forEach((item) => {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "chip";
+        chip.textContent = item.label || "example";
+        chip.onclick = () => {
+          $("input").value = JSON.stringify(exampleInput(item), null, 2);
+          box.querySelectorAll(".chip").forEach((el) => el.classList.remove("active"));
+          chip.classList.add("active");
+        };
+        box.appendChild(chip);
+      });
+    }
+
     async function selectPipeline(id) {
       fileId = id;
       currentRun = null;
       selectedStep = null;
       const p = pipeline();
-      const example = (p && p.examples && p.examples[0]) || {};
-      $("input").value = JSON.stringify(example, null, 2);
+      const example = (p && p.examples && p.examples[0]) || null;
+      $("input").value = JSON.stringify(exampleInput(example), null, 2);
+      renderExampleChips();
       await loadPipelines();
+      renderExampleChips();
       await loadHistory();
       renderRun(null);
     }
 
-    async function loadHistory() {
+    function runMatchesFilter(run) {
+      const status = $("runStatus").value;
+      if (status !== "all" && run.status !== status) return false;
+      const q = ($("runFilter").value || "").trim().toLowerCase();
+      if (!q) return true;
+      if (q === "has error" || q === "error" || q === "failed") return run.status === "error";
+      if (q === "ok" || q === "success") return run.status === "ok";
+      const input = JSON.stringify(run.input || {}).toLowerCase();
+      const nodes = (run.steps || []).map((step) => String(step.node || "").toLowerCase()).join(" ");
+      const blob = [run.status, run.mode, run.pipeline, input, nodes, run.id].join(" ").toLowerCase();
+      return blob.includes(q);
+    }
+
+    function renderHistory() {
       const box = $("history");
       if (!fileId) { box.textContent = "Select a pipeline"; return; }
-      const { runs } = await api("/api/runs?file=" + encodeURIComponent(fileId));
-      if (!runs.length) { box.innerHTML = '<p class="empty">No runs</p>'; return; }
+      const rows = historyRuns.filter(runMatchesFilter);
+      if (!historyRuns.length) { box.innerHTML = '<p class="empty">No runs — drop a JSON file to import</p>'; return; }
+      if (!rows.length) { box.innerHTML = '<p class="empty">No runs match</p>'; return; }
       box.innerHTML = "";
-      runs.forEach((r) => {
+      rows.forEach((r) => {
         const btn = document.createElement("button");
         btn.className = "run" + (currentRun && currentRun.id === r.id ? " active" : "");
         const mode = r.mode || "run";
         btn.innerHTML =
           '<div class="run-top"><span>' + escapeHtml(formatTime(r.created_at)) +
-          '</span><span class="pill">' + escapeHtml(mode) + "</span></div>" +
+          '</span><span class="pill">' + escapeHtml(r.status === "error" ? "error" : mode) + "</span></div>" +
           '<div class="meta">' + escapeHtml(truncateJson(r.input)) +
           (r.elapsed_ms != null ? "  ·  " + escapeHtml(formatElapsed(r.elapsed_ms)) : "") +
           "</div>";
         btn.onclick = () => openRun(r.id);
         box.appendChild(btn);
       });
+    }
+
+    async function loadHistory() {
+      if (!fileId) { historyRuns = []; renderHistory(); return; }
+      const { runs } = await api("/api/runs?file=" + encodeURIComponent(fileId));
+      historyRuns = runs;
+      renderHistory();
     }
 
     async function openRun(id) {
@@ -880,6 +1118,63 @@ PAGE = r"""<!DOCTYPE html>
       return node;
     }
 
+    function isMessage(item) {
+      if (!item || typeof item !== "object") return false;
+      const roles = ["system", "user", "assistant", "tool", "function", "human", "ai"];
+      const kinds = ["system", "human", "ai", "tool", "function", "chat"];
+      if (roles.includes(item.role) || kinds.includes(item.type)) return true;
+      return Boolean(item.tool_calls && "content" in item);
+    }
+
+    function extractMessages(value) {
+      if (Array.isArray(value)) {
+        const found = value.filter(isMessage);
+        return found.length && found.length >= Math.max(1, Math.floor(value.length / 2)) ? found : [];
+      }
+      if (!value || typeof value !== "object") return [];
+      if (isMessage(value)) return [value];
+      for (const key of ["messages", "output", "result"]) {
+        if (value[key] !== undefined) {
+          const found = extractMessages(value[key]);
+          if (found.length) return found;
+        }
+      }
+      return [];
+    }
+
+    function messageText(item) {
+      const content = item.content;
+      if (typeof content === "string") return content;
+      if (Array.isArray(content)) {
+        return content.map((part) => {
+          if (typeof part === "string") return part;
+          return (part && part.text) || JSON.stringify(part);
+        }).join("\n");
+      }
+      return content == null ? "" : JSON.stringify(content);
+    }
+
+    function renderThread(messages) {
+      const wrap = document.createElement("div");
+      wrap.className = "thread";
+      messages.forEach((item) => {
+        const bubble = document.createElement("div");
+        bubble.className = "bubble";
+        const tools = item.tool_calls || [];
+        bubble.innerHTML =
+          '<div class="bubble-role">' + escapeHtml(item.role || item.type || "message") + "</div>" +
+          (messageText(item) ? '<div class="bubble-body">' + escapeHtml(messageText(item)) + "</div>" : "") +
+          tools.map((call) => {
+            const name = call.name || (call.function && call.function.name) || "tool";
+            const args = call.args || (call.function && call.function.arguments) || call.arguments || {};
+            return '<div class="bubble-tool">' + escapeHtml(name) + "  " +
+              escapeHtml(typeof args === "string" ? args : JSON.stringify(args)) + "</div>";
+          }).join("");
+        wrap.appendChild(bubble);
+      });
+      return wrap;
+    }
+
     function setJson(el, value, emptyText) {
       el.innerHTML = "";
       if (emptyText) {
@@ -888,7 +1183,26 @@ PAGE = r"""<!DOCTYPE html>
         return;
       }
       el.classList.remove("empty");
-      el.appendChild(renderJsonTree(value ?? {}, undefined, 0));
+      const messages = extractMessages(value);
+      if (messages.length) el.appendChild(renderThread(messages));
+      const tree = renderJsonTree(value ?? {}, undefined, 0);
+      if (messages.length) {
+        const details = document.createElement("details");
+        details.className = "tree-details";
+        const summary = document.createElement("summary");
+        summary.textContent = "JSON";
+        details.appendChild(summary);
+        details.appendChild(tree);
+        el.appendChild(details);
+      } else {
+        el.appendChild(tree);
+      }
+      el._copyPayload = JSON.stringify(value ?? {}, null, 2);
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "copy-btn";
+      copy.textContent = "Copy";
+      el.appendChild(copy);
     }
 
     function showStepIO(step) {
@@ -974,6 +1288,7 @@ PAGE = r"""<!DOCTYPE html>
       const disabled = !selectedStep;
       $("replayBtn").disabled = disabled;
       $("replayFromBtn").disabled = disabled;
+      $("exportBtn").disabled = !currentRun;
     }
 
     function selectedStepRecord() {
@@ -1168,23 +1483,329 @@ PAGE = r"""<!DOCTYPE html>
       await loadPipelines();
     }
 
+    async function clearPipelineRuns(p) {
+      if (!p || !confirm("Delete all runs for " + p.stem + "?")) return;
+      await api("/api/runs?file=" + encodeURIComponent(p.id), { method: "DELETE" });
+      if (fileId === p.id) {
+        currentRun = null;
+        renderRun(null);
+        await loadHistory();
+      }
+      await loadPipelines();
+    }
+
+    function exportRun() {
+      if (!currentRun) return;
+      const clean = { ...currentRun };
+      delete clean.mermaid;
+      delete clean.ascii;
+      const blob = new Blob([JSON.stringify(clean, null, 2)], { type: "application/json" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = (currentRun.pipeline || "run") + "-" + currentRun.id + ".json";
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }
+
+    async function importRunObject(data) {
+      const saved = await api("/api/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run: data, file: fileId }),
+      });
+      if (saved.pipeline && pipelines.some((p) => p.stem === saved.pipeline)) {
+        const match = pipelines.find((p) => p.stem === saved.pipeline);
+        if (match && match.id !== fileId) await selectPipeline(match.id);
+      }
+      await openRun(saved.id);
+      await loadHistory();
+      await loadPipelines();
+    }
+
+    async function importFromFile(file) {
+      const data = JSON.parse(await file.text());
+      await importRunObject(data);
+    }
+
+    function runOptionLabel(run) {
+      const input = truncateJson(run.input);
+      const short = input.length > 36 ? input.slice(0, 33) + "..." : input;
+      return [run.pipeline, formatTime(run.created_at), short].filter(Boolean).join("  ·  ");
+    }
+
+    function comparePipeFilter() {
+      return ($("cmpPipe").value || "all");
+    }
+
+    function filteredCompareRuns() {
+      const pipe = comparePipeFilter();
+      if (pipe === "all") return compareRuns;
+      return compareRuns.filter((run) => run.pipeline === pipe);
+    }
+
+    function fillComparePipeFilter() {
+      const sel = $("cmpPipe");
+      const keep = sel.value || "all";
+      const stems = Array.from(new Set([
+        ...pipelines.map((p) => p.stem),
+        ...compareRuns.map((run) => run.pipeline).filter(Boolean),
+      ])).sort();
+      sel.innerHTML = '<option value="all">all</option>';
+      stems.forEach((stem) => {
+        const opt = document.createElement("option");
+        opt.value = stem;
+        opt.textContent = stem;
+        sel.appendChild(opt);
+      });
+      sel.value = stems.includes(keep) || keep === "all" ? keep : "all";
+    }
+
+    function fillCompareSelect(sel, keep) {
+      const current = keep || sel.value;
+      const rows = filteredCompareRuns();
+      sel.innerHTML = '<option value="">Select a run…</option>';
+      rows.forEach((run) => {
+        const opt = document.createElement("option");
+        opt.value = run.id;
+        opt.textContent = runOptionLabel(run);
+        sel.appendChild(opt);
+      });
+      sel.value = current && [...sel.options].some((opt) => opt.value === current) ? current : "";
+    }
+
+    function jsonEqual(a, b) {
+      return JSON.stringify(a) === JSON.stringify(b);
+    }
+
+    function fmtDiff(value) {
+      if (value === undefined) return "";
+      if (typeof value === "string") return value;
+      return JSON.stringify(value);
+    }
+
+    function copyCell(kind, value) {
+      const text = fmtDiff(value);
+      const btn = text ? '<button type="button" class="copy-btn">Copy</button>' : "";
+      const attr = text ? ' data-copy="' + escapeHtml(text) + '"' : "";
+      return '<div class="' + kind + '"' + attr + ">" + escapeHtml(text) + btn + "</div>";
+    }
+
+    function diffRowsHtml(rows) {
+      return rows.map((row) =>
+        '<div class="cmp-row ' + row.kind + '">' +
+        '<div class="cmp-side"><div class="cmp-k">' + escapeHtml(row.key) +
+        "</div>" + copyCell("cmp-a", row.a) + "</div>" +
+        '<div class="cmp-side"><div class="cmp-k">' + escapeHtml(row.key) +
+        "</div>" + copyCell("cmp-b", row.b) + "</div>" +
+        "</div>"
+      ).join("");
+    }
+
+    function diffSection(title, rows) {
+      return '<section class="cmp-section"><h2>' + escapeHtml(title) + "</h2>" +
+        '<div class="cmp-head"><div>Run A</div><div>Run B</div></div>' +
+        (rows.length ? diffRowsHtml(rows) : '<p class="empty">No values</p>') +
+        "</section>";
+    }
+
+    function firstByNode(run) {
+      const map = new Map();
+      (run.steps || []).forEach((step) => {
+        if (step.node && !map.has(step.node)) map.set(step.node, step);
+      });
+      return map;
+    }
+
+    function applyCompareFilter() {
+      fillCompareSelect($("cmpA"), $("cmpA").value);
+      fillCompareSelect($("cmpB"), $("cmpB").value);
+      return renderCompare();
+    }
+
+    async function loadCompare() {
+      compareRuns = (await api("/api/runs?all=1")).runs;
+      fillComparePipeFilter();
+      await applyCompareFilter();
+    }
+
+    async function renderCompare() {
+      const board = $("cmpBoard");
+      const idA = $("cmpA").value;
+      const idB = $("cmpB").value;
+      if (!idA || !idB) {
+        board.innerHTML = '<p class="empty">Select runs to compare...</p>';
+        return;
+      }
+      const [a, b] = await Promise.all([api("/api/runs/" + idA), api("/api/runs/" + idB)]);
+      const pathA = (a.steps || []).map((step) => step.node);
+      const pathB = (b.steps || []).map((step) => step.node);
+      const mapA = firstByNode(a);
+      const mapB = firstByNode(b);
+      const nodes = Array.from(new Set([...mapA.keys(), ...mapB.keys()]));
+      const inputRows = Array.from(new Set([
+        ...Object.keys(a.input || {}),
+        ...Object.keys(b.input || {}),
+      ])).sort().map((key) => ({
+        key,
+        a: (a.input || {})[key],
+        b: (b.input || {})[key],
+        kind: !Object.prototype.hasOwnProperty.call(a.input || {}, key) ? "only-b"
+          : !Object.prototype.hasOwnProperty.call(b.input || {}, key) ? "only-a"
+          : jsonEqual((a.input || {})[key], (b.input || {})[key]) ? "" : "changed",
+      }));
+      const pathRows = [];
+      for (let i = 0; i < Math.max(pathA.length, pathB.length); i++) {
+        pathRows.push({
+          key: String(i + 1),
+          a: pathA[i],
+          b: pathB[i],
+          kind: !pathA[i] ? "only-b" : !pathB[i] ? "only-a" : pathA[i] === pathB[i] ? "" : "changed",
+        });
+      }
+      const outRows = nodes.map((node) => {
+        const left = mapA.get(node);
+        const right = mapB.get(node);
+        return {
+          key: node,
+          a: left ? left.update : undefined,
+          b: right ? right.update : undefined,
+          kind: !left ? "only-b" : !right ? "only-a" : jsonEqual(left.update, right.update) ? "" : "changed",
+        };
+      });
+      const timeRows = nodes.map((node) => {
+        const left = mapA.get(node);
+        const right = mapB.get(node);
+        return {
+          key: node,
+          a: left ? formatElapsed(left.elapsed_ms) : "",
+          b: right ? formatElapsed(right.elapsed_ms) : "",
+          kind: !left ? "only-b" : !right ? "only-a" : Number(left.elapsed_ms) === Number(right.elapsed_ms) ? "" : "changed",
+        };
+      });
+      timeRows.push({
+        key: "total",
+        a: formatElapsed(a.elapsed_ms),
+        b: formatElapsed(b.elapsed_ms),
+        kind: Number(a.elapsed_ms) === Number(b.elapsed_ms) ? "" : "changed",
+      });
+      board.innerHTML =
+        diffSection("Input", inputRows) +
+        diffSection("Path", pathRows) +
+        diffSection("Per-node output", outRows) +
+        diffSection("Timing", timeRows);
+    }
+
+    async function pollScan() {
+      if (document.hidden) return;
+      try {
+        const data = await api("/api/scan");
+        const next = JSON.stringify(data.files || []);
+        if (!scanKey) {
+          scanKey = next;
+          return;
+        }
+        if (next === scanKey) return;
+        const prev = JSON.parse(scanKey);
+        scanKey = next;
+        const current = (data.files || []).find((item) => item.id === fileId);
+        await loadPipelines();
+        if (fileId && !(data.files || []).some((item) => item.id === fileId)) {
+          fileId = (data.files[0] && data.files[0].id) || null;
+          currentRun = null;
+          renderRun(null);
+        }
+        const before = prev.find((item) => item.id === fileId);
+        if (fileId && current && before && current.mtime !== before.mtime) {
+          renderExampleChips();
+          await loadHistory();
+        }
+      } catch (err) {}
+    }
+
+    (function bindInputResize() {
+      const handle = $("inputResize");
+      const area = $("input");
+      if (!handle || !area) return;
+      handle.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        const startY = event.clientY;
+        const startH = area.getBoundingClientRect().height;
+        const move = (ev) => {
+          area.style.height = Math.max(88, startH + ev.clientY - startY) + "px";
+        };
+        const up = () => {
+          window.removeEventListener("mousemove", move);
+          window.removeEventListener("mouseup", up);
+        };
+        window.addEventListener("mousemove", move);
+        window.addEventListener("mouseup", up);
+      });
+    })();
     $("runBtn").onclick = () => runGraph().catch((e) => alert(e.message));
     $("replayBtn").onclick = () => openFromButton("replay");
     $("replayFromBtn").onclick = () => openFromButton("replay_from");
     $("replayFromHereBtn").onclick = () => rerun("resume").catch((e) => alert(e.message));
     $("callBtn").onclick = () => rerun("replay").catch((e) => alert(e.message));
+    $("exportBtn").onclick = () => exportRun();
+    $("importBtn").onclick = () => $("importFile").click();
+    $("importFile").onchange = () => {
+      const file = $("importFile").files && $("importFile").files[0];
+      $("importFile").value = "";
+      if (file) importFromFile(file).catch((e) => alert(e.message));
+    };
     $("deleteBtn").onclick = () => removeRun().catch((e) => alert(e.message));
+    $("runFilter").oninput = () => renderHistory();
+    $("runStatus").onchange = () => renderHistory();
+    $("cmpPipe").onchange = () => applyCompareFilter().catch((e) => alert(e.message));
+    $("cmpA").onchange = () => renderCompare().catch((e) => alert(e.message));
+    $("cmpB").onchange = () => renderCompare().catch((e) => alert(e.message));
+    const historyBox = $("history");
+    historyBox.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      historyBox.classList.add("drop");
+    });
+    historyBox.addEventListener("dragleave", () => historyBox.classList.remove("drop"));
+    historyBox.addEventListener("drop", (event) => {
+      event.preventDefault();
+      historyBox.classList.remove("drop");
+      const file = event.dataTransfer.files && event.dataTransfer.files[0];
+      if (file) importFromFile(file).catch((e) => alert(e.message));
+    });
     $("nvClose").onclick = () => closeNodeView();
     $("nodeView").onclick = (event) => {
       if (event.target === $("nodeView")) closeNodeView();
     };
     $("navTrace").onclick = () => showView("trace");
     $("navPipelines").onclick = () => showView("pipelines");
+    $("navCompare").onclick = () => showView("compare");
+    document.addEventListener("click", async (event) => {
+      const btn = event.target.closest(".copy-btn");
+      if (!btn) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const box = btn.closest(".json, .cmp-a, .cmp-b, .copy-wrap");
+      let text = "";
+      if (box && box.classList.contains("copy-wrap")) {
+        const area = box.querySelector("textarea");
+        text = area ? area.value : "";
+      } else if (box && box._copyPayload != null) {
+        text = box._copyPayload;
+      } else if (box && box.getAttribute("data-copy") != null) {
+        text = box.getAttribute("data-copy");
+      }
+      try {
+        await navigator.clipboard.writeText(text);
+        btn.textContent = "Copied";
+        setTimeout(() => { btn.textContent = "Copy"; }, 1200);
+      } catch (err) {
+        alert("Could not copy");
+      }
+    });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && isNodeViewOpen()) closeNodeView();
     });
     window.addEventListener("hashchange", () => {
-      showView(location.hash === "#/pipelines" ? "pipelines" : "trace");
+      showView(viewFromHash());
     });
     let pipeResizeTimer = 0;
     window.addEventListener("resize", () => {
@@ -1193,8 +1814,9 @@ PAGE = r"""<!DOCTYPE html>
       pipeResizeTimer = setTimeout(renderPipeBoard, 120);
     });
     loadPipelines().then(() => {
-      showView(location.hash === "#/pipelines" ? "pipelines" : "trace");
+      showView(viewFromHash());
     }).catch((e) => alert(e.message));
+    setInterval(() => pollScan(), 2000);
   </script>
 </body>
 </html>
@@ -1226,6 +1848,21 @@ class GraphVIHandler(BaseHTTPRequestHandler):
     def _rel_id(self, path: Path) -> str:
         return path.resolve().relative_to(self.workspace.resolve()).as_posix()
 
+    def _known_stems(self) -> list[str]:
+        return [path.stem for path in discover_pipelines(self.workspace)]
+
+    def _scan_files(self) -> list[dict]:
+        items = []
+        for path in discover_pipelines(self.workspace):
+            items.append(
+                {
+                    "id": self._rel_id(path),
+                    "stem": path.stem,
+                    "mtime": path.stat().st_mtime,
+                }
+            )
+        return items
+
     def _get_loaded(self, file_id: str) -> LoadedPipeline:
         path = (self.workspace / file_id).resolve()
         if self.workspace.resolve() not in path.parents and path != self.workspace.resolve():
@@ -1256,6 +1893,9 @@ class GraphVIHandler(BaseHTTPRequestHandler):
             return
         if parsed.path in {"/favicon.svg", "/favicon.ico"}:
             self._send(200, FAVICON_SVG.encode(), "image/svg+xml")
+            return
+        if parsed.path == "/api/scan":
+            self._json(200, {"files": self._scan_files()})
             return
         if parsed.path == "/api/pipelines":
             items = []
@@ -1290,9 +1930,12 @@ class GraphVIHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/runs":
             query = parse_qs(parsed.query)
+            if (query.get("all") or [""])[0] in {"1", "true", "yes"}:
+                self._json(200, {"runs": list_all_runs(self.workspace, include_steps=True)})
+                return
             file_id = (query.get("file") or [""])[0]
             stem = Path(file_id).stem
-            self._json(200, {"runs": list_runs(self.workspace, stem)})
+            self._json(200, {"runs": list_runs(self.workspace, stem, include_steps=True)})
             return
         if parsed.path.startswith("/api/runs/"):
             run_id = parsed.path.rsplit("/", 1)[-1]
@@ -1306,6 +1949,14 @@ class GraphVIHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/runs":
+            file_id = (parse_qs(parsed.query).get("file") or [""])[0]
+            if not file_id:
+                self._json(400, {"error": "file is required"})
+                return
+            count = delete_runs(self.workspace, Path(file_id).stem)
+            self._json(200, {"ok": True, "deleted": count})
+            return
         if parsed.path.startswith("/api/runs/"):
             run_id = parsed.path.rsplit("/", 1)[-1]
             ok = delete_run(self.workspace, run_id)
@@ -1362,6 +2013,16 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                         incoming,
                     )
                 saved = save_run(self.workspace, loaded.stem, new_run)
+                self._json(200, self._with_render(saved))
+                return
+            if parsed.path == "/api/import":
+                fallback = Path(payload.get("file") or "").stem
+                saved = import_run(
+                    self.workspace,
+                    payload.get("run") or {},
+                    fallback_stem=fallback,
+                    known_stems=self._known_stems(),
+                )
                 self._json(200, self._with_render(saved))
                 return
             self._json(404, {"error": "not found"})

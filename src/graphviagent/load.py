@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,31 @@ def _compile_if_needed(obj: Any) -> tuple[Any, bool]:
     raise TypeError("object is not a compiled graph or StateGraph")
 
 
+def example_label(data: dict) -> str:
+    parts: list[str] = []
+    for key, value in data.items():
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        parts.append(f"{key}={text}")
+        if len(parts) >= 3:
+            break
+    label = "  ".join(parts) or "example"
+    return label if len(label) <= 42 else label[:39] + "..."
+
+
+def normalize_examples(raw: Any) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        if isinstance(item.get("label"), str) and isinstance(item.get("input"), dict):
+            out.append({"label": item["label"], "input": item["input"]})
+        else:
+            out.append({"label": example_label(item), "input": item})
+    return out
+
+
 def load_module(path: Path) -> Any:
     path = path.resolve()
     key = hashlib.md5(str(path).encode(), usedforsecurity=False).hexdigest()
@@ -59,9 +85,7 @@ def load_pipeline(path: Path) -> LoadedPipeline:
     try:
         module = load_module(path)
         loaded.module = module
-        examples = getattr(module, "EXAMPLES", None)
-        if isinstance(examples, list):
-            loaded.examples = [item for item in examples if isinstance(item, dict)]
+        loaded.examples = normalize_examples(getattr(module, "EXAMPLES", None))
 
         candidate = None
         for attr in ("GRAPH", "app"):

@@ -69,6 +69,38 @@ def _guess_failed_node(raw_events: list[tuple[str, dict, float]], edges: list[tu
     return nxt[0]
 
 
+def _is_message(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    role = item.get("role")
+    kind = item.get("type")
+    if role in {"system", "user", "assistant", "tool", "function", "human", "ai"}:
+        return True
+    if kind in {"system", "human", "ai", "tool", "function", "chat"}:
+        return True
+    if item.get("tool_calls") and "content" in item:
+        return True
+    return False
+
+
+def extract_messages(value: Any) -> list[dict]:
+    if isinstance(value, list):
+        found = [item for item in value if _is_message(item)]
+        return found if found and len(found) >= max(1, len(value) // 2) else []
+    if not isinstance(value, dict):
+        return []
+    if _is_message(value):
+        return [value]
+    for key in ("messages", "output", "result"):
+        child = value.get(key)
+        if child is value:
+            continue
+        found = extract_messages(child)
+        if found:
+            return found
+    return []
+
+
 def extract_reason(update: dict) -> str:
     if not isinstance(update, dict):
         return ""

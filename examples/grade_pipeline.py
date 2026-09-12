@@ -3,9 +3,9 @@ from typing import TypedDict
 from langgraph.graph import END, START, StateGraph
 
 EXAMPLES = [
-    {"score": 18, "maximum": 20},
-    {"score": 18, "maximum": 0},
-    {"score": 7, "maximum": 10},
+    {"label": "18 / 20", "input": {"score": 18, "maximum": 20}},
+    {"label": "max is zero", "input": {"score": 18, "maximum": 0}},
+    {"label": "7 / 10", "input": {"score": 7, "maximum": 10}},
 ]
 
 

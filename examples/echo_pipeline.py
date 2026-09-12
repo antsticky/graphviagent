@@ -4,7 +4,10 @@ from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-EXAMPLES = [{"text": "hello"}, {"text": "GraphVIAgent"}]
+EXAMPLES = [
+    {"label": "hello", "input": {"text": "hello"}},
+    {"label": "GraphVIAgent", "input": {"text": "GraphVIAgent"}},
+]
 
 
 class EchoState(TypedDict):

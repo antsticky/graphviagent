@@ -3,9 +3,9 @@ from typing import TypedDict
 from langgraph.graph import END, START, StateGraph
 
 EXAMPLES = [
-    {"part": 3, "total": 10},
-    {"part": 3, "total": 0},
-    {"part": 25, "total": 40},
+    {"label": "3 of 10", "input": {"part": 3, "total": 10}},
+    {"label": "total is zero", "input": {"part": 3, "total": 0}},
+    {"label": "25 of 40", "input": {"part": 25, "total": 40}},
 ]
 
 

@@ -3,10 +3,10 @@ from typing import Literal, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 EXAMPLES = [
-    {"value": 100, "unit": "c_to_f"},
-    {"value": 32, "unit": "f_to_c"},
-    {"value": 0, "unit": "per_unit"},
-    {"value": 21, "unit": "kelvin"},
+    {"label": "100°C to °F", "input": {"value": 100, "unit": "c_to_f"}},
+    {"label": "32°F to °C", "input": {"value": 32, "unit": "f_to_c"}},
+    {"label": "100 / 0", "input": {"value": 0, "unit": "per_unit"}},
+    {"label": "unknown unit", "input": {"value": 21, "unit": "kelvin"}},
 ]
 
 

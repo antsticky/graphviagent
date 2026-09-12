@@ -168,7 +168,3 @@ graphviagent serve examples
 - `examples/stats_pipeline.py` — mean of a list; `{values: []}` raises
 - `examples/grade_pipeline.py` — score / max; `{maximum: 0}` raises
 - `examples/convert_pipeline.py` — `{value: 0, unit: "per_unit"}` or `{unit: "kelvin"}` raises
-
-## Releases
-
-Bump `version` in `pyproject.toml` and `__init__.py`, add a `## x.y.z` section to `CHANGELOG.md`, merge to `prod`, and push. The Action uploads that version to PyPI and creates GitHub release `vx.y.z` with the changelog notes. The same version is not published twice.

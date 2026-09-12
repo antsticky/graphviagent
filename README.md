@@ -69,11 +69,33 @@ Failed runs are saved. The failing node is marked on the graph and shows as a re
 
 ## Publish to PyPI
 
+A push to `prod` builds the package and uploads it to PyPI. PyPI rejects the same version twice, so bump `version` in `pyproject.toml` before you merge.
+
+### One-time PyPI setup
+
+1. Create a [PyPI account](https://pypi.org/account/register/).
+2. Open [Trusted publishers](https://pypi.org/manage/account/publishing/).
+3. Add a **pending publisher** (the project does not exist on PyPI yet):
+   - **PyPI project name:** `graphviagent`
+   - **Owner:** `antsticky`
+   - **Repository:** `graphviagent`
+   - **Workflow:** `publish.yml`
+   - **Environment name:** `pypi`
+4. On GitHub: **Settings → Environments → New environment** named `pypi`.
+
+Values must match the Action token exactly. Common miss: putting `.github/workflows/publish.yml` in **Workflow** — use only `publish.yml`. Leave nothing blank in **Environment name**.
+
+If the job fails with `invalid-publisher`, the pending publisher is missing or does not match. Fix it, then **Re-run all jobs** on the failed Action. You do not need a new commit.
+
+No API token. The workflow uses OpenID trusted publishing.
+
+### Release
+
 ```bash
-pip install -e ".[dev]"
-python -m build
-twine check dist/*
-twine upload dist/*
+# on dev, bump version in pyproject.toml, then:
+git checkout prod
+git merge dev
+git push origin prod
 ```
 
-Create the GitHub repo at [antsticky/graphviagent](https://github.com/antsticky/graphviagent) before the first upload.
+The [Publish](https://github.com/antsticky/graphviagent/actions) workflow runs `python -m build` and uploads only if that version is not already on PyPI.

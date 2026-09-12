@@ -2,15 +2,27 @@
 
 Local Graph-View-Agent for LangGraph. Scan `*_pipeline.py` files, record runs under `.graphviagent/`, and inspect them in a browser UI.
 
-Pipeline files do not import GraphVIAgent. Only runs started from the UI or CLI are stored.
+Pipeline files do not import GraphVIAgent. Nothing is sent to LangSmith. Only runs you start from the UI are stored.
+
+## Requirements
+
+- Python 3.10 or newer
+- A folder of LangGraph files named `*_pipeline.py`
 
 ## Install
 
+New folder:
+
 ```bash
+mkdir my_graphs
+cd my_graphs
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
 pip install graphviagent
 ```
 
-From a clone:
+From a clone of this repo:
 
 ```bash
 python3 -m venv .venv
@@ -18,11 +30,54 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+## First pipeline
+
+Installing the package does not copy example files into your project. Add one yourself. The file name must end with `_pipeline.py`.
+
+Save this as `echo_pipeline.py`:
+
+```python
+from typing import TypedDict
+
+from langgraph.graph import END, START, StateGraph
+
+EXAMPLES = [{"text": "hello"}, {"text": "GraphVIAgent"}]
+
+
+class EchoState(TypedDict):
+    text: str
+    echoed: str
+    length: int
+
+
+def echo(state: EchoState) -> dict:
+    text = state["text"]
+    return {
+        "echoed": text[::-1],
+        "length": len(text),
+        "reason": f"reversed {len(text)} chars",
+    }
+
+
+def build_graph():
+    graph = StateGraph(EchoState)
+    graph.add_node("echo", echo)
+    graph.add_edge(START, "echo")
+    graph.add_edge("echo", END)
+    return graph.compile()
+```
+
+`EXAMPLES` is optional. It prefills the input box in the UI.
+
 ## List pipelines
+
+From the folder that contains the file:
 
 ```bash
 graphviagent .
 ```
+
+You should see `echo_pipeline.py  ok  examples=2`. If you see `no *_pipeline.py`, you are in the wrong folder or the file name is wrong.
 
 ## Open the UI
 
@@ -30,12 +85,34 @@ graphviagent .
 graphviagent serve .
 ```
 
-Then open [http://127.0.0.1:8765](http://127.0.0.1:8765).
+Then open [http://127.0.0.1:8765](http://127.0.0.1:8765). Leave the terminal running. Another port: `graphviagent serve . --port 9000`.
 
-- **Trace** — run a pipeline, inspect the unrolled graph, replay a node
-- **Pipelines** — Airflow-style grid of recent runs
+Restart `serve` after you add a new `*_pipeline.py` file.
 
-Replay and Call node invoke the node again. Side effects will fire.
+### Trace
+
+1. Select the pipeline in the sidebar.
+2. Edit the JSON input, or keep an example.
+3. Click **Run**.
+4. Single-click a node to select it. Double-click to open **Node view** (input and the keys that node returned).
+
+**Replay step** runs only the selected node again. **Replay from** runs that node and every recorded step after it. Both invoke the real node. Side effects will fire.
+
+### Pipelines
+
+Airflow-style grid: duration bars, then task × run (`✓` / `✕` / `○`). Click the name to open Trace. Click a bar, cell, or ▶ to open that run.
+
+Failed nodes stay in history and show as red.
+
+## Where runs are stored
+
+Runs are written under the folder you served:
+
+```text
+my_graphs/.graphviagent/runs/echo_pipeline/<id>.json
+```
+
+Add `.graphviagent/` to `.gitignore`.
 
 ## Pipeline contract
 
@@ -45,13 +122,13 @@ A file is viewable if it is named `*_pipeline.py` and exposes one of:
 - compiled `GRAPH` or `app`
 - `__graph__ = "factory_name"`
 
-Optional: `EXAMPLES = [{"some": "input"}]` to prefill the form.
+Optional: `EXAMPLES = [{"some": "input"}]`.
 
 If a node update includes `decisions`, `reason`, or `choice`, the UI labels the branch. That is optional.
 
-## Examples
+## Examples in this repo
 
-This repo includes sample graphs:
+After a clone:
 
 ```bash
 graphviagent serve examples
@@ -64,38 +141,3 @@ graphviagent serve examples
 - `examples/stats_pipeline.py` — mean of a list; empty `values` raises
 - `examples/grade_pipeline.py` — score / max; `maximum: 0` raises
 - `examples/convert_pipeline.py` — unit conversion; `per_unit` with `value: 0` or an unknown unit raises
-
-Failed runs are saved. The failing node is marked on the graph and shows as a red cell on the Pipelines grid.
-
-## Publish to PyPI
-
-A push to `prod` builds the package and uploads it to PyPI. PyPI rejects the same version twice, so bump `version` in `pyproject.toml` before you merge.
-
-### One-time PyPI setup
-
-1. Create a [PyPI account](https://pypi.org/account/register/).
-2. Open [Trusted publishers](https://pypi.org/manage/account/publishing/).
-3. Add a **pending publisher** (the project does not exist on PyPI yet):
-   - **PyPI project name:** `graphviagent`
-   - **Owner:** `antsticky`
-   - **Repository:** `graphviagent`
-   - **Workflow:** `publish.yml`
-   - **Environment name:** `pypi`
-4. On GitHub: **Settings → Environments → New environment** named `pypi`.
-
-Values must match the Action token exactly. Common miss: putting `.github/workflows/publish.yml` in **Workflow** — use only `publish.yml`. Leave nothing blank in **Environment name**.
-
-If the job fails with `invalid-publisher`, the pending publisher is missing or does not match. Fix it, then **Re-run all jobs** on the failed Action. You do not need a new commit.
-
-No API token. The workflow uses OpenID trusted publishing.
-
-### Release
-
-```bash
-# on dev, bump version in pyproject.toml, then:
-git checkout prod
-git merge dev
-git push origin prod
-```
-
-The [Publish](https://github.com/antsticky/graphviagent/actions) workflow runs `python -m build` and uploads only if that version is not already on PyPI.

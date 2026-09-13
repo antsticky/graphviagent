@@ -4,6 +4,11 @@ on:
   push:
     branches:
       - prod
+    paths:
+      - "src/**"
+      - "pyproject.toml"
+      - "CHANGELOG.md"
+      - ".github/workflows/publish.yml"
 
 jobs:
   pypi:

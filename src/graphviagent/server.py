@@ -437,20 +437,23 @@ PAGE = r"""<!DOCTYPE html>
     }
     .spark {
       display: flex; align-items: flex-end; gap: 2px;
-      width: 28px; height: 22px; align-self: center;
+      width: 42px; height: 22px; align-self: center;
     }
     .spark i {
       flex: 1; min-width: 4px; border-radius: 1px 1px 0 0;
       background: #6366f1;
     }
     .spark i.mb { background: #06b6d4; }
+    .spark i.peak { background: #38bdf8; }
+    .spark i.prompt { background: #86efac; }
+    .spark i.completion { background: #34d399; }
     .spark i.tokens { background: #86efac; }
     .spark i.tool { background: #f59e0b; }
     .spark i.zero { opacity: 0.22; }
-    .gantt-tip .tip-spark { width: 72px; height: 28px; margin-top: 8px; }
+    .gantt-tip .tip-spark { width: 96px; height: 28px; margin-top: 8px; }
     .spark-wrap { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
     .spark-labels {
-      display: flex; gap: 2px; width: 72px;
+      display: flex; gap: 2px; width: 96px;
       color: var(--muted); font-size: 8px; letter-spacing: 0;
     }
     .spark-labels span { flex: 1; text-align: center; }
@@ -466,6 +469,9 @@ PAGE = r"""<!DOCTYPE html>
       background: #6366f1;
     }
     .spark-legend i.mb { background: #06b6d4; }
+    .spark-legend i.peak { background: #38bdf8; }
+    .spark-legend i.prompt { background: #86efac; }
+    .spark-legend i.completion { background: #34d399; }
     .spark-legend i.tokens { background: #86efac; }
     .spark-legend i.tool { background: #f59e0b; }
     .pane-title { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
@@ -803,7 +809,9 @@ PAGE = r"""<!DOCTYPE html>
               <span class="spark-legend" title="Bars are relative to the max of that metric in this run">
                 <span><i class="ms"></i> time</span>
                 <span><i class="mb"></i> mem</span>
-                <span><i class="tokens"></i> tok</span>
+                <span><i class="peak"></i> peak</span>
+                <span><i class="prompt"></i> in</span>
+                <span><i class="completion"></i> out</span>
                 <span><i class="tool"></i> tool</span>
               </span>
               <span id="stepsMs"></span>
@@ -919,25 +927,34 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function stepMetrics(step) {
-      if (!step) return { ms: null, mb: null, tokens: null, prompt: null, completion: null, tool: null };
+      if (!step) {
+        return {
+          ms: null, mb: null, peak: null, tokens: null,
+          prompt: null, completion: null, toolTokens: null, tool: null,
+        };
+      }
       const tokens = step.tokens;
       return {
         ms: step.elapsed_ms != null ? Number(step.elapsed_ms) : null,
         mb: step.memory_mb != null ? Number(step.memory_mb) : null,
+        peak: step.memory_peak_mb != null ? Number(step.memory_peak_mb) : null,
         tokens: tokens ? Number(tokens.total || 0) : null,
         prompt: tokens ? Number(tokens.prompt || 0) : null,
         completion: tokens ? Number(tokens.completion || 0) : null,
+        toolTokens: tokens && tokens.tool != null ? Number(tokens.tool) : null,
         tool: step.tool_latency_ms != null ? Number(step.tool_latency_ms) : null,
       };
     }
 
     function runMetricMax(run) {
-      const maxes = { ms: 0, mb: 0, tokens: 0, tool: 0 };
+      const maxes = { ms: 0, mb: 0, peak: 0, prompt: 0, completion: 0, tool: 0 };
       ((run && run.steps) || []).forEach((step) => {
         const metrics = stepMetrics(step);
         maxes.ms = Math.max(maxes.ms, metrics.ms || 0);
         maxes.mb = Math.max(maxes.mb, metrics.mb || 0);
-        maxes.tokens = Math.max(maxes.tokens, metrics.tokens || 0);
+        maxes.peak = Math.max(maxes.peak, metrics.peak || 0);
+        maxes.prompt = Math.max(maxes.prompt, metrics.prompt || 0);
+        maxes.completion = Math.max(maxes.completion, metrics.completion || 0);
         maxes.tool = Math.max(maxes.tool, metrics.tool || 0);
       });
       return maxes;
@@ -945,13 +962,15 @@ PAGE = r"""<!DOCTYPE html>
 
     function formatTokens(metrics) {
       if (!metrics || metrics.tokens == null) return "—";
-      return (metrics.prompt || 0) + " + " + (metrics.completion || 0) + " tok";
+      return (metrics.prompt || 0) + " in + " + (metrics.completion || 0) + " out";
     }
 
     function sparkValueLabel(key, metrics) {
       if (key === "ms") return formatElapsed(metrics.ms) || "—";
       if (key === "mb") return formatMemory(metrics.mb);
-      if (key === "tokens") return formatTokens(metrics);
+      if (key === "peak") return formatMemory(metrics.peak);
+      if (key === "prompt") return metrics.prompt == null ? "—" : metrics.prompt + " tok";
+      if (key === "completion") return metrics.completion == null ? "—" : metrics.completion + " tok";
       return metrics.tool != null ? formatElapsed(metrics.tool) : "—";
     }
 
@@ -959,12 +978,15 @@ PAGE = r"""<!DOCTYPE html>
       const keys = [
         ["ms", "ms", "time"],
         ["mb", "mb", "mem"],
-        ["tokens", "tokens", "tok"],
+        ["peak", "peak", "peak"],
+        ["prompt", "prompt", "in"],
+        ["completion", "completion", "out"],
         ["tool", "tool", "tool"],
       ];
+      const memScale = Math.max((maxes && maxes.mb) || 0, (maxes && maxes.peak) || 0);
       const bars = keys.map(([key, cls, label]) => {
         const value = metrics[key];
-        const max = (maxes && maxes[key]) || 0;
+        const max = (key === "mb" || key === "peak") ? memScale : ((maxes && maxes[key]) || 0);
         const missing = value == null || !Number.isFinite(value);
         const ratio = !missing && max > 0 ? value / max : 0;
         const height = missing || value === 0 ? 2 : Math.max(3, Math.round(ratio * 22));
@@ -1552,8 +1574,10 @@ PAGE = r"""<!DOCTYPE html>
       $("nvMeta").textContent = [
         step.step_id,
         formatElapsed(step.elapsed_ms) || "—",
-        formatMemory(metrics.mb),
+        formatMemory(metrics.mb) + " mem",
+        formatMemory(metrics.peak) + " peak",
         formatTokens(metrics),
+        metrics.toolTokens ? metrics.toolTokens + " tool tok" : "",
         metrics.tool != null ? formatElapsed(metrics.tool) + " tool" : "— tool",
         step.error ? "error" : "",
       ].filter(Boolean).join("  ·  ");
@@ -1824,9 +1848,22 @@ PAGE = r"""<!DOCTYPE html>
         events.push({ step, start: span.start, end: span.end });
         cursor = Number.isFinite(Number(step.ended_ms)) ? Number(step.ended_ms) : span.end;
       });
-      const total = Math.max(0.1, ...events.map((event) => event.end), cursor);
       const groups = [];
       const index = {};
+      const origin = events.length ? Math.min(...events.map((event) => event.start)) : 0;
+      const last = events.length ? Math.max(...events.map((event) => event.end)) : cursor;
+      const ordered = events.slice().sort((a, b) => a.start - b.start || a.end - b.end);
+      ordered.forEach((event, i) => {
+        let nextStart = null;
+        for (let j = i + 1; j < ordered.length; j += 1) {
+          if (ordered[j].start > event.start) {
+            nextStart = ordered[j].start;
+            break;
+          }
+        }
+        event.visualStart = event.start;
+        event.visualEnd = nextStart != null ? nextStart : Math.max(event.end, last);
+      });
       events.forEach((event) => {
         const name = event.step.node || "node";
         if (index[name] == null) {
@@ -1834,14 +1871,17 @@ PAGE = r"""<!DOCTYPE html>
           groups.push({ node: name, lanes: [[]] });
         }
         const group = groups[index[name]];
-        let lane = group.lanes.find((row) => row.every((other) => event.end <= other.start || event.start >= other.end));
+        const from = event.visualStart;
+        const to = event.visualEnd;
+        let lane = group.lanes.find((row) => row.every((other) => to <= other.visualStart || from >= other.visualEnd));
         if (!lane) {
           lane = [];
           group.lanes.push(lane);
         }
         lane.push(event);
       });
-      return { groups, total };
+      const total = Math.max(0.1, last - origin);
+      return { groups, total, origin };
     }
 
     function ensureGanttTip() {
@@ -1861,19 +1901,22 @@ PAGE = r"""<!DOCTYPE html>
       if (tip) tip.hidden = true;
     }
 
-    function ganttTipHtml(event, maxes) {
+    function ganttTipHtml(event, maxes, origin) {
       const step = event.step;
       const kind = step.error ? "error" : stepKind(step.node);
       const kindLabel = kind === "decision" ? "decision" : kind === "loop" ? "loop" : kind === "error" ? "error" : "node";
       const startAt = formatTime(step.started_at);
       const endAt = formatTime(step.ended_at);
       const metrics = stepMetrics(step);
+      const originMs = Number(origin) || 0;
       const rows = [
-        ["Start", formatElapsed(event.start) + (startAt ? "  ·  " + startAt : "")],
-        ["End", formatElapsed(event.end) + (endAt ? "  ·  " + endAt : "")],
+        ["Start", formatElapsed(event.start - originMs) + (startAt ? "  ·  " + startAt : "")],
+        ["End", formatElapsed(event.end - originMs) + (endAt ? "  ·  " + endAt : "")],
         ["Duration", formatElapsed(event.end - event.start) || formatElapsed(step.elapsed_ms) || "—"],
         ["Memory", formatMemory(metrics.mb)],
+        ["Peak", formatMemory(metrics.peak)],
         ["Tokens", formatTokens(metrics)],
+        ["Tool tokens", metrics.toolTokens == null ? "—" : String(metrics.toolTokens)],
         ["Tool", metrics.tool != null ? formatElapsed(metrics.tool) : "—"],
         ["Kind", kindLabel],
       ];
@@ -1904,8 +1947,8 @@ PAGE = r"""<!DOCTYPE html>
       tip.style.top = Math.max(8, y) + "px";
     }
 
-    function bindGanttHover(bar, event, maxes) {
-      const html = ganttTipHtml(event, maxes);
+    function bindGanttHover(bar, event, maxes, origin) {
+      const html = ganttTipHtml(event, maxes, origin);
       bar.addEventListener("mouseenter", (mouse) => placeGanttTip(mouse, html));
       bar.addEventListener("mousemove", (mouse) => placeGanttTip(mouse, html));
       bar.addEventListener("mouseleave", hideGanttTip);
@@ -1944,12 +1987,17 @@ PAGE = r"""<!DOCTYPE html>
             bar.type = "button";
             bar.className = "gantt-bar" + (kind ? " " + kind : "");
             bar.dataset.stepId = event.step.step_id;
-            const left = (event.start / model.total) * 100;
-            const width = Math.max(((event.end - event.start) / model.total) * 100, 1.2);
-            bar.style.left = left + "%";
+            const from = event.visualStart != null ? event.visualStart : event.start;
+            const to = event.visualEnd != null ? event.visualEnd : event.end;
+            const width = Math.max(((to - from) / model.total) * 100, 0.8);
+            const left = Math.min(
+              ((from - model.origin) / model.total) * 100,
+              100 - width,
+            );
+            bar.style.left = Math.max(0, left) + "%";
             bar.style.width = width + "%";
             bindStepActions(bar, event.step);
-            bindGanttHover(bar, event, maxes);
+            bindGanttHover(bar, event, maxes, model.origin);
             track.appendChild(bar);
           });
           row.appendChild(label);

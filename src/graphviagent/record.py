@@ -66,13 +66,15 @@ class _MemoryTrace:
         self.own = not tracemalloc.is_tracing()
         if self.own:
             tracemalloc.start()
-        self.prev = tracemalloc.get_traced_memory()[0]
-
-    def snapshot(self) -> float:
         current, _peak = tracemalloc.get_traced_memory()
-        delta = max(0, current - self.prev)
         self.prev = current
-        return _bytes_to_mb(delta)
+
+    def snapshot(self) -> tuple[float, float]:
+        current, peak = tracemalloc.get_traced_memory()
+        delta = max(0, current - self.prev)
+        peak_from_baseline = max(0, peak - self.prev)
+        self.prev = current
+        return _bytes_to_mb(delta), _bytes_to_mb(max(delta, peak_from_baseline))
 
     def close(self) -> None:
         if self.own and tracemalloc.is_tracing():
@@ -94,29 +96,34 @@ def _tokens_from_mapping(obj: Any) -> tuple[int, int]:
     return _as_int(prompt), _as_int(completion)
 
 
+def _usage_from_obj(obj: Any) -> tuple[int, int]:
+    if not isinstance(obj, dict):
+        return 0, 0
+    sources: list[dict] = []
+    usage_meta = obj.get("usage_metadata")
+    if isinstance(usage_meta, dict):
+        sources.append(usage_meta)
+    meta = obj.get("response_metadata")
+    if isinstance(meta, dict):
+        token_usage = meta.get("token_usage") or meta.get("usage")
+        if isinstance(token_usage, dict):
+            sources.append(token_usage)
+    usage = obj.get("usage")
+    if isinstance(usage, dict):
+        sources.append(usage)
+    if not sources:
+        return 0, 0
+    return _tokens_from_mapping(sources[0])
+
+
 def extract_tokens(update: Any) -> dict[str, int]:
     prompt = 0
     completion = 0
+    tool = 0
 
     def add(obj: Any) -> None:
         nonlocal prompt, completion
-        if not isinstance(obj, dict):
-            return
-        sources: list[dict] = []
-        usage_meta = obj.get("usage_metadata")
-        if isinstance(usage_meta, dict):
-            sources.append(usage_meta)
-        meta = obj.get("response_metadata")
-        if isinstance(meta, dict):
-            token_usage = meta.get("token_usage") or meta.get("usage")
-            if isinstance(token_usage, dict):
-                sources.append(token_usage)
-        usage = obj.get("usage")
-        if isinstance(usage, dict):
-            sources.append(usage)
-        if not sources:
-            return
-        extra_prompt, extra_completion = _tokens_from_mapping(sources[0])
+        extra_prompt, extra_completion = _usage_from_obj(obj)
         prompt += extra_prompt
         completion += extra_completion
 
@@ -130,7 +137,18 @@ def extract_tokens(update: Any) -> dict[str, int]:
             kwargs = message.get("additional_kwargs")
             if isinstance(kwargs, dict):
                 add(kwargs)
-    return {"prompt": prompt, "completion": completion, "total": prompt + completion}
+            if (message.get("role") or message.get("type")) == "tool":
+                tool_prompt, tool_completion = _usage_from_obj(message)
+                extra_prompt, extra_completion = (0, 0)
+                if isinstance(kwargs, dict):
+                    extra_prompt, extra_completion = _usage_from_obj(kwargs)
+                tool += tool_prompt + tool_completion + extra_prompt + extra_completion
+    return {
+        "prompt": prompt,
+        "completion": completion,
+        "total": prompt + completion,
+        "tool": tool,
+    }
 
 
 def _tool_call_name(call: dict) -> str:
@@ -166,10 +184,16 @@ def extract_tool_metrics(update: Any, elapsed_ms: float | None) -> tuple[list[di
     return tools, round(sum(known), 2) if known else None
 
 
-def _attach_metrics(step: dict, update: Any, memory_mb: float) -> dict:
+def _attach_metrics(
+    step: dict,
+    update: Any,
+    memory_mb: float,
+    memory_peak_mb: float = 0.0,
+) -> dict:
     tokens = extract_tokens(update)
     tools, tool_latency_ms = extract_tool_metrics(update, step.get("elapsed_ms"))
     step["memory_mb"] = round(float(memory_mb or 0), 4)
+    step["memory_peak_mb"] = round(float(memory_peak_mb or 0), 4)
     step["tokens"] = tokens
     step["tools"] = jsonable(tools)
     step["tool_latency_ms"] = tool_latency_ms
@@ -208,7 +232,7 @@ def _install_node_probes(app: Any, clock0: float) -> tuple[list[dict], Any]:
                 try:
                     return orig(*args, **kwargs)
                 finally:
-                    memory_mb = memory.snapshot()
+                    memory_mb, memory_peak_mb = memory.snapshot()
                     memory.close()
                     ended_ms = round((time.perf_counter() - clock0) * 1000, 2)
                     probes.append(
@@ -218,6 +242,7 @@ def _install_node_probes(app: Any, clock0: float) -> tuple[list[dict], Any]:
                             "ended_ms": ended_ms,
                             "elapsed_ms": round(max(0.0, ended_ms - started_ms), 2),
                             "memory_mb": memory_mb,
+                            "memory_peak_mb": memory_peak_mb,
                         }
                     )
 
@@ -467,9 +492,11 @@ def record_run(
             started_ms = float(probe["started_ms"])
             ended_ms = float(probe["ended_ms"])
             memory_mb = float(probe["memory_mb"])
+            memory_peak_mb = float(probe.get("memory_peak_mb") or 0)
         else:
             started_ms = _infer_started_ms(node, ended_ms, completed_end, edges)
             memory_mb = 0.0
+            memory_peak_mb = 0.0
         step = {
             "step_id": f"{node}#{visits[node]}",
             "index": index,
@@ -482,7 +509,7 @@ def record_run(
             "unused": unused_targets(node, next_node, edges),
         }
         _attach_timing(step, started_ms=started_ms, ended_ms=ended_ms, wall_start=wall0)
-        _attach_metrics(step, update, memory_mb)
+        _attach_metrics(step, update, memory_mb, memory_peak_mb)
         if failed:
             step["error"] = str(update.get("error"))
         steps.append(step)
@@ -534,7 +561,7 @@ def replay_step(
         run_error = _format_error(exc)
         update = {"error": run_error}
     finally:
-        memory_mb = memory.snapshot()
+        memory_mb, memory_peak_mb = memory.snapshot()
         memory.close()
     ended_ms = _elapsed_ms(clock0)
     state_out = copy.deepcopy(state_in) if run_error else merge_state(state_in, update)
@@ -550,7 +577,7 @@ def replay_step(
         "unused": [],
     }
     _attach_timing(new_step, started_ms=0, ended_ms=ended_ms, wall_start=wall0)
-    _attach_metrics(new_step, update, memory_mb)
+    _attach_metrics(new_step, update, memory_mb, memory_peak_mb)
     if run_error:
         new_step["error"] = run_error
     return {
@@ -591,7 +618,7 @@ def resume_from_step(
         except Exception:
             pass
 
-    raw: list[tuple[str, dict, float, float]] = []
+    raw: list[tuple[str, dict, float, float, float]] = []
     current = state
     run_error: str | None = None
     clock0 = time.perf_counter()
@@ -605,16 +632,18 @@ def resume_from_step(
         except Exception as exc:
             run_error = _format_error(exc)
             update = {"error": run_error}
-            raw.append((recorded["node"], update, _elapsed_ms(clock0), memory.snapshot()))
+            memory_mb, memory_peak_mb = memory.snapshot()
+            raw.append((recorded["node"], update, _elapsed_ms(clock0), memory_mb, memory_peak_mb))
             memory.close()
             break
-        raw.append((recorded["node"], update, _elapsed_ms(clock0), memory.snapshot()))
+        memory_mb, memory_peak_mb = memory.snapshot()
+        raw.append((recorded["node"], update, _elapsed_ms(clock0), memory_mb, memory_peak_mb))
         memory.close()
         current = merge_state(current, update)
 
     current = copy.deepcopy(state)
     prev_end = 0.0
-    for index, (node, update, ended_ms, memory_mb) in enumerate(raw):
+    for index, (node, update, ended_ms, memory_mb, memory_peak_mb) in enumerate(raw):
         visits[node] = visits.get(node, 0) + 1
         next_node = raw[index + 1][0] if index + 1 < len(raw) else None
         state_in = copy.deepcopy(current)
@@ -633,7 +662,7 @@ def resume_from_step(
             "unused": unused_targets(node, next_node, edges),
         }
         _attach_timing(step, started_ms=started_ms, ended_ms=ended_ms, wall_start=wall0)
-        _attach_metrics(step, update, memory_mb)
+        _attach_metrics(step, update, memory_mb, memory_peak_mb)
         if failed:
             step["error"] = str(update.get("error"))
         steps.append(step)

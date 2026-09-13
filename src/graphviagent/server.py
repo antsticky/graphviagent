@@ -418,7 +418,7 @@ PAGE = r"""<!DOCTYPE html>
       flex: 1; min-height: 0; overflow: auto;
     }
     .step {
-      display: grid; grid-template-columns: 14px 1fr auto; gap: 8px;
+      display: grid; grid-template-columns: 14px 1fr auto auto; gap: 8px;
       padding: 8px 8px 8px 0; border-radius: 8px; cursor: pointer;
     }
     .step:hover { background: #22222a; }
@@ -435,6 +435,39 @@ PAGE = r"""<!DOCTYPE html>
       color: var(--muted); font-variant-numeric: tabular-nums;
       font-size: 11px; white-space: nowrap;
     }
+    .spark {
+      display: flex; align-items: flex-end; gap: 2px;
+      width: 28px; height: 22px; align-self: center;
+    }
+    .spark i {
+      flex: 1; min-width: 4px; border-radius: 1px 1px 0 0;
+      background: #6366f1;
+    }
+    .spark i.mb { background: #06b6d4; }
+    .spark i.tokens { background: #86efac; }
+    .spark i.tool { background: #f59e0b; }
+    .spark i.zero { opacity: 0.22; }
+    .gantt-tip .tip-spark { width: 72px; height: 28px; margin-top: 8px; }
+    .spark-wrap { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+    .spark-labels {
+      display: flex; gap: 2px; width: 72px;
+      color: var(--muted); font-size: 8px; letter-spacing: 0;
+    }
+    .spark-labels span { flex: 1; text-align: center; }
+    .steps-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+    .spark-legend {
+      display: flex; align-items: center; gap: 7px;
+      color: var(--muted); font-size: 10px; font-weight: 400;
+      text-transform: none; letter-spacing: 0;
+    }
+    .spark-legend span { display: inline-flex; align-items: center; gap: 3px; }
+    .spark-legend i {
+      width: 6px; height: 8px; border-radius: 1px;
+      background: #6366f1;
+    }
+    .spark-legend i.mb { background: #06b6d4; }
+    .spark-legend i.tokens { background: #86efac; }
+    .spark-legend i.tool { background: #f59e0b; }
     .pane-title { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
     pre, .json {
       background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
@@ -765,7 +798,17 @@ PAGE = r"""<!DOCTYPE html>
           <div id="diagram" class="empty">Select a run to inspect the unrolled path. Double-click a node to open its view.</div>
         </div>
         <div class="pane">
-          <h2 class="pane-title">Steps <span id="stepsMs"></span></h2>
+          <h2 class="pane-title">Steps
+            <span class="steps-meta">
+              <span class="spark-legend" title="Bars are relative to the max of that metric in this run">
+                <span><i class="ms"></i> time</span>
+                <span><i class="mb"></i> mem</span>
+                <span><i class="tokens"></i> tok</span>
+                <span><i class="tool"></i> tool</span>
+              </span>
+              <span id="stepsMs"></span>
+            </span>
+          </h2>
           <div id="steps" class="waterfall"></div>
           <h2>Final state</h2>
           <div id="state" class="json"></div>
@@ -865,6 +908,75 @@ PAGE = r"""<!DOCTYPE html>
       if (!Number.isFinite(value)) return "";
       if (value < 1000) return (Math.round(value * 10) / 10) + "ms";
       return (value / 1000).toFixed(2) + "s";
+    }
+
+    function formatMemory(mb) {
+      if (mb == null || !Number.isFinite(Number(mb))) return "—";
+      const value = Number(mb);
+      if (value < 0.001) return "0 MB";
+      if (value < 1) return value.toFixed(3) + " MB";
+      return value.toFixed(2) + " MB";
+    }
+
+    function stepMetrics(step) {
+      if (!step) return { ms: null, mb: null, tokens: null, prompt: null, completion: null, tool: null };
+      const tokens = step.tokens;
+      return {
+        ms: step.elapsed_ms != null ? Number(step.elapsed_ms) : null,
+        mb: step.memory_mb != null ? Number(step.memory_mb) : null,
+        tokens: tokens ? Number(tokens.total || 0) : null,
+        prompt: tokens ? Number(tokens.prompt || 0) : null,
+        completion: tokens ? Number(tokens.completion || 0) : null,
+        tool: step.tool_latency_ms != null ? Number(step.tool_latency_ms) : null,
+      };
+    }
+
+    function runMetricMax(run) {
+      const maxes = { ms: 0, mb: 0, tokens: 0, tool: 0 };
+      ((run && run.steps) || []).forEach((step) => {
+        const metrics = stepMetrics(step);
+        maxes.ms = Math.max(maxes.ms, metrics.ms || 0);
+        maxes.mb = Math.max(maxes.mb, metrics.mb || 0);
+        maxes.tokens = Math.max(maxes.tokens, metrics.tokens || 0);
+        maxes.tool = Math.max(maxes.tool, metrics.tool || 0);
+      });
+      return maxes;
+    }
+
+    function formatTokens(metrics) {
+      if (!metrics || metrics.tokens == null) return "—";
+      return (metrics.prompt || 0) + " + " + (metrics.completion || 0) + " tok";
+    }
+
+    function sparkValueLabel(key, metrics) {
+      if (key === "ms") return formatElapsed(metrics.ms) || "—";
+      if (key === "mb") return formatMemory(metrics.mb);
+      if (key === "tokens") return formatTokens(metrics);
+      return metrics.tool != null ? formatElapsed(metrics.tool) : "—";
+    }
+
+    function sparkBars(metrics, maxes, extraClass) {
+      const keys = [
+        ["ms", "ms", "time"],
+        ["mb", "mb", "mem"],
+        ["tokens", "tokens", "tok"],
+        ["tool", "tool", "tool"],
+      ];
+      const bars = keys.map(([key, cls, label]) => {
+        const value = metrics[key];
+        const max = (maxes && maxes[key]) || 0;
+        const missing = value == null || !Number.isFinite(value);
+        const ratio = !missing && max > 0 ? value / max : 0;
+        const height = missing || value === 0 ? 2 : Math.max(3, Math.round(ratio * 22));
+        const tip = label + "  " + sparkValueLabel(key, metrics);
+        return '<i class="' + cls + (missing || value === 0 ? " zero" : "") +
+          '" style="height:' + height + 'px" title="' + escapeHtml(tip) + '"></i>';
+      });
+      const labeled = extraClass ? '<div class="spark-labels">' +
+        keys.map((item) => "<span>" + item[2] + "</span>").join("") + "</div>" : "";
+      return '<div class="spark-wrap">' +
+        '<div class="spark' + (extraClass ? " " + extraClass : "") + '">' + bars.join("") + "</div>" +
+        labeled + "</div>";
     }
 
     function truncateJson(value) {
@@ -1436,9 +1548,13 @@ PAGE = r"""<!DOCTYPE html>
         return;
       }
       $("nvTitle").textContent = step.node || "Node";
+      const metrics = stepMetrics(step);
       $("nvMeta").textContent = [
         step.step_id,
-        formatElapsed(step.elapsed_ms),
+        formatElapsed(step.elapsed_ms) || "—",
+        formatMemory(metrics.mb),
+        formatTokens(metrics),
+        metrics.tool != null ? formatElapsed(metrics.tool) + " tool" : "— tool",
         step.error ? "error" : "",
       ].filter(Boolean).join("  ·  ");
       $("ioName").textContent = formatElapsed(step.elapsed_ms);
@@ -1745,16 +1861,20 @@ PAGE = r"""<!DOCTYPE html>
       if (tip) tip.hidden = true;
     }
 
-    function ganttTipHtml(event) {
+    function ganttTipHtml(event, maxes) {
       const step = event.step;
       const kind = step.error ? "error" : stepKind(step.node);
       const kindLabel = kind === "decision" ? "decision" : kind === "loop" ? "loop" : kind === "error" ? "error" : "node";
       const startAt = formatTime(step.started_at);
       const endAt = formatTime(step.ended_at);
+      const metrics = stepMetrics(step);
       const rows = [
         ["Start", formatElapsed(event.start) + (startAt ? "  ·  " + startAt : "")],
         ["End", formatElapsed(event.end) + (endAt ? "  ·  " + endAt : "")],
-        ["Duration", formatElapsed(event.end - event.start) || formatElapsed(step.elapsed_ms)],
+        ["Duration", formatElapsed(event.end - event.start) || formatElapsed(step.elapsed_ms) || "—"],
+        ["Memory", formatMemory(metrics.mb)],
+        ["Tokens", formatTokens(metrics)],
+        ["Tool", metrics.tool != null ? formatElapsed(metrics.tool) : "—"],
         ["Kind", kindLabel],
       ];
       return (
@@ -1763,6 +1883,7 @@ PAGE = r"""<!DOCTYPE html>
         rows.map((row) =>
           '<div class="tip-row"><span>' + row[0] + "</span><b>" + escapeHtml(row[1]) + "</b></div>"
         ).join("") +
+        sparkBars(metrics, maxes, "tip-spark") +
         (step.reason ? '<div class="tip-why">' + escapeHtml(step.reason) + "</div>" : "") +
         (step.error ? '<div class="tip-err">' + escapeHtml(step.error) + "</div>" : "")
       );
@@ -1783,8 +1904,8 @@ PAGE = r"""<!DOCTYPE html>
       tip.style.top = Math.max(8, y) + "px";
     }
 
-    function bindGanttHover(bar, event) {
-      const html = ganttTipHtml(event);
+    function bindGanttHover(bar, event, maxes) {
+      const html = ganttTipHtml(event, maxes);
       bar.addEventListener("mouseenter", (mouse) => placeGanttTip(mouse, html));
       bar.addEventListener("mousemove", (mouse) => placeGanttTip(mouse, html));
       bar.addEventListener("mouseleave", hideGanttTip);
@@ -1800,6 +1921,7 @@ PAGE = r"""<!DOCTYPE html>
         return;
       }
       const model = ganttModel(run);
+      const maxes = runMetricMax(run);
       const ticks = [0, 0.25, 0.5, 0.75, 1].map((part) => formatElapsed(model.total * part));
       const flow = document.createElement("div");
       flow.className = "gflow gantt";
@@ -1827,7 +1949,7 @@ PAGE = r"""<!DOCTYPE html>
             bar.style.left = left + "%";
             bar.style.width = width + "%";
             bindStepActions(bar, event.step);
-            bindGanttHover(bar, event);
+            bindGanttHover(bar, event, maxes);
             track.appendChild(bar);
           });
           row.appendChild(label);
@@ -1915,7 +2037,11 @@ PAGE = r"""<!DOCTYPE html>
       steps.innerHTML = "";
       setJson($("state"), run ? run.result : {});
       $("ascii").textContent = run ? run.ascii : "";
-      $("stepsMs").textContent = run && run.elapsed_ms != null ? formatElapsed(run.elapsed_ms) : "";
+      const nodeMs = ((run && run.steps) || []).reduce(
+        (total, step) => total + (Number(step.elapsed_ms) || 0),
+        0,
+      );
+      $("stepsMs").textContent = run ? formatElapsed(nodeMs) : "";
       if (!run) {
         selectedStep = null;
         renderGraph(null);
@@ -1926,6 +2052,7 @@ PAGE = r"""<!DOCTYPE html>
       }
       const selected = (run.steps || []).find((step) => step.step_id === selectedStep);
       showStepIO(selected || null);
+      const maxes = runMetricMax(run);
       (run.steps || []).forEach((step) => {
         const row = document.createElement("div");
         row.className = "step" + (selectedStep === step.step_id ? " selected" : "") + (step.error ? " error" : "");
@@ -1937,6 +2064,7 @@ PAGE = r"""<!DOCTYPE html>
           '<div class="step-id">' + escapeHtml(step.step_id) + "</div>" +
           '<div class="step-name">' + escapeHtml(step.node) + "</div>" +
           '<div class="step-why">' + escapeHtml(step.reason || "") + "</div></div>" +
+          sparkBars(stepMetrics(step), maxes) +
           '<div class="step-ms">' + escapeHtml(elapsed) + "</div>";
         bindStepActions(row, step);
         steps.appendChild(row);

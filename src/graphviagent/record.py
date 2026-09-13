@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import time
+import tracemalloc
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -56,11 +57,198 @@ def _attach_timing(
     return step
 
 
+def _bytes_to_mb(value: float) -> float:
+    return round(max(0.0, float(value)) / (1024 * 1024), 4)
+
+
+class _MemoryTrace:
+    def __init__(self) -> None:
+        self.own = not tracemalloc.is_tracing()
+        if self.own:
+            tracemalloc.start()
+        self.prev = tracemalloc.get_traced_memory()[0]
+
+    def snapshot(self) -> float:
+        current, _peak = tracemalloc.get_traced_memory()
+        delta = max(0, current - self.prev)
+        self.prev = current
+        return _bytes_to_mb(delta)
+
+    def close(self) -> None:
+        if self.own and tracemalloc.is_tracing():
+            tracemalloc.stop()
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _tokens_from_mapping(obj: Any) -> tuple[int, int]:
+    if not isinstance(obj, dict):
+        return 0, 0
+    prompt = obj.get("input_tokens") or obj.get("prompt_tokens") or obj.get("prompt") or 0
+    completion = obj.get("output_tokens") or obj.get("completion_tokens") or obj.get("completion") or 0
+    return _as_int(prompt), _as_int(completion)
+
+
+def extract_tokens(update: Any) -> dict[str, int]:
+    prompt = 0
+    completion = 0
+
+    def add(obj: Any) -> None:
+        nonlocal prompt, completion
+        if not isinstance(obj, dict):
+            return
+        sources: list[dict] = []
+        usage_meta = obj.get("usage_metadata")
+        if isinstance(usage_meta, dict):
+            sources.append(usage_meta)
+        meta = obj.get("response_metadata")
+        if isinstance(meta, dict):
+            token_usage = meta.get("token_usage") or meta.get("usage")
+            if isinstance(token_usage, dict):
+                sources.append(token_usage)
+        usage = obj.get("usage")
+        if isinstance(usage, dict):
+            sources.append(usage)
+        if not sources:
+            return
+        extra_prompt, extra_completion = _tokens_from_mapping(sources[0])
+        prompt += extra_prompt
+        completion += extra_completion
+
+    if isinstance(update, dict):
+        add(update)
+        extra = update.get("additional_kwargs")
+        if isinstance(extra, dict):
+            add(extra)
+        for message in extract_messages(update):
+            add(message)
+            kwargs = message.get("additional_kwargs")
+            if isinstance(kwargs, dict):
+                add(kwargs)
+    return {"prompt": prompt, "completion": completion, "total": prompt + completion}
+
+
+def _tool_call_name(call: dict) -> str:
+    function = call.get("function") if isinstance(call.get("function"), dict) else {}
+    return str(call.get("name") or function.get("name") or call.get("tool") or "tool")
+
+
+def extract_tool_metrics(update: Any, elapsed_ms: float | None) -> tuple[list[dict], float | None]:
+    tools: list[dict] = []
+    requests = 0
+    results = 0
+    if isinstance(update, dict):
+        for call in update.get("tool_calls") or []:
+            if isinstance(call, dict):
+                tools.append({"name": _tool_call_name(call), "latency_ms": None})
+                requests += 1
+        for message in extract_messages(update):
+            for call in message.get("tool_calls") or []:
+                if isinstance(call, dict):
+                    tools.append({"name": _tool_call_name(call), "latency_ms": None})
+                    requests += 1
+            role = message.get("role") or message.get("type")
+            if role == "tool":
+                name = message.get("name") or message.get("tool") or "tool"
+                tools.append({"name": str(name), "latency_ms": None})
+                results += 1
+    tool_only = results > 0 and requests == 0
+    if tool_only and elapsed_ms is not None:
+        if len(tools) == 1:
+            tools[0]["latency_ms"] = elapsed_ms
+        return tools, round(float(elapsed_ms), 2)
+    known = [float(item["latency_ms"]) for item in tools if item.get("latency_ms") is not None]
+    return tools, round(sum(known), 2) if known else None
+
+
+def _attach_metrics(step: dict, update: Any, memory_mb: float) -> dict:
+    tokens = extract_tokens(update)
+    tools, tool_latency_ms = extract_tool_metrics(update, step.get("elapsed_ms"))
+    step["memory_mb"] = round(float(memory_mb or 0), 4)
+    step["tokens"] = tokens
+    step["tools"] = jsonable(tools)
+    step["tool_latency_ms"] = tool_latency_ms
+    return step
+
+
+def _invoke_target(node: Any) -> Any | None:
+    for attr in ("proc", "bound", "runnable"):
+        child = getattr(node, attr, None)
+        if child is not None and callable(getattr(child, "invoke", None)):
+            return child
+    if callable(getattr(node, "invoke", None)):
+        return node
+    return None
+
+
+def _install_node_probes(app: Any, clock0: float) -> tuple[list[dict], Any]:
+    probes: list[dict] = []
+    restores: list[tuple[Any, Any]] = []
+    nodes = getattr(app, "nodes", None)
+    if not isinstance(nodes, dict):
+        return probes, lambda: None
+
+    for name, node in nodes.items():
+        if str(name) in _SKIP_NODES:
+            continue
+        target = _invoke_target(node)
+        if target is None:
+            continue
+        original = target.invoke
+
+        def make_probed(node_name: str, orig: Any) -> Any:
+            def probed(*args: Any, **kwargs: Any) -> Any:
+                started_ms = round((time.perf_counter() - clock0) * 1000, 2)
+                memory = _MemoryTrace()
+                try:
+                    return orig(*args, **kwargs)
+                finally:
+                    memory_mb = memory.snapshot()
+                    memory.close()
+                    ended_ms = round((time.perf_counter() - clock0) * 1000, 2)
+                    probes.append(
+                        {
+                            "node": node_name,
+                            "started_ms": started_ms,
+                            "ended_ms": ended_ms,
+                            "elapsed_ms": round(max(0.0, ended_ms - started_ms), 2),
+                            "memory_mb": memory_mb,
+                        }
+                    )
+
+            return probed
+
+        target.invoke = make_probed(str(name), original)
+        restores.append((target, original))
+
+    def restore() -> None:
+        for target, original in restores:
+            target.invoke = original
+
+    return probes, restore
+
+
+def _take_probe(probes: list[dict], node: str) -> dict | None:
+    for index, probe in enumerate(probes):
+        if probe.get("node") == node:
+            return probes.pop(index)
+    return None
+
+
 def _run_span(steps: list[dict], fallback_ms: float) -> float:
     ends = [float(step.get("ended_ms") or 0) for step in steps]
     if ends:
         return round(max(ends), 2)
     return fallback_ms
+
+
+def _steps_elapsed(steps: list[dict]) -> float:
+    return round(sum(float(step.get("elapsed_ms") or 0) for step in steps), 2)
 
 
 def jsonable(obj: Any) -> Any:
@@ -245,12 +433,13 @@ def record_run(
     visits: dict[str, int] = {}
     edges = graph_edges(app)
 
-    stream = app.stream(user_input, config) if config else app.stream(user_input)
     raw_events: list[tuple[str, dict, float]] = []
     run_error: str | None = None
     clock0 = time.perf_counter()
     wall0 = time.time()
+    probes, restore_probes = _install_node_probes(app, clock0)
     try:
+        stream = app.stream(user_input, config) if config else app.stream(user_input)
         for event in stream:
             if not isinstance(event, dict) or not event:
                 continue
@@ -263,6 +452,8 @@ def record_run(
         failed = _guess_failed_node(raw_events, edges)
         if failed:
             raw_events.append((failed, {"error": run_error}, _elapsed_ms(clock0)))
+    finally:
+        restore_probes()
 
     completed_end: dict[str, float] = {}
     for index, (node, update, ended_ms) in enumerate(raw_events):
@@ -271,7 +462,14 @@ def record_run(
         state_in = copy.deepcopy(state)
         failed = isinstance(update, dict) and update.get("error")
         state_out = copy.deepcopy(state_in) if failed else merge_state(state, update)
-        started_ms = _infer_started_ms(node, ended_ms, completed_end, edges)
+        probe = _take_probe(probes, node)
+        if probe:
+            started_ms = float(probe["started_ms"])
+            ended_ms = float(probe["ended_ms"])
+            memory_mb = float(probe["memory_mb"])
+        else:
+            started_ms = _infer_started_ms(node, ended_ms, completed_end, edges)
+            memory_mb = 0.0
         step = {
             "step_id": f"{node}#{visits[node]}",
             "index": index,
@@ -284,6 +482,7 @@ def record_run(
             "unused": unused_targets(node, next_node, edges),
         }
         _attach_timing(step, started_ms=started_ms, ended_ms=ended_ms, wall_start=wall0)
+        _attach_metrics(step, update, memory_mb)
         if failed:
             step["error"] = str(update.get("error"))
         steps.append(step)
@@ -299,7 +498,7 @@ def record_run(
         "thread_id": run_id if has_checkpointer else None,
         "started_at": _iso_from_wall(wall0, 0),
         "ended_at": _iso_from_wall(wall0, _run_span(steps, _elapsed_ms(clock0))),
-        "elapsed_ms": _run_span(steps, _elapsed_ms(clock0)),
+        "elapsed_ms": _steps_elapsed(steps),
         "error": run_error,
     }
 
@@ -325,6 +524,7 @@ def replay_step(
     state_in = _incoming_state(step, state_patch, state_in)
     clock0 = time.perf_counter()
     wall0 = time.time()
+    memory = _MemoryTrace()
     try:
         update = invoke_node(app, step["node"], state_in)
         if not isinstance(update, dict):
@@ -333,6 +533,9 @@ def replay_step(
     except Exception as exc:
         run_error = _format_error(exc)
         update = {"error": run_error}
+    finally:
+        memory_mb = memory.snapshot()
+        memory.close()
     ended_ms = _elapsed_ms(clock0)
     state_out = copy.deepcopy(state_in) if run_error else merge_state(state_in, update)
     new_step = {
@@ -347,6 +550,7 @@ def replay_step(
         "unused": [],
     }
     _attach_timing(new_step, started_ms=0, ended_ms=ended_ms, wall_start=wall0)
+    _attach_metrics(new_step, update, memory_mb)
     if run_error:
         new_step["error"] = run_error
     return {
@@ -387,12 +591,13 @@ def resume_from_step(
         except Exception:
             pass
 
-    raw: list[tuple[str, dict, float]] = []
+    raw: list[tuple[str, dict, float, float]] = []
     current = state
     run_error: str | None = None
     clock0 = time.perf_counter()
     wall0 = time.time()
     for recorded in remaining:
+        memory = _MemoryTrace()
         try:
             update = invoke_node(app, recorded["node"], current)
             if not isinstance(update, dict):
@@ -400,14 +605,16 @@ def resume_from_step(
         except Exception as exc:
             run_error = _format_error(exc)
             update = {"error": run_error}
-            raw.append((recorded["node"], update, _elapsed_ms(clock0)))
+            raw.append((recorded["node"], update, _elapsed_ms(clock0), memory.snapshot()))
+            memory.close()
             break
-        raw.append((recorded["node"], update, _elapsed_ms(clock0)))
+        raw.append((recorded["node"], update, _elapsed_ms(clock0), memory.snapshot()))
+        memory.close()
         current = merge_state(current, update)
 
     current = copy.deepcopy(state)
     prev_end = 0.0
-    for index, (node, update, ended_ms) in enumerate(raw):
+    for index, (node, update, ended_ms, memory_mb) in enumerate(raw):
         visits[node] = visits.get(node, 0) + 1
         next_node = raw[index + 1][0] if index + 1 < len(raw) else None
         state_in = copy.deepcopy(current)
@@ -426,6 +633,7 @@ def resume_from_step(
             "unused": unused_targets(node, next_node, edges),
         }
         _attach_timing(step, started_ms=started_ms, ended_ms=ended_ms, wall_start=wall0)
+        _attach_metrics(step, update, memory_mb)
         if failed:
             step["error"] = str(update.get("error"))
         steps.append(step)
@@ -444,7 +652,7 @@ def resume_from_step(
         "from_step": step_id,
         "started_at": _iso_from_wall(wall0, 0),
         "ended_at": _iso_from_wall(wall0, _run_span(steps, _elapsed_ms(clock0))),
-        "elapsed_ms": _run_span(steps, _elapsed_ms(clock0)),
+        "elapsed_ms": _steps_elapsed(steps),
         "error": run_error,
     }
 

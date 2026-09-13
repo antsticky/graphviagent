@@ -2597,11 +2597,10 @@ PAGE = r"""<!DOCTYPE html>
       setJson($("state"), run ? run.result : {}, null, { thread: false });
       renderMemory(run);
       $("ascii").textContent = run ? run.ascii : "";
-      const nodeMs = ((run && run.steps) || []).reduce(
-        (total, step) => total + (Number(step.elapsed_ms) || 0),
-        0,
-      );
-      $("stepsMs").textContent = run ? formatElapsed(nodeMs) : "";
+      const wall = run && run.elapsed_ms != null
+        ? Number(run.elapsed_ms)
+        : Math.max(0, ...((run && run.steps) || []).map((step) => Number(step.ended_ms) || 0));
+      $("stepsMs").textContent = run ? formatElapsed(wall) : "";
       if (!run) {
         selectedStep = null;
         renderGraph(null);

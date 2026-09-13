@@ -391,10 +391,6 @@ def _run_span(steps: list[dict], fallback_ms: float) -> float:
     return fallback_ms
 
 
-def _steps_elapsed(steps: list[dict]) -> float:
-    return round(sum(float(step.get("elapsed_ms") or 0) for step in steps), 2)
-
-
 def _langchain_dump(obj: Any) -> dict | None:
     for attr in ("model_dump", "dict"):
         fn = getattr(obj, attr, None)
@@ -712,7 +708,7 @@ def record_run(
         "thread_id": run_id if has_checkpointer else None,
         "started_at": _iso_from_wall(wall0, 0),
         "ended_at": _iso_from_wall(wall0, _run_span(steps, _elapsed_ms(clock0))),
-        "elapsed_ms": _steps_elapsed(steps),
+        "elapsed_ms": _run_span(steps, _elapsed_ms(clock0)),
         "error": run_error,
     }
 
@@ -869,7 +865,7 @@ def resume_from_step(
         "from_step": step_id,
         "started_at": _iso_from_wall(wall0, 0),
         "ended_at": _iso_from_wall(wall0, _run_span(steps, _elapsed_ms(clock0))),
-        "elapsed_ms": _steps_elapsed(steps),
+        "elapsed_ms": _run_span(steps, _elapsed_ms(clock0)),
         "error": run_error,
     }
 

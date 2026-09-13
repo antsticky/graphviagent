@@ -344,6 +344,42 @@ PAGE = r"""<!DOCTYPE html>
     .gantt-tip .tip-err { color: var(--danger); margin-top: 6px; }
     .gantt-lane { margin-bottom: 4px; }
     .gantt-lane:last-child { margin-bottom: 0; }
+    .mem-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .mem-table th {
+      text-align: left; color: var(--muted); font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.04em; font-size: 10px;
+      padding: 4px 6px 8px 0; border-bottom: 1px solid #2a2a32;
+    }
+    .mem-table td {
+      padding: 6px 8px 6px 0; vertical-align: top; color: #d4d4d8;
+      overflow-wrap: anywhere;
+    }
+    .mem-table tr.removed td { color: var(--danger); }
+    .mem-table .mem-k { color: var(--ink); font-family: "IBM Plex Mono", ui-monospace, monospace; }
+    .mem-table .mem-muted { color: var(--muted); }
+    .agent-edge {
+      color: var(--muted); font-size: 11px; text-align: center;
+      max-width: 220px; margin: 0 auto; padding: 2px 0;
+    }
+    .g-card.agent { width: 220px; }
+    .io-tools { grid-column: 1 / -1; }
+    .io-tools[hidden] { display: none !important; }
+    .tool-bars { display: flex; gap: 6px; margin: 0 0 10px; }
+    .tool-bar {
+      flex: 1; min-width: 0; height: 10px; border-radius: 99px;
+      background: #6366f1; opacity: 0.85;
+    }
+    .tool-bar.error { background: var(--danger); }
+    .tool-row { margin: 0 0 10px; padding: 0 0 10px; border-bottom: 1px solid #2a2a32; }
+    .tool-row:last-child { margin: 0; padding: 0; border: 0; }
+    .tool-name { font-weight: 600; color: var(--ink); }
+    .tool-meta { color: var(--muted); font-size: 10px; margin-top: 2px; }
+    .tool-kv { margin-top: 6px; }
+    .tool-kv .cmp-k { padding-top: 4px; }
+    .tool-err {
+      margin-top: 6px; color: var(--danger);
+      white-space: pre-wrap; font-family: "IBM Plex Mono", ui-monospace, monospace;
+    }
     .graph-zoom { display: flex; align-items: center; gap: 4px; }
     .graph-zoom .ghost {
       height: 24px; min-width: 24px; padding: 0 8px;
@@ -573,6 +609,12 @@ PAGE = r"""<!DOCTYPE html>
     #nodeActions.visible { display: flex; }
     .tree-details { margin-top: 10px; color: var(--muted); }
     .tree-details > summary { cursor: pointer; font-size: 12px; }
+    .tree-details.section { margin: 12px 0 0; }
+    .tree-details.section > summary {
+      font-size: 11px; font-weight: 500; text-transform: uppercase;
+      letter-spacing: 0.06em; color: var(--muted); margin: 0;
+    }
+    .tree-details.section[open] > summary { margin-bottom: 8px; }
     .chips { display: none; }
     .chip {
       height: 26px; padding: 0 10px; border-radius: 999px; cursor: pointer;
@@ -812,6 +854,7 @@ PAGE = r"""<!DOCTYPE html>
               <span class="view-switch">
                 <button type="button" class="ghost active" id="viewGraph">Graph</button>
                 <button type="button" class="ghost" id="viewGantt">Gantt</button>
+                <button type="button" class="ghost" id="viewAgents">Agents</button>
               </span>
               <span class="graph-zoom">
                 <button type="button" class="ghost" id="zoomOut" title="Zoom out">−</button>
@@ -837,9 +880,15 @@ PAGE = r"""<!DOCTYPE html>
             </span>
           </h2>
           <div id="steps" class="waterfall"></div>
-          <h2>Final state</h2>
-          <div id="state" class="json"></div>
-          <details class="tree-details">
+          <details class="tree-details section">
+            <summary>Final state</summary>
+            <div id="state" class="json"></div>
+          </details>
+          <details class="tree-details section">
+            <summary>Memory</summary>
+            <div id="memory" class="json empty">Select a run to see which state keys were written and read.</div>
+          </details>
+          <details class="tree-details section">
             <summary>Text tree</summary>
             <pre id="ascii"></pre>
           </details>
@@ -884,6 +933,10 @@ PAGE = r"""<!DOCTYPE html>
             </span>
           </h2>
           <div id="stateDiff" class="json empty">Select a node to see what changed in state.</div>
+        </div>
+        <div class="pane io-tools" hidden>
+          <h2>Tools</h2>
+          <div id="stepTools" class="json empty">Select a node to see tool calls.</div>
         </div>
       </div>
     </div>
@@ -1554,7 +1607,7 @@ PAGE = r"""<!DOCTYPE html>
       return wrap;
     }
 
-    function setJson(el, value, emptyText) {
+    function setJson(el, value, emptyText, opts) {
       el.innerHTML = "";
       if (emptyText) {
         el.classList.add("empty");
@@ -1562,7 +1615,7 @@ PAGE = r"""<!DOCTYPE html>
         return;
       }
       el.classList.remove("empty");
-      const messages = extractMessages(value);
+      const messages = opts && opts.thread === false ? [] : extractMessages(value);
       if (messages.length) el.appendChild(renderThread(messages));
       const tree = renderJsonTree(value ?? {}, undefined, 0);
       if (messages.length) {
@@ -1623,6 +1676,293 @@ PAGE = r"""<!DOCTYPE html>
         (rows.length ? diffRowsHtml(rows) : '<p class="empty">No state keys</p>');
     }
 
+    function stateObject(value) {
+      return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    }
+
+    function keyPresent(state, key) {
+      if (!Object.prototype.hasOwnProperty.call(state, key)) return false;
+      return state[key] != null;
+    }
+
+    function memoryModel(run) {
+      const rows = {};
+      ((run && run.steps) || []).forEach((step) => {
+        const left = stateObject(step.state_in);
+        const right = stateObject(step.state_out);
+        const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
+        keys.forEach((key) => {
+          const row = rows[key] || {
+            key,
+            first: null,
+            last: null,
+            writer: "",
+            readers: [],
+            kind: "same",
+          };
+          if (keyPresent(left, key) && step.node && row.readers.indexOf(step.node) < 0) {
+            row.readers.push(step.node);
+          }
+          const had = keyPresent(left, key);
+          const has = keyPresent(right, key);
+          if (had && !has) {
+            row.kind = "removed";
+            row.last = step.step_id;
+            row.writer = step.node || row.writer;
+          } else if (has && (!had || !jsonEqual(left[key], right[key]))) {
+            row.kind = row.kind === "removed" ? "removed" : "written";
+            if (!row.first) row.first = step.step_id;
+            row.last = step.step_id;
+            row.writer = step.node || row.writer;
+          }
+          rows[key] = row;
+        });
+      });
+      return Object.keys(rows).sort().map((key) => rows[key]);
+    }
+
+    function renderMemory(run) {
+      const board = $("memory");
+      if (!board) return;
+      if (!run) {
+        board.className = "json empty";
+        board.textContent = "Select a run to see which state keys were written and read.";
+        return;
+      }
+      const rows = memoryModel(run);
+      if (!rows.length) {
+        board.className = "json empty";
+        board.textContent = "No state keys in this run.";
+        return;
+      }
+      board.className = "json";
+      board.innerHTML =
+        "<table class=\"mem-table\"><thead><tr>" +
+        "<th>Key</th><th>Last writer</th><th>First</th><th>Last</th><th>Readers</th>" +
+        "</tr></thead><tbody>" +
+        rows.map((row) =>
+          '<tr class="' + (row.kind === "removed" ? "removed" : "") + '">' +
+          '<td class="mem-k">' + escapeHtml(row.key) + "</td>" +
+          "<td>" + escapeHtml(row.writer || "—") + "</td>" +
+          '<td class="mem-muted">' + escapeHtml(row.first || "—") + "</td>" +
+          '<td class="mem-muted">' + escapeHtml(row.last || "—") + "</td>" +
+          "<td>" + escapeHtml(row.readers.length ? row.readers.join(", ") : "no later reader") + "</td>" +
+          "</tr>"
+        ).join("") +
+        "</tbody></table>";
+    }
+
+    function stepMessages(state) {
+      const obj = stateObject(state);
+      const fromList = extractMessages(obj.messages);
+      return fromList.length ? fromList : extractMessages(obj);
+    }
+
+    function newMessages(step) {
+      const before = stepMessages(step.state_in);
+      const after = stepMessages(step.state_out);
+      if (after.length > before.length) return after.slice(before.length);
+      return extractMessages(step.update);
+    }
+
+    function messageSpeaker(message, step) {
+      return message.name || message.role || step.node || "agent";
+    }
+
+    function messageExcerpt(message) {
+      const text = messageText(message);
+      if (text) return text;
+      const tools = message.tool_calls || [];
+      if (tools.length) {
+        return tools.map((call) => call.name || "tool").join(", ");
+      }
+      return "";
+    }
+
+    function agentsModel(run) {
+      const events = [];
+      ((run && run.steps) || []).forEach((step) => {
+        newMessages(step).forEach((message) => {
+          events.push({
+            step,
+            message,
+            speaker: messageSpeaker(message, step),
+            excerpt: messageExcerpt(message),
+          });
+        });
+      });
+      const edges = [];
+      for (let i = 1; i < events.length; i += 1) {
+        edges.push({
+          from: events[i - 1].speaker,
+          to: events[i].speaker,
+          excerpt: events[i].excerpt,
+          step: events[i].step,
+        });
+      }
+      return { events, edges };
+    }
+
+    function renderAgents(run) {
+      const target = $("diagram");
+      if (!run) {
+        target.className = "empty";
+        target.innerHTML = "Select a run to see who spoke to whom.";
+        applyGraphZoom();
+        return;
+      }
+      const model = agentsModel(run);
+      if (!model.events.length) {
+        target.className = "empty";
+        target.innerHTML = "No agent messages in this run.";
+        applyGraphZoom();
+        return;
+      }
+      const flow = document.createElement("div");
+      flow.className = "gflow";
+      flow.appendChild(graphCap("Agents"));
+      model.events.forEach((event, index) => {
+        if (index) {
+          const edge = document.createElement("div");
+          edge.className = "agent-edge";
+          const label = model.edges[index - 1];
+          edge.textContent = (label && label.excerpt) ? label.excerpt : "→";
+          flow.appendChild(graphLine());
+          flow.appendChild(edge);
+        } else {
+          flow.appendChild(graphLine());
+        }
+        const row = document.createElement("div");
+        row.className = "g-row";
+        const card = graphCard({
+          node: event.speaker,
+          reason: event.excerpt,
+          error: event.step.error,
+          step_id: event.step.step_id,
+        }, false);
+        card.classList.add("agent");
+        bindStepActions(card, event.step);
+        row.appendChild(card);
+        flow.appendChild(row);
+      });
+      target.className = "";
+      target.innerHTML = "";
+      mountGraph(target, flow);
+      highlightSelection();
+    }
+
+    function parseToolsFromUpdate(update, elapsedMs) {
+      const byId = {};
+      const tools = [];
+      const merge = (item) => {
+        const key = item.id;
+        if (key && byId[key]) {
+          Object.keys(item).forEach((name) => {
+            if (item[name] != null && item[name] !== "") byId[key][name] = item[name];
+          });
+          return;
+        }
+        if (key) byId[key] = item;
+        tools.push(item);
+      };
+      const addCall = (call) => {
+        if (!call || typeof call !== "object") return;
+        const fn = call.function && typeof call.function === "object" ? call.function : {};
+        let args = call.args != null ? call.args : (fn.arguments != null ? fn.arguments : call.arguments);
+        if (typeof args === "string") {
+          try { args = JSON.parse(args); } catch (err) { /* keep string */ }
+        }
+        merge({
+          name: call.name || fn.name || call.tool || "tool",
+          id: call.id || call.tool_call_id || fn.id || null,
+          args: args,
+          output: null,
+          latency_ms: null,
+          error: null,
+        });
+      };
+      if (!update || typeof update !== "object") return tools;
+      (update.tool_calls || []).forEach(addCall);
+      extractMessages(update).forEach((message) => {
+        (message.tool_calls || []).forEach(addCall);
+        const role = message.role || message.type;
+        if (role === "tool") {
+          merge({
+            name: message.name || message.tool || "tool",
+            id: message.tool_call_id || message.id || null,
+            args: message.args,
+            output: message.content,
+            latency_ms: message.latency_ms != null ? Number(message.latency_ms) : null,
+            error: message.error || null,
+          });
+        }
+      });
+      if (tools.length === 1 && tools[0].latency_ms == null && elapsedMs != null) {
+        tools[0].latency_ms = Number(elapsedMs);
+      }
+      return tools;
+    }
+
+    function stepTools(step) {
+      const listed = (step && step.tools) || [];
+      const rich = listed.some((item) => item && (item.args != null || item.output != null || item.id || item.error));
+      const base = (rich ? listed : parseToolsFromUpdate(step && step.update, step && step.elapsed_ms))
+        .map((item) => Object.assign({}, item));
+      const prior = parseToolsFromUpdate({ messages: ((step && step.state_in) || {}).messages });
+      const byId = {};
+      prior.forEach((item) => { if (item.id) byId[item.id] = item; });
+      base.forEach((item) => {
+        const extra = item.id && byId[item.id];
+        if (!extra) return;
+        if (item.args == null) item.args = extra.args;
+        if (!item.name || item.name === "tool") item.name = extra.name;
+      });
+      return base;
+    }
+
+    function renderStepTools(step) {
+      const board = $("stepTools");
+      const pane = board && board.closest(".io-tools");
+      const inspect = nodeViewMode === "all";
+      if (pane) pane.hidden = !inspect;
+      if (!inspect || !board) return;
+      if (!step) {
+        board.className = "json empty";
+        board.textContent = "Select a node to see tool calls.";
+        return;
+      }
+      const tools = stepTools(step);
+      if (!tools.length) {
+        board.className = "json empty";
+        board.textContent = "This node did not call a tool.";
+        return;
+      }
+      const maxMs = Math.max(1, ...tools.map((item) => Number(item.latency_ms) || 0));
+      const bars = tools.length > 1
+        ? '<div class="tool-bars">' + tools.map((item) => {
+          const width = Math.max(8, Math.round(((Number(item.latency_ms) || 0) / maxMs) * 100));
+          return '<span class="tool-bar' + (item.error ? " error" : "") + '" style="flex:' +
+            width + '" title="' + escapeHtml((item.name || "tool") + " " + (formatElapsed(item.latency_ms) || "—")) +
+            '"></span>';
+        }).join("") + "</div>"
+        : "";
+      board.className = "json";
+      board.innerHTML = bars + tools.map((item) => {
+        const args = item.args == null ? "" : (typeof item.args === "string" ? item.args : JSON.stringify(item.args));
+        const output = item.output == null ? "" : (typeof item.output === "string" ? item.output : JSON.stringify(item.output));
+        return '<div class="tool-row">' +
+          '<div class="tool-name">' + escapeHtml(item.name || "tool") + "</div>" +
+          '<div class="tool-meta">' +
+          escapeHtml(item.id || "") +
+          (item.latency_ms != null ? "  ·  " + escapeHtml(formatElapsed(item.latency_ms)) : "") +
+          "</div>" +
+          (args ? '<div class="tool-kv"><div class="cmp-k">Input</div><div class="cmp-a">' + escapeHtml(args) + "</div></div>" : "") +
+          (output ? '<div class="tool-kv"><div class="cmp-k">Output</div><div class="cmp-b">' + escapeHtml(output) + "</div></div>" : "") +
+          (item.error ? '<div class="tool-err">' + escapeHtml(item.error) + "</div>" : "") +
+          "</div>";
+      }).join("");
+    }
+
     function showStepIO(step) {
       const empty = $("stepIn");
       const editor = $("nodeInput");
@@ -1637,6 +1977,7 @@ PAGE = r"""<!DOCTYPE html>
         actions.classList.remove("visible");
         setJson($("stepOut"), null, "The keys this node returned.");
         renderStateDiff(null);
+        renderStepTools(null);
         return;
       }
       $("nvTitle").textContent = step.node || "Node";
@@ -1658,6 +1999,7 @@ PAGE = r"""<!DOCTYPE html>
       editor.value = JSON.stringify(step.state_in ?? {}, null, 2);
       setJson($("stepOut"), step.update);
       renderStateDiff(step);
+      renderStepTools(step);
     }
 
     function isNodeViewOpen() {
@@ -1669,9 +2011,11 @@ PAGE = r"""<!DOCTYPE html>
       const call = $("callBtn");
       const from = $("replayFromHereBtn");
       const diff = $("stateDiff") && $("stateDiff").closest(".io-diff");
+      const tools = $("stepTools") && $("stepTools").closest(".io-tools");
       call.hidden = nodeViewMode === "replay_from";
       from.hidden = nodeViewMode === "replay";
       if (diff) diff.hidden = nodeViewMode !== "all";
+      if (tools) tools.hidden = nodeViewMode !== "all";
       call.textContent = nodeViewMode === "replay" ? "Replay step" : "Call node";
       call.className = "primary";
       from.className = nodeViewMode === "replay_from" ? "primary" : "ghost";
@@ -2085,16 +2429,21 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function setGraphView(mode) {
-      graphViewMode = mode === "gantt" ? "gantt" : "graph";
+      graphViewMode = mode === "gantt" ? "gantt" : mode === "agents" ? "agents" : "graph";
       hideGanttTip();
       $("viewGraph").classList.toggle("active", graphViewMode === "graph");
       $("viewGantt").classList.toggle("active", graphViewMode === "gantt");
+      $("viewAgents").classList.toggle("active", graphViewMode === "agents");
       renderGraph(currentRun);
     }
 
     function renderGraph(run) {
       if (graphViewMode === "gantt") {
         renderGantt(run);
+        return;
+      }
+      if (graphViewMode === "agents") {
+        renderAgents(run);
         return;
       }
       const target = $("diagram");
@@ -2156,7 +2505,8 @@ PAGE = r"""<!DOCTYPE html>
     function renderRun(run) {
       const steps = $("steps");
       steps.innerHTML = "";
-      setJson($("state"), run ? run.result : {});
+      setJson($("state"), run ? run.result : {}, null, { thread: false });
+      renderMemory(run);
       $("ascii").textContent = run ? run.ascii : "";
       const nodeMs = ((run && run.steps) || []).reduce(
         (total, step) => total + (Number(step.elapsed_ms) || 0),
@@ -2668,6 +3018,7 @@ PAGE = r"""<!DOCTYPE html>
     $("zoomFit").onclick = () => fitGraphZoom();
     $("viewGraph").onclick = () => setGraphView("graph");
     $("viewGantt").onclick = () => setGraphView("gantt");
+    $("viewAgents").onclick = () => setGraphView("agents");
     (function bindGraphPan() {
       const box = $("diagram");
       let dragging = false;

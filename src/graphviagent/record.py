@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import time
 import tracemalloc
 from datetime import datetime, timezone
@@ -156,31 +157,113 @@ def _tool_call_name(call: dict) -> str:
     return str(call.get("name") or function.get("name") or call.get("tool") or "tool")
 
 
+def _tool_call_id(call: dict) -> str | None:
+    function = call.get("function") if isinstance(call.get("function"), dict) else {}
+    value = call.get("id") or call.get("tool_call_id") or function.get("id")
+    return str(value) if value else None
+
+
+def _tool_call_args(call: dict) -> Any:
+    function = call.get("function") if isinstance(call.get("function"), dict) else {}
+    args = call.get("args")
+    if args is None:
+        args = function.get("arguments")
+    if args is None:
+        args = call.get("arguments")
+    if isinstance(args, str):
+        try:
+            return json.loads(args)
+        except Exception:
+            return args
+    return args
+
+
+def _tool_latency(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _merge_tool(existing: dict, incoming: dict) -> dict:
+    for key in ("name", "id", "args", "output", "latency_ms", "error"):
+        value = incoming.get(key)
+        if value in (None, "", []):
+            continue
+        if key == "name" and existing.get("name") and existing["name"] != "tool":
+            continue
+        existing[key] = value
+    return existing
+
+
 def extract_tool_metrics(update: Any, elapsed_ms: float | None) -> tuple[list[dict], float | None]:
     tools: list[dict] = []
+    by_id: dict[str, dict] = {}
     requests = 0
     results = 0
+
+    def upsert(item: dict) -> None:
+        key = item.get("id")
+        if key:
+            current = by_id.get(str(key))
+            if current is not None:
+                _merge_tool(current, item)
+                return
+            by_id[str(key)] = item
+        tools.append(item)
+
+    def add_call(call: dict) -> None:
+        nonlocal requests
+        if not isinstance(call, dict):
+            return
+        requests += 1
+        upsert(
+            {
+                "name": _tool_call_name(call),
+                "id": _tool_call_id(call),
+                "args": _tool_call_args(call),
+                "output": None,
+                "latency_ms": None,
+                "error": None,
+            }
+        )
+
+    def add_result(message: dict) -> None:
+        nonlocal results
+        results += 1
+        error = message.get("error")
+        if error is None and message.get("status") == "error":
+            error = message.get("content")
+        upsert(
+            {
+                "name": str(message.get("name") or message.get("tool") or "tool"),
+                "id": str(message.get("tool_call_id") or message.get("id") or "") or None,
+                "args": message.get("args"),
+                "output": message.get("content"),
+                "latency_ms": _tool_latency(message.get("latency_ms")),
+                "error": None if error is None else str(error),
+            }
+        )
+
     if isinstance(update, dict):
         for call in update.get("tool_calls") or []:
-            if isinstance(call, dict):
-                tools.append({"name": _tool_call_name(call), "latency_ms": None})
-                requests += 1
+            add_call(call)
         for message in extract_messages(update):
             for call in message.get("tool_calls") or []:
-                if isinstance(call, dict):
-                    tools.append({"name": _tool_call_name(call), "latency_ms": None})
-                    requests += 1
+                add_call(call)
             role = message.get("role") or message.get("type")
             if role == "tool":
-                name = message.get("name") or message.get("tool") or "tool"
-                tools.append({"name": str(name), "latency_ms": None})
-                results += 1
+                add_result(message)
+
+    known = [float(item["latency_ms"]) for item in tools if item.get("latency_ms") is not None]
     tool_only = results > 0 and requests == 0
     if tool_only and elapsed_ms is not None:
-        if len(tools) == 1:
-            tools[0]["latency_ms"] = elapsed_ms
-        return tools, round(float(elapsed_ms), 2)
-    known = [float(item["latency_ms"]) for item in tools if item.get("latency_ms") is not None]
+        if len(tools) == 1 and tools[0].get("latency_ms") is None:
+            tools[0]["latency_ms"] = round(float(elapsed_ms), 2)
+            known = [float(tools[0]["latency_ms"])]
+        return tools, round(sum(known), 2) if known else round(float(elapsed_ms), 2)
     return tools, round(sum(known), 2) if known else None
 
 
@@ -276,6 +359,37 @@ def _steps_elapsed(steps: list[dict]) -> float:
     return round(sum(float(step.get("elapsed_ms") or 0) for step in steps), 2)
 
 
+def _langchain_dump(obj: Any) -> dict | None:
+    for attr in ("model_dump", "dict"):
+        fn = getattr(obj, attr, None)
+        if not callable(fn):
+            continue
+        try:
+            data = fn()
+        except TypeError:
+            try:
+                data = fn(mode="json")
+            except Exception:
+                continue
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            return data
+    kind = getattr(obj, "type", None)
+    content = getattr(obj, "content", None)
+    if kind is None or content is None:
+        return None
+    data = {"type": str(kind), "content": content}
+    role = getattr(obj, "role", None)
+    data["role"] = role or {"human": "user", "ai": "assistant", "tool": "tool"}.get(str(kind), str(kind))
+    for name in ("name", "tool_calls", "tool_call_id", "id", "status", "additional_kwargs"):
+        if hasattr(obj, name):
+            value = getattr(obj, name)
+            if value not in (None, [], {}):
+                data[name] = value
+    return data
+
+
 def jsonable(obj: Any) -> Any:
     if obj is None or isinstance(obj, (bool, int, float, str)):
         return obj
@@ -283,6 +397,9 @@ def jsonable(obj: Any) -> Any:
         return {str(key): jsonable(value) for key, value in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [jsonable(item) for item in obj]
+    dumped = _langchain_dump(obj)
+    if dumped is not None:
+        return jsonable(dumped)
     return str(obj)
 
 
@@ -349,14 +466,25 @@ def _is_message(item: Any) -> bool:
     return False
 
 
+def _message_dict(item: Any) -> dict | None:
+    if isinstance(item, dict):
+        return item if _is_message(item) else None
+    dumped = _langchain_dump(item)
+    if not isinstance(dumped, dict):
+        return None
+    dumped = jsonable(dumped)
+    return dumped if _is_message(dumped) else None
+
+
 def extract_messages(value: Any) -> list[dict]:
     if isinstance(value, list):
-        found = [item for item in value if _is_message(item)]
+        found = [item for raw in value if (item := _message_dict(raw))]
         return found if found and len(found) >= max(1, len(value) // 2) else []
+    coerced = _message_dict(value)
+    if coerced:
+        return [coerced]
     if not isinstance(value, dict):
         return []
-    if _is_message(value):
-        return [value]
     for key in ("messages", "output", "result"):
         child = value.get(key)
         if child is value:

@@ -1,5 +1,5 @@
 """GraphVIAgent — local viewer for LangGraph pipelines."""
 
-__version__ = "0.2.1"
+__version__ = "1.1.0-dev"
 
 __all__ = ["__version__"]

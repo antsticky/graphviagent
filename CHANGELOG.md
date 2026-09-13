@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.0-dev
+
+### Added
+- Live Run over SSE: topology pulses, Steps and Final state update, Log panel
+- Topology graph (taken / skipped / loops / parallel)
+- `print()` and `logging` capture with level colors
+- Cancel and at most 3 concurrent runs
+- GitHub Pages user manual (`docs/`)
+
+### Changed
+- Graph view is a topology map instead of an unrolled column
+
 ## 1.0.1-dev
 
 ### Added

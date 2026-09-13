@@ -4,7 +4,7 @@
 
 Local Graph-View-Agent for LangGraph. Scan `*_pipeline.py` files, record runs under `.graphviagent/`, and inspect them in a browser UI.
 
-Pipeline files do not import GraphVIAgent. Nothing is sent to LangSmith. Only runs you start from the UI or CLI are stored.
+Pipeline files do not import GraphVIAgent. Only runs you start from the UI or CLI are stored.
 
 ## Requirements
 

@@ -215,10 +215,73 @@
     .af-mark.hist { background: #c4b5fd; }
     .af-mark.state { background: #818cf8; }
     pre, .code {
-      margin: 0 0 14px; padding: 12px 14px; overflow: auto;
+      margin: 0 0 12px; padding: 12px 14px; overflow: auto;
       background: #121216; border: 1px solid var(--line); border-radius: 10px;
       font: 12px/1.5 "IBM Plex Mono", ui-monospace, monospace; color: var(--ink);
     }
+    .step-card, .topic, .cli-card {
+      background: linear-gradient(180deg, #1a1a22, #17171c);
+      border: 1px solid var(--line);
+      border-radius: 12px; padding: 18px 20px 16px; margin: 0 0 12px;
+      transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    .step-card:hover, .topic:hover, .cli-card:hover {
+      border-color: #5b4b9e;
+      transform: translateY(-2px);
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+    }
+    .step-card { position: relative; padding-left: 72px; }
+    .step-n {
+      position: absolute; left: 18px; top: 18px;
+      width: 36px; height: 36px; border-radius: 10px;
+      background: linear-gradient(135deg, #7c5cff, #4f46e5);
+      color: #fff;
+      font: 600 15px Inter, sans-serif;
+      display: grid; place-items: center;
+      box-shadow: 0 8px 18px rgba(124, 92, 255, 0.38);
+    }
+    .step-card h3, .topic h3 { margin: 2px 0 8px; font-size: 16px; }
+    .step-card p:last-child, .topic p:last-child { margin-bottom: 0; }
+    .run-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; counter-reset: run; }
+    .run-list li {
+      counter-increment: run;
+      margin: 0; padding: 10px 12px 10px 40px; border-radius: 8px;
+      background: #121216; border: 1px solid #2a2a32; color: var(--muted);
+      position: relative;
+    }
+    .run-list li::before {
+      content: counter(run);
+      position: absolute; left: 10px; top: 10px;
+      width: 22px; height: 22px; border-radius: 7px;
+      background: var(--accent-dim); color: #c4b5fd;
+      font: 600 11px Inter, sans-serif;
+      display: grid; place-items: center;
+    }
+    .run-list li strong { color: var(--ink); }
+    .topics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+    .topic { margin: 0; position: relative; overflow: hidden; padding-left: 22px; }
+    .topic::before {
+      content: "";
+      position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+      background: #6366f1;
+    }
+    .topic:nth-child(2)::before { background: #a78bfa; }
+    .topic:nth-child(3)::before { background: #93c5fd; }
+    .topic:nth-child(4)::before { background: #fbbf24; }
+    .topic:nth-child(5)::before { background: #22c55e; }
+    .topic:nth-child(6)::before { background: #818cf8; }
+    .topic:nth-child(7)::before { background: #c4b5fd; }
+    .topic:nth-child(8)::before { background: #f07178; }
+    .topic ul { margin-bottom: 10px; }
+    .cli-grid { display: grid; gap: 12px; }
+    .cli-card { margin: 0; padding: 0; overflow: hidden; }
+    .cli-card h3 {
+      margin: 0; padding: 12px 16px;
+      background: #121216; border-bottom: 1px solid var(--line);
+      font-size: 12px; font-weight: 500;
+      font-family: "IBM Plex Mono", ui-monospace, monospace; color: #ddd6fe;
+    }
+    .cli-card p { margin: 0; padding: 14px 16px 16px; }
     table { width: 100%; border-collapse: collapse; margin: 0 0 14px; }
     th, td {
       text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line);
@@ -235,7 +298,7 @@
       display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap;
     }
     @media (max-width: 860px) {
-      .hero, .grid { grid-template-columns: 1fr; }
+      .hero, .grid, .topics { grid-template-columns: 1fr; }
       h1 { font-size: 36px; }
       .nav { display: none; }
     }
@@ -360,17 +423,21 @@
     <section id="start">
       <h2>Start</h2>
       <p class="sell">Install the package, drop a pipeline in a folder, press Run.</p>
-      <h3>1. Install</h3>
-      <p>Python 3.10 or newer. Use a virtualenv.</p>
-      <pre>python3 -m venv .venv
+      <article class="step-card">
+        <span class="step-n">1</span>
+        <h3>Install</h3>
+        <p>Python 3.10 or newer. Use a virtualenv.</p>
+        <pre>python3 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
 pip install graphviagent</pre>
-      <p>The package does not copy example files into your project. You add your own pipeline.</p>
-
-      <h3>2. Add a pipeline</h3>
-      <p>The file name must end with <code>_pipeline.py</code>. Save this as <code>echo_pipeline.py</code> in an empty folder:</p>
-      <pre>from typing import TypedDict
+        <p>The package does not copy example files into your project. You add your own pipeline.</p>
+      </article>
+      <article class="step-card">
+        <span class="step-n">2</span>
+        <h3>Add a pipeline</h3>
+        <p>The file name must end with <code>_pipeline.py</code>. Save this as <code>echo_pipeline.py</code> in an empty folder:</p>
+        <pre>from typing import TypedDict
 from langgraph.graph import END, START, StateGraph
 
 EXAMPLES = [
@@ -397,94 +464,105 @@ def build_graph():
     graph.add_edge(START, "echo")
     graph.add_edge("echo", END)
     return graph.compile()</pre>
-      <p><code>EXAMPLES</code> is optional. The first item prefills the input box. Use <code>{"label": "…", "input": {…}}</code> or a bare dict.</p>
-
-      <h3>3. Open the UI</h3>
-      <pre>graphviagent serve . --open</pre>
-      <p>Or open <a href="http://127.0.0.1:8765">http://127.0.0.1:8765</a>. Leave the terminal running. New or edited <code>*_pipeline.py</code> files refresh the sidebar without a restart.</p>
-      <pre>graphviagent serve . --port 9000
+        <p><code>EXAMPLES</code> is optional. The first item prefills the input box. Use <code>{"label": "…", "input": {…}}</code> or a bare dict.</p>
+      </article>
+      <article class="step-card">
+        <span class="step-n">3</span>
+        <h3>Open the UI</h3>
+        <pre>graphviagent serve . --open</pre>
+        <p>Or open <a href="http://127.0.0.1:8765">http://127.0.0.1:8765</a>. Leave the terminal running. New or edited <code>*_pipeline.py</code> files refresh the sidebar without a restart.</p>
+        <pre>graphviagent serve . --port 9000
 graphviagent serve . --host 127.0.0.1</pre>
-
-      <h3>4. Run</h3>
-      <ol>
-        <li>Select the pipeline in the sidebar.</li>
-        <li>Edit the JSON input if you need to.</li>
-        <li>Click <strong>Run</strong>. The topology appears immediately and pulses while nodes execute.</li>
-        <li>Single-click a node to select it. Double-click to open Node view.</li>
-      </ol>
+      </article>
+      <article class="step-card">
+        <span class="step-n">4</span>
+        <h3>Run</h3>
+        <ol class="run-list">
+          <li>Select the pipeline in the sidebar.</li>
+          <li>Edit the JSON input if you need to.</li>
+          <li>Click <strong>Run</strong>. The topology appears immediately and pulses while nodes execute.</li>
+          <li>Single-click a node to select it. Double-click to open Node view.</li>
+        </ol>
+      </article>
     </section>
 
     <section id="manual">
       <h2>Manual</h2>
       <p class="sell">How Trace, replay, the board, and Compare work once you are in the UI.</p>
-      <h3>Pipeline contract</h3>
-      <p>A file is viewable if it is named <code>*_pipeline.py</code> and exposes one of:</p>
-      <ul>
-        <li><code>build_graph()</code> / <code>get_graph()</code> / <code>create_graph()</code></li>
-        <li>compiled <code>GRAPH</code> or <code>app</code></li>
-        <li><code>__graph__ = "factory_name"</code></li>
-      </ul>
-      <p>Do not import GraphVIAgent in the pipeline. The viewer loads the file and records runs you start from the UI or CLI.</p>
-
-      <h3>Trace</h3>
-      <ul>
-        <li><strong>Graph</strong> — static map of nodes and edges. Taken paths, skipped branches, loops, and parallel <code>Send</code> fan-out.</li>
-        <li><strong>Gantt</strong> — wall-clock bars per node. Hover for timing, memory, and tokens when present.</li>
-        <li><strong>Agents</strong> — speaker chain when a node returns <code>messages</code>.</li>
-        <li><strong>Steps</strong> — visit order with duration and spark metrics.</li>
-        <li><strong>Final state</strong>, <strong>Log</strong>, <strong>Memory</strong>, and <strong>Text tree</strong> fold under Steps.</li>
-      </ul>
-      <p>History search matches input fields. Filter all / success / failed. <strong>Export</strong> downloads the open run as JSON. <strong>Import</strong> or drop a file on the run list. <strong>Delete run</strong> removes the open run.</p>
-
-      <h3>Node view</h3>
-      <p>Shows node input, output, a state diff (<code>state_in</code> vs <code>state_out</code>), and tools when the update has tool calls. <strong>Call node</strong> is the same as Replay step: it invokes the real node.</p>
-
-      <h3>Replay</h3>
-      <p><strong>Replay step</strong> re-runs only the selected node with its recorded input (or an edit you make). <strong>Replay from</strong> continues the graph from that node. Both hit your real functions. If the pipeline file or graph hash changed, the run is marked <strong>outdated</strong> and replay asks before continuing.</p>
-
-      <h3>Pipelines</h3>
-      <p>Airflow-style cards: duration bars, then task × run (<code>✓</code> / <code>✕</code> / <code>○</code>). Click the name to open Trace. Click a bar, cell, or play control to open that run. <strong>Clear</strong> deletes every run for that pipeline.</p>
-
-      <h3>Compare</h3>
-      <p>Open Compare. Filter by pipeline (default all). Pick Run A and Run B. Diff input, path, per-node output, and timing. Hover a cell to copy.</p>
-
-      <h3>Privacy and storage</h3>
-      <p>Everything stays on your machine. Runs are written under the folder you served or ran from:</p>
-      <pre>my_graphs/.graphviagent/runs/echo_pipeline/&lt;id&gt;.json</pre>
-      <p>Add <code>.graphviagent/</code> to <code>.gitignore</code>.</p>
-
-      <h3>Limits</h3>
-      <ul>
-        <li>Alpha: APIs, UI, and on-disk run format may change.</li>
-        <li>Local only. Nothing is uploaded.</li>
-        <li><code>logging</code> still respects the logger’s level. Root defaults to WARNING, so <code>logger.info</code> appears only if that logger is enabled for INFO.</li>
-        <li>Cancel waits for the current blocking call (for example <code>sleep</code>) to return.</li>
-      </ul>
+      <div class="topics">
+        <article class="topic">
+          <h3>Pipeline contract</h3>
+          <p>A file is viewable if it is named <code>*_pipeline.py</code> and exposes one of:</p>
+          <ul>
+            <li><code>build_graph()</code> / <code>get_graph()</code> / <code>create_graph()</code></li>
+            <li>compiled <code>GRAPH</code> or <code>app</code></li>
+            <li><code>__graph__ = "factory_name"</code></li>
+          </ul>
+          <p>Do not import GraphVIAgent in the pipeline. The viewer loads the file and records runs you start from the UI or CLI.</p>
+        </article>
+        <article class="topic">
+          <h3>Trace</h3>
+          <ul>
+            <li><strong>Graph</strong> — static map of nodes and edges. Taken paths, skipped branches, loops, and parallel <code>Send</code> fan-out.</li>
+            <li><strong>Gantt</strong> — wall-clock bars per node. Hover for timing, memory, and tokens when present.</li>
+            <li><strong>Agents</strong> — speaker chain when a node returns <code>messages</code>.</li>
+            <li><strong>Steps</strong> — visit order with duration and spark metrics.</li>
+            <li><strong>Final state</strong>, <strong>Log</strong>, <strong>Memory</strong>, and <strong>Text tree</strong> fold under Steps.</li>
+          </ul>
+          <p>History search matches input fields. Filter all / success / failed. <strong>Export</strong> downloads the open run as JSON. <strong>Import</strong> or drop a file on the run list. <strong>Delete run</strong> removes the open run.</p>
+        </article>
+        <article class="topic">
+          <h3>Node view</h3>
+          <p>Shows node input, output, a state diff (<code>state_in</code> vs <code>state_out</code>), and tools when the update has tool calls. <strong>Call node</strong> is the same as Replay step: it invokes the real node.</p>
+        </article>
+        <article class="topic">
+          <h3>Replay</h3>
+          <p><strong>Replay step</strong> re-runs only the selected node with its recorded input (or an edit you make). <strong>Replay from</strong> continues the graph from that node. Both hit your real functions. If the pipeline file or graph hash changed, the run is marked <strong>outdated</strong> and replay asks before continuing.</p>
+        </article>
+        <article class="topic">
+          <h3>Pipelines</h3>
+          <p>Airflow-style cards: duration bars, then task × run (<code>✓</code> / <code>✕</code> / <code>○</code>). Click the name to open Trace. Click a bar, cell, or play control to open that run. <strong>Clear</strong> deletes every run for that pipeline.</p>
+        </article>
+        <article class="topic">
+          <h3>Compare</h3>
+          <p>Open Compare. Filter by pipeline (default all). Pick Run A and Run B. Diff input, path, per-node output, and timing. Hover a cell to copy.</p>
+        </article>
+        <article class="topic">
+          <h3>Privacy and storage</h3>
+          <p>Everything stays on your machine. Runs are written under the folder you served or ran from:</p>
+          <pre>my_graphs/.graphviagent/runs/echo_pipeline/&lt;id&gt;.json</pre>
+          <p>Add <code>.graphviagent/</code> to <code>.gitignore</code>.</p>
+        </article>
+        <article class="topic">
+          <h3>Limits</h3>
+          <ul>
+            <li>Alpha: APIs, UI, and on-disk run format may change.</li>
+            <li>Local only. Nothing is uploaded.</li>
+            <li><code>logging</code> still respects the logger’s level. Root defaults to WARNING, so <code>logger.info</code> appears only if that logger is enabled for INFO.</li>
+            <li>Cancel waits for the current blocking call (for example <code>sleep</code>) to return.</li>
+          </ul>
+        </article>
+      </div>
     </section>
 
     <section id="cli">
       <h2>CLI</h2>
       <p class="sell">List, run, and serve from the folder that holds your pipelines.</p>
-      <table>
-        <thead>
-          <tr><th>Command</th><th>What it does</th></tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td><code>graphviagent .</code><br/><code>graphviagent list .</code></td>
-            <td>List <code>*_pipeline.py</code> files under a folder.</td>
-          </tr>
-          <tr>
-            <td><code>graphviagent run echo_pipeline.py --input '{"text":"hi"}'</code></td>
-            <td>Record a run without the browser. Stored under <code>.graphviagent/</code> in the current directory. Exit status is 1 if the graph raised.</td>
-          </tr>
-          <tr>
-            <td><code>graphviagent serve .</code><br/><code>graphviagent serve . --open</code></td>
-            <td>Open the local UI (default <code>127.0.0.1:8765</code>). <code>--open</code> launches a browser. <code>--host</code> and <code>--port</code> override the bind address.</td>
-          </tr>
-        </tbody>
-      </table>
-      <p>With a clone of the repo you can also run <code>graphviagent serve examples</code> to browse the bundled pipelines (branch, loop, parallel <code>Send</code>, tools, agents, errors).</p>
+      <div class="cli-grid">
+        <article class="cli-card">
+          <h3>graphviagent .<br/>graphviagent list .</h3>
+          <p>List <code>*_pipeline.py</code> files under a folder.</p>
+        </article>
+        <article class="cli-card">
+          <h3>graphviagent run echo_pipeline.py --input '{"text":"hi"}'</h3>
+          <p>Record a run without the browser. Stored under <code>.graphviagent/</code> in the current directory. Exit status is 1 if the graph raised.</p>
+        </article>
+        <article class="cli-card">
+          <h3>graphviagent serve .<br/>graphviagent serve . --open</h3>
+          <p>Open the local UI (default <code>127.0.0.1:8765</code>). <code>--open</code> launches a browser. <code>--host</code> and <code>--port</code> override the bind address.</p>
+        </article>
+      </div>
+      <p style="margin-top:14px">With a clone of the repo you can also run <code>graphviagent serve examples</code> to browse the bundled pipelines (branch, loop, parallel <code>Send</code>, tools, agents, errors).</p>
     </section>
   </main>
 

@@ -105,7 +105,7 @@ graphviagent serve . --port 9000
 graphviagent serve . --host 127.0.0.1
 ```
 
-New or edited `*_pipeline.py` files refresh the sidebar on their own. You do not need to restart `serve`.
+New or edited `*_pipeline.py` files refresh the sidebar on their own. You do not need to restart `serve`. A file-change panel (bottom right) shows when a pipeline appears, is modified, or its SHA256 hash changes.
 
 ### Trace
 
@@ -118,6 +118,8 @@ New or edited `*_pipeline.py` files refresh the sidebar on their own. You do not
 7. **Delete run** removes the open run. Hover a JSON box and use **Copy** to copy it.
 
 **Replay step** runs only the selected node again. **Replay from** (and **Call node** in Node view) invoke the real node. Side effects will fire.
+
+Each run stores a SHA256 of the graph (nodes, edges, state keys, tools). If that hash no longer matches the loaded pipeline, the run is marked **outdated** and replay asks before continuing.
 
 If a node returns `messages` or tool calls, they render as a thread above the JSON tree.
 

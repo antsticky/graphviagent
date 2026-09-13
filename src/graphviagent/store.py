@@ -54,6 +54,8 @@ def list_runs(
             "step_count": len(data.get("steps") or []),
             "elapsed_ms": data.get("elapsed_ms"),
             "status": "error" if data.get("error") else "ok",
+            "graph_hash": data.get("graph_hash"),
+            "file_sha256": data.get("file_sha256"),
         }
         if include_steps:
             item["steps"] = [

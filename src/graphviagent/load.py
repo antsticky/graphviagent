@@ -3,9 +3,13 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from graphviagent.graph_hash import fingerprint_graph
+from graphviagent.watch import file_sha256
 
 
 FACTORY_NAMES = ("build_graph", "get_graph", "create_graph")
@@ -20,6 +24,9 @@ class LoadedPipeline:
     error: str | None = None
     has_checkpointer: bool = False
     module: Any = None
+    graph: dict = field(default_factory=dict)
+    graph_hash: str | None = None
+    file_sha256: str | None = None
 
 
 def _is_runnable(obj: Any) -> bool:
@@ -69,13 +76,21 @@ def normalize_examples(raw: Any) -> list[dict]:
 
 def load_module(path: Path) -> Any:
     path = path.resolve()
-    key = hashlib.md5(str(path).encode(), usedforsecurity=False).hexdigest()
-    name = f"graphviagent_pipe_{key}"
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    name = f"graphviagent_pipe_{digest}"
+    cached = sys.modules.get(name)
+    if cached is not None:
+        return cached
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot import {path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(name, None)
+        raise
     return module
 
 
@@ -107,6 +122,15 @@ def load_pipeline(path: Path) -> LoadedPipeline:
                 "need GRAPH, app, or build_graph()/get_graph()/create_graph()"
             )
         loaded.app, loaded.has_checkpointer = _compile_if_needed(candidate)
+        try:
+            loaded.file_sha256 = file_sha256(path)
+        except OSError:
+            loaded.file_sha256 = None
+        if loaded.app is not None:
+            loaded.graph, loaded.graph_hash = fingerprint_graph(
+                loaded.app,
+                loaded.file_sha256,
+            )
     except Exception as exc:
         loaded.error = f"{type(exc).__name__}: {exc}"
     return loaded

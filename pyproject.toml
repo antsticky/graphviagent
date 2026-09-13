@@ -25,6 +25,7 @@ classifiers = [
 ]
 dependencies = [
     "langgraph>=0.2",
+    "watchdog>=4",
 ]
 
 [project.optional-dependencies]

@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from graphviagent.discover import discover_pipelines
+from graphviagent.graph_hash import attach_graph_meta
 from graphviagent.load import LoadedPipeline, load_pipeline
 from graphviagent.record import record_run, replay_step, resume_from_step
 from graphviagent.render import ascii_tree, unrolled_mermaid
@@ -21,6 +22,7 @@ from graphviagent.store import (
     load_run,
     save_run,
 )
+from graphviagent.watch import PipelineWatcher, file_sha256
 
 FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
   <defs>
@@ -206,7 +208,14 @@ PAGE = r"""<!DOCTYPE html>
       font-size: 10px; font-weight: 500; text-transform: lowercase;
       color: #c4b5fd; background: var(--accent-dim);
       border-radius: 999px; padding: 1px 7px;
+      flex: 0 0 auto; width: auto; display: inline-block;
     }
+    #history .pill.mode-run { color: #c4b5fd; background: rgba(124, 92, 255, 0.18); }
+    #history .pill.mode-replay { color: #5eead4; background: rgba(45, 212, 191, 0.16); }
+    #history .pill.mode-replay_from { color: #fbbf24; background: rgba(251, 191, 36, 0.16); }
+    #history .pill.mode-error { color: #fca5a5; background: rgba(240, 113, 120, 0.16); }
+    #history .pill.mode-outdated { color: #fbbf24; background: rgba(251, 191, 36, 0.16); }
+    .run-pills { display: flex; gap: 4px; flex: 0 0 auto; align-items: center; }
     .meta {
       color: var(--muted); font-size: 11px; margin-top: 3px;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -501,6 +510,70 @@ PAGE = r"""<!DOCTYPE html>
     .cmp-a { background: #16141f; }
     .cmp-b { background: #121916; }
     .cmp-a:empty::before, .cmp-b:empty::before { content: "—"; color: #5c5c66; }
+    #fileChanges {
+      position: fixed; right: 16px; bottom: 16px; z-index: 40;
+      width: min(360px, calc(100vw - 32px));
+      background: var(--raised); border: 1px solid var(--line); border-radius: 10px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+    }
+    #fileChanges[hidden] { display: none; }
+    .fc-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 10px; border-bottom: 1px solid var(--line);
+      font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+      color: var(--muted);
+    }
+    .fc-head button {
+      border: 0; background: transparent; color: var(--muted);
+      font: 500 11px Inter, sans-serif; cursor: pointer;
+    }
+    .fc-head button:hover { color: var(--ink); }
+    #fcList { max-height: 240px; overflow: auto; padding: 6px; }
+    .fc-item {
+      display: grid; gap: 2px; padding: 8px 8px; margin-bottom: 4px;
+      border-radius: 8px; background: var(--panel); color: var(--ink);
+    }
+    .fc-item:last-child { margin-bottom: 0; }
+    .fc-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .fc-kind {
+      font-size: 10px; font-weight: 500; text-transform: lowercase;
+      border-radius: 999px; padding: 1px 7px; flex: 0 0 auto;
+    }
+    .fc-item.added .fc-kind { color: #86efac; background: rgba(34, 197, 94, 0.16); }
+    .fc-item.modified .fc-kind { color: #93c5fd; background: rgba(59, 130, 246, 0.16); }
+    .fc-item.hash_changed .fc-kind { color: #fbbf24; background: rgba(251, 191, 36, 0.16); }
+    .fc-item.removed .fc-kind { color: #fca5a5; background: rgba(240, 113, 120, 0.16); }
+    .fc-name { font-size: 12px; font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .fc-hash {
+      color: var(--muted); font-size: 11px;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+    }
+    .fc-item button {
+      border: 0; background: transparent; color: var(--muted); cursor: pointer;
+      font-size: 14px; line-height: 1; padding: 0 2px;
+    }
+    .fc-item button:hover { color: var(--ink); }
+    .warn {
+      width: min(480px, 100%);
+      background: var(--raised);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 18px 20px 16px;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+    }
+    .warn h3 { margin: 0 0 8px; font-size: 16px; }
+    .warn p { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+    .warn-hash {
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 12px; color: var(--ink);
+      background: var(--panel); border-radius: 8px; padding: 8px 10px;
+      margin: 0 0 10px;
+    }
+    .warn-hash div { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+    .warn-hash span { color: var(--muted); }
+    .warn ul { margin: 0 0 14px; padding-left: 18px; color: var(--ink); }
+    .warn li { margin: 3px 0; font-size: 12px; }
+    .warn-actions { display: flex; justify-content: flex-end; gap: 8px; }
     @media (max-width: 900px) { .layout, .grid, .io, .cmp-pickers, .cmp-grid { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -626,6 +699,25 @@ PAGE = r"""<!DOCTYPE html>
       </div>
     </div>
   </div>
+  <div id="fileChanges" hidden>
+    <div class="fc-head">
+      <span>File changes</span>
+      <button type="button" id="fcClear">Clear</button>
+    </div>
+    <div id="fcList"></div>
+  </div>
+  <div id="outdatedModal" class="nv-overlay" hidden>
+    <div class="warn" role="dialog" aria-labelledby="outdatedTitle">
+      <h3 id="outdatedTitle">Pipeline changed</h3>
+      <p>This run is outdated. Replay will use the current graph.</p>
+      <div class="warn-hash" id="outdatedHashes"></div>
+      <ul id="outdatedDiffs"></ul>
+      <div class="warn-actions">
+        <button type="button" class="ghost" id="outdatedCancel">Cancel</button>
+        <button type="button" class="primary" id="outdatedGo">Replay anyway</button>
+      </div>
+    </div>
+  </div>
   <script>
     let pipelines = [];
     let fileId = null;
@@ -635,6 +727,8 @@ PAGE = r"""<!DOCTYPE html>
     let currentView = "trace";
     let historyRuns = [];
     let scanKey = "";
+    let changeSeq = 0;
+    let fileChangeEvents = [];
     let compareRuns = [];
 
     const $ = (id) => document.getElementById(id);
@@ -674,7 +768,7 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     async function api(path, opts) {
-      const res = await fetch(path, opts);
+      const res = await fetch(path, { cache: "no-store", ...(opts || {}) });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || res.statusText);
       return data;
@@ -1020,9 +1114,16 @@ PAGE = r"""<!DOCTYPE html>
         const btn = document.createElement("button");
         btn.className = "run" + (currentRun && currentRun.id === r.id ? " active" : "");
         const mode = r.mode || "run";
+        const pill = r.status === "error" ? "error" : mode;
+        const known = { run: 1, replay: 1, replay_from: 1, error: 1 };
+        const pillClass = known[pill] ? pill : "run";
+        const outdated = isOutdated(r)
+          ? '<span class="pill mode-outdated">outdated</span>'
+          : "";
         btn.innerHTML =
           '<div class="run-top"><span>' + escapeHtml(formatTime(r.created_at)) +
-          '</span><span class="pill">' + escapeHtml(r.status === "error" ? "error" : mode) + "</span></div>" +
+          '</span><span class="run-pills"><span class="pill mode-' + pillClass + '">' +
+          escapeHtml(pill) + "</span>" + outdated + "</span></div>" +
           '<div class="meta">' + escapeHtml(truncateJson(r.input)) +
           (r.elapsed_ms != null ? "  ·  " + escapeHtml(formatElapsed(r.elapsed_ms)) : "") +
           "</div>";
@@ -1359,8 +1460,73 @@ PAGE = r"""<!DOCTYPE html>
       return card;
     }
 
+    function orderGraphNodes(spec) {
+      const skip = { __start__: 1, __end__: 1, START: 1, END: 1 };
+      const nodes = (spec && spec.nodes) || [];
+      const edges = (spec && spec.edges) || [];
+      const seen = [];
+      const used = {};
+      const queue = [];
+      edges.forEach((pair) => {
+        if (!pair || pair.length < 2) return;
+        if ((pair[0] === "__start__" || pair[0] === "START") && !skip[pair[1]]) queue.push(pair[1]);
+      });
+      if (!queue.length) nodes.forEach((name) => queue.push(name));
+      while (queue.length) {
+        const name = queue.shift();
+        if (!name || used[name] || skip[name]) continue;
+        used[name] = 1;
+        seen.push(name);
+        edges.forEach((pair) => {
+          if (pair && pair[0] === name && pair[1] && !used[pair[1]] && !skip[pair[1]]) queue.push(pair[1]);
+        });
+      }
+      nodes.forEach((name) => { if (!used[name]) seen.push(name); });
+      return seen;
+    }
+
+    function renderLiveGraph(spec, caption) {
+      const target = $("diagram");
+      const names = orderGraphNodes(spec);
+      if (!names.length) {
+        target.className = "empty";
+        target.innerHTML = caption || "Select a run to inspect the unrolled path.";
+        return;
+      }
+      target.className = "";
+      target.innerHTML = caption
+        ? '<p class="empty" style="margin:0 0 10px">' + escapeHtml(caption) + "</p>"
+        : "";
+      const flow = document.createElement("div");
+      flow.className = "gflow";
+      flow.appendChild(graphCap("Start"));
+      names.forEach((name) => {
+        flow.appendChild(graphLine());
+        const row = document.createElement("div");
+        row.className = "g-row";
+        row.appendChild(graphCard({ node: name, reason: "", step_id: name }, false));
+        flow.appendChild(row);
+      });
+      flow.appendChild(graphLine());
+      flow.appendChild(graphCap("End"));
+      target.appendChild(flow);
+    }
+
     function renderGraph(run) {
       const target = $("diagram");
+      const pipe = currentPipeline();
+      if (pipe && pipe.error) {
+        target.className = "empty";
+        target.innerHTML = escapeHtml(pipe.error);
+        return;
+      }
+      if (pipe && pipe.graph && (!run || isOutdated(run))) {
+        renderLiveGraph(
+          pipe.graph,
+          run ? "Current pipeline — this run is outdated" : "Current pipeline",
+        );
+        return;
+      }
       if (!run) {
         target.className = "empty";
         target.innerHTML = "Select a run to inspect the unrolled path. Double-click a node to open its view.";
@@ -1409,8 +1575,7 @@ PAGE = r"""<!DOCTYPE html>
       $("stepsMs").textContent = run && run.elapsed_ms != null ? formatElapsed(run.elapsed_ms) : "";
       if (!run) {
         selectedStep = null;
-        $("diagram").className = "empty";
-        $("diagram").innerHTML = "Select a run to inspect the unrolled path. Double-click a node to open its view.";
+        renderGraph(null);
         showStepIO(null);
         closeNodeView();
         syncStepButtons();
@@ -1452,11 +1617,107 @@ PAGE = r"""<!DOCTYPE html>
       await loadPipelines();
     }
 
+    function currentPipeline() {
+      return pipelines.find((p) => p.id === fileId) || null;
+    }
+
+    function isOutdated(run) {
+      const pipe = currentPipeline();
+      if (!run || !pipe) return false;
+      if (pipe.graph_hash && run.graph_hash !== pipe.graph_hash) return true;
+      if (pipe.file_sha256 && run.file_sha256 !== pipe.file_sha256) return true;
+      return false;
+    }
+
+    function graphDiff(oldGraph, newGraph) {
+      const oldSpec = oldGraph && typeof oldGraph === "object" ? oldGraph : {};
+      const newSpec = newGraph && typeof newGraph === "object" ? newGraph : {};
+      const lines = [];
+      const asSet = (spec, key) => new Set((spec[key] || []).map((item) => String(item)));
+      [["nodes", "node"], ["state", "state"], ["tools", "tool"]].forEach(([key, label]) => {
+        const before = asSet(oldSpec, key);
+        const after = asSet(newSpec, key);
+        [...after].filter((item) => !before.has(item)).sort().forEach((item) => {
+          lines.push("+ " + label + " " + item);
+        });
+        [...before].filter((item) => !after.has(item)).sort().forEach((item) => {
+          lines.push("- " + label + " " + item);
+        });
+      });
+      const edgeKey = (item) => Array.isArray(item) && item.length >= 2
+        ? String(item[0]) + "\\0" + String(item[1])
+        : "";
+      const beforeEdges = new Set((oldSpec.edges || []).map(edgeKey).filter(Boolean));
+      const afterEdges = new Set((newSpec.edges || []).map(edgeKey).filter(Boolean));
+      [...afterEdges].filter((item) => !beforeEdges.has(item)).sort().forEach((item) => {
+        const [source, target] = item.split("\\0");
+        lines.push("+ edge " + source + " → " + target);
+      });
+      [...beforeEdges].filter((item) => !afterEdges.has(item)).sort().forEach((item) => {
+        const [source, target] = item.split("\\0");
+        lines.push("- edge " + source + " → " + target);
+      });
+      const oldImpl = oldSpec.impl && typeof oldSpec.impl === "object" ? oldSpec.impl : {};
+      const newImpl = newSpec.impl && typeof newSpec.impl === "object" ? newSpec.impl : {};
+      const implNames = Array.from(new Set([...Object.keys(oldImpl), ...Object.keys(newImpl)])).sort();
+      implNames.forEach((name) => {
+        if (oldImpl[name] !== newImpl[name]) lines.push("~ node " + name);
+      });
+      if ((oldSpec.file || "") !== (newSpec.file || "") && !lines.some((line) => line.indexOf("~ node ") === 0)) {
+        lines.push("~ pipeline file");
+      }
+      return lines;
+    }
+
+    function confirmOutdatedReplay() {
+      return new Promise((resolve) => {
+        if (!isOutdated(currentRun)) {
+          resolve(true);
+          return;
+        }
+        const pipe = currentPipeline();
+        const oldHash = currentRun.graph_hash || "";
+        const newHash = (pipe && pipe.graph_hash) || "";
+        $("outdatedHashes").innerHTML =
+          '<div><span>old</span><code title="' + escapeHtml(oldHash) + '">' +
+          escapeHtml(oldHash ? oldHash.slice(0, 12) : "none") + "</code></div>" +
+          '<div><span>new</span><code title="' + escapeHtml(newHash) + '">' +
+          escapeHtml(newHash ? newHash.slice(0, 12) : "none") + "</code></div>";
+        const snap = currentRun.graph;
+        const empty = !snap || !(
+          (snap.nodes && snap.nodes.length) ||
+          (snap.edges && snap.edges.length) ||
+          (snap.state && snap.state.length) ||
+          (snap.tools && snap.tools.length)
+        );
+        const diffs = !currentRun.graph_hash && empty
+          ? ["no structure snapshot on this run"]
+          : graphDiff(snap, pipe && pipe.graph);
+        $("outdatedDiffs").innerHTML = (diffs.length ? diffs : ["node code or pipeline file changed"])
+          .map((line) => "<li>" + escapeHtml(line) + "</li>").join("");
+        const modal = $("outdatedModal");
+        modal.hidden = false;
+        const done = (ok) => {
+          modal.hidden = true;
+          $("outdatedCancel").onclick = null;
+          $("outdatedGo").onclick = null;
+          modal.onclick = null;
+          resolve(ok);
+        };
+        $("outdatedCancel").onclick = () => done(false);
+        $("outdatedGo").onclick = () => done(true);
+        modal.onclick = (event) => {
+          if (event.target === modal) done(false);
+        };
+      });
+    }
+
     async function rerun(mode) {
       if (!currentRun || !selectedStep) {
         alert("Select a node first");
         return;
       }
+      if (!(await confirmOutdatedReplay())) return;
       const input = readNodeInput();
       currentRun = await api("/api/rerun", {
         method: "POST",
@@ -1697,6 +1958,25 @@ PAGE = r"""<!DOCTYPE html>
         diffSection("Timing", timeRows);
     }
 
+    async function refreshAfterFileChange(changedIds) {
+      await loadPipelines();
+      const files = (pipelines || []).map((p) => p.id);
+      if (fileId && files.length && files.indexOf(fileId) < 0) {
+        fileId = files[0];
+        currentRun = null;
+      }
+      if (fileId) {
+        renderExampleChips();
+        await loadHistory();
+      } else {
+        historyRuns = [];
+        renderHistory();
+      }
+      renderRun(currentRun);
+      if (currentView === "pipelines") renderPipeBoard();
+      if (currentView === "compare") renderCompare().catch(() => {});
+    }
+
     async function pollScan() {
       if (document.hidden) return;
       try {
@@ -1709,18 +1989,60 @@ PAGE = r"""<!DOCTYPE html>
         if (next === scanKey) return;
         const prev = JSON.parse(scanKey);
         scanKey = next;
-        const current = (data.files || []).find((item) => item.id === fileId);
-        await loadPipelines();
-        if (fileId && !(data.files || []).some((item) => item.id === fileId)) {
-          fileId = (data.files[0] && data.files[0].id) || null;
-          currentRun = null;
-          renderRun(null);
-        }
-        const before = prev.find((item) => item.id === fileId);
-        if (fileId && current && before && current.mtime !== before.mtime) {
-          renderExampleChips();
-          await loadHistory();
-        }
+        const changed = (data.files || []).filter((item) => {
+          const before = prev.find((old) => old.id === item.id);
+          return !before || before.sha256 !== item.sha256 || before.mtime !== item.mtime;
+        }).map((item) => item.id);
+        prev.forEach((old) => {
+          if (!(data.files || []).some((item) => item.id === old.id)) changed.push(old.id);
+        });
+        await refreshAfterFileChange(changed);
+      } catch (err) {}
+    }
+
+    function shortHash(value) {
+      return String(value || "").slice(0, 8);
+    }
+
+    function fileChangeLabel(ev) {
+      if (ev.kind === "added") return ev.stem + ".py appeared";
+      if (ev.kind === "removed") return ev.stem + ".py removed";
+      if (ev.kind === "hash_changed") return ev.stem + ".py hash changed";
+      return ev.stem + ".py modified";
+    }
+
+    function renderFileChanges() {
+      const panel = $("fileChanges");
+      const list = $("fcList");
+      if (!fileChangeEvents.length) {
+        panel.hidden = true;
+        list.innerHTML = "";
+        return;
+      }
+      panel.hidden = false;
+      list.innerHTML = fileChangeEvents.map((ev, index) => {
+        const hash = ev.kind === "hash_changed" && ev.prev_sha256
+          ? shortHash(ev.prev_sha256) + " → " + shortHash(ev.sha256)
+          : ev.sha256 ? shortHash(ev.sha256) : "";
+        return '<div class="fc-item ' + escapeHtml(ev.kind) + '">' +
+          '<div class="fc-row"><span class="fc-name">' + escapeHtml(fileChangeLabel(ev)) +
+          '</span><span class="fc-kind">' + escapeHtml(ev.kind.replace("_", " ")) +
+          '</span><button type="button" data-fc="' + index + '" aria-label="Dismiss">×</button></div>' +
+          (hash ? '<div class="fc-hash">' + escapeHtml(hash) + "</div>" : "") +
+          "</div>";
+      }).join("");
+    }
+
+    async function pollChanges() {
+      if (document.hidden) return;
+      try {
+        const data = await api("/api/changes?since=" + changeSeq);
+        const events = data.events || [];
+        if (!events.length) return;
+        changeSeq = events[events.length - 1].seq;
+        fileChangeEvents = events.concat(fileChangeEvents).slice(0, 20);
+        renderFileChanges();
+        await refreshAfterFileChange(events.map((ev) => ev.id));
       } catch (err) {}
     }
 
@@ -1804,7 +2126,13 @@ PAGE = r"""<!DOCTYPE html>
       }
     });
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && isNodeViewOpen()) closeNodeView();
+      if (event.key === "Escape") {
+        if (!$("outdatedModal").hidden) {
+          $("outdatedCancel").click();
+          return;
+        }
+        if (isNodeViewOpen()) closeNodeView();
+      }
     });
     window.addEventListener("hashchange", () => {
       showView(viewFromHash());
@@ -1815,10 +2143,21 @@ PAGE = r"""<!DOCTYPE html>
       clearTimeout(pipeResizeTimer);
       pipeResizeTimer = setTimeout(renderPipeBoard, 120);
     });
+    $("fcClear").onclick = () => {
+      fileChangeEvents = [];
+      renderFileChanges();
+    };
+    $("fcList").onclick = (event) => {
+      const btn = event.target.closest("[data-fc]");
+      if (!btn) return;
+      fileChangeEvents.splice(Number(btn.getAttribute("data-fc")), 1);
+      renderFileChanges();
+    };
     loadPipelines().then(() => {
       showView(viewFromHash());
     }).catch((e) => alert(e.message));
     setInterval(() => pollScan(), 2000);
+    setInterval(() => pollChanges(), 500);
   </script>
 </body>
 </html>
@@ -1828,6 +2167,7 @@ PAGE = r"""<!DOCTYPE html>
 class GraphVIHandler(BaseHTTPRequestHandler):
     workspace: Path
     cache: dict[str, LoadedPipeline]
+    watcher: PipelineWatcher | None = None
 
     def log_message(self, format: str, *args) -> None:
         print(f"[graphviagent] {args[0]}")
@@ -1836,6 +2176,8 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
         self.end_headers()
         self.wfile.write(body)
 
@@ -1854,26 +2196,53 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         return [path.stem for path in discover_pipelines(self.workspace)]
 
     def _scan_files(self) -> list[dict]:
+        if self.watcher is not None:
+            self.watcher.refresh(emit=True)
+            return self.watcher.files()
         items = []
         for path in discover_pipelines(self.workspace):
+            try:
+                sha = file_sha256(path)
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
             items.append(
                 {
                     "id": self._rel_id(path),
                     "stem": path.stem,
-                    "mtime": path.stat().st_mtime,
+                    "mtime": mtime,
+                    "sha256": sha,
                 }
             )
         return items
+
+    def _load_listed(self, file_id: str) -> LoadedPipeline:
+        path = (self.workspace / file_id).resolve()
+        if self.workspace.resolve() not in path.parents and path != self.workspace.resolve():
+            loaded = LoadedPipeline(path=path, stem=path.stem)
+            loaded.error = "path outside workspace"
+            return loaded
+        try:
+            sha = file_sha256(path)
+        except OSError:
+            sha = None
+        loaded = load_pipeline(path)
+        loaded._sha256 = sha  # type: ignore[attr-defined]
+        self.cache[file_id] = loaded
+        return loaded
 
     def _get_loaded(self, file_id: str) -> LoadedPipeline:
         path = (self.workspace / file_id).resolve()
         if self.workspace.resolve() not in path.parents and path != self.workspace.resolve():
             raise ValueError("path outside workspace")
+        try:
+            sha = file_sha256(path)
+        except OSError:
+            sha = None
         cached = self.cache.get(file_id)
-        mtime = path.stat().st_mtime
-        if cached is None or getattr(cached, "_mtime", None) != mtime:
+        if cached is None or sha is None or getattr(cached, "_sha256", None) != sha:
             loaded = load_pipeline(path)
-            loaded._mtime = mtime  # type: ignore[attr-defined]
+            loaded._sha256 = sha  # type: ignore[attr-defined]
             self.cache[file_id] = loaded
             cached = loaded
         if cached.error:
@@ -1899,35 +2268,38 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/scan":
             self._json(200, {"files": self._scan_files()})
             return
+        if parsed.path == "/api/changes":
+            since = 0
+            try:
+                since = int((parse_qs(parsed.query).get("since") or ["0"])[0] or 0)
+            except ValueError:
+                since = 0
+            if self.watcher is not None:
+                self.watcher.refresh(emit=True)
+                events = self.watcher.changes(since)
+            else:
+                events = []
+            self._json(200, {"events": events})
+            return
         if parsed.path == "/api/pipelines":
             items = []
             for path in discover_pipelines(self.workspace):
                 file_id = self._rel_id(path)
-                try:
-                    loaded = self._get_loaded(file_id)
-                    runs = list_runs(self.workspace, path.stem, include_steps=True, limit=30)
-                    items.append(
-                        {
-                            "id": file_id,
-                            "stem": path.stem,
-                            "examples": loaded.examples,
-                            "error": None,
-                            "last_run": runs[0] if runs else None,
-                            "recent": runs,
-                        }
-                    )
-                except Exception as exc:
-                    runs = list_runs(self.workspace, path.stem, include_steps=True, limit=30)
-                    items.append(
-                        {
-                            "id": file_id,
-                            "stem": path.stem,
-                            "examples": [],
-                            "error": str(exc),
-                            "last_run": runs[0] if runs else None,
-                            "recent": runs,
-                        }
-                    )
+                loaded = self._load_listed(file_id)
+                runs = list_runs(self.workspace, path.stem, include_steps=True, limit=30)
+                items.append(
+                    {
+                        "id": file_id,
+                        "stem": path.stem,
+                        "examples": loaded.examples,
+                        "error": loaded.error,
+                            "graph": loaded.graph,
+                            "graph_hash": loaded.graph_hash,
+                            "file_sha256": loaded.file_sha256,
+                        "last_run": runs[0] if runs else None,
+                        "recent": runs,
+                    }
+                )
             self._json(200, {"pipelines": items})
             return
         if parsed.path == "/api/runs":
@@ -1977,7 +2349,11 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                     payload.get("input") or {},
                     has_checkpointer=loaded.has_checkpointer,
                 )
-                saved = save_run(self.workspace, loaded.stem, run)
+                saved = save_run(
+                    self.workspace,
+                    loaded.stem,
+                    attach_graph_meta(run, loaded.graph, loaded.graph_hash, loaded.file_sha256),
+                )
                 self._json(200, self._with_render(saved))
                 return
             if parsed.path == "/api/rerun":
@@ -2014,7 +2390,11 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                         patch,
                         incoming,
                     )
-                saved = save_run(self.workspace, loaded.stem, new_run)
+                saved = save_run(
+                    self.workspace,
+                    loaded.stem,
+                    attach_graph_meta(new_run, loaded.graph, loaded.graph_hash, loaded.file_sha256),
+                )
                 self._json(200, self._with_render(saved))
                 return
             if parsed.path == "/api/import":
@@ -2041,9 +2421,21 @@ def serve(
     handler = partial(GraphVIHandler)
     GraphVIHandler.workspace = workspace.resolve()
     GraphVIHandler.cache = {}
+
+    def invalidate(file_ids: list[str]) -> None:
+        for file_id in file_ids:
+            GraphVIHandler.cache.pop(file_id, None)
+
+    watcher = PipelineWatcher(GraphVIHandler.workspace, on_change=invalidate)
+    watcher.start()
+    GraphVIHandler.watcher = watcher
     server = ThreadingHTTPServer((host, port), handler)
     url = f"http://{host}:{port}"
     print(f"GraphVIAgent {url}  workspace={workspace}", flush=True)
     if open_browser:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        watcher.stop()
+        GraphVIHandler.watcher = None

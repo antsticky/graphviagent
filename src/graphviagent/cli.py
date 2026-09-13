@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from graphviagent.discover import discover_pipelines
+from graphviagent.graph_hash import attach_graph_meta
 from graphviagent.load import load_pipeline
 from graphviagent.record import record_run
 from graphviagent.server import serve
@@ -63,7 +64,11 @@ def _cmd_run(file: str, raw_input: str, workspace: Path) -> int:
         payload,
         has_checkpointer=loaded.has_checkpointer,
     )
-    saved = save_run(workspace, loaded.stem, run)
+    saved = save_run(
+        workspace,
+        loaded.stem,
+        attach_graph_meta(run, loaded.graph, loaded.graph_hash, loaded.file_sha256),
+    )
     status = "error" if saved.get("error") else "ok"
     print(f"{saved['id']}  {status}  {saved.get('elapsed_ms')}ms  {loaded.stem}")
     if saved.get("error"):

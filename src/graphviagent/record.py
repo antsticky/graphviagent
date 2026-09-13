@@ -2,14 +2,23 @@ from __future__ import annotations
 
 import copy
 import json
+import queue
+import sys
+import threading
 import time
 import tracemalloc
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterator
 from uuid import uuid4
 
 _SKIP_NODES = {"__start__", "START", "__end__", "END"}
 MAX_RUN_THREADS = 3
+_LOG_LIMIT = 500
+_capture_tls = threading.local()
+_capture_lock = threading.Lock()
+_capture_depth = 0
+_capture_stdout: Any = None
+_capture_stderr: Any = None
 
 
 class RunCancelled(Exception):
@@ -321,16 +330,66 @@ def _invoke_target(node: Any) -> Any | None:
     return None
 
 
+class _CaptureStream:
+    def __init__(self, original: Any) -> None:
+        self.original = original
+
+    def write(self, data: Any) -> int:
+        text = data if isinstance(data, str) else str(data)
+        try:
+            written = self.original.write(data)
+        except Exception:
+            written = len(text)
+        sink = getattr(_capture_tls, "sink", None)
+        if sink is not None:
+            sink(text)
+        return written if isinstance(written, int) else len(text)
+
+    def flush(self) -> None:
+        flush = getattr(self.original, "flush", None)
+        if callable(flush):
+            flush()
+
+    def isatty(self) -> bool:
+        fn = getattr(self.original, "isatty", None)
+        return bool(fn()) if callable(fn) else False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.original, name)
+
+
+def _install_stdio_capture() -> None:
+    global _capture_depth, _capture_stdout, _capture_stderr
+    with _capture_lock:
+        if _capture_depth == 0:
+            _capture_stdout = sys.stdout
+            _capture_stderr = sys.stderr
+            sys.stdout = _CaptureStream(_capture_stdout)
+            sys.stderr = _CaptureStream(_capture_stderr)
+        _capture_depth += 1
+
+
+def _uninstall_stdio_capture() -> None:
+    global _capture_depth
+    with _capture_lock:
+        _capture_depth = max(0, _capture_depth - 1)
+        if _capture_depth == 0 and _capture_stdout is not None:
+            sys.stdout = _capture_stdout
+            sys.stderr = _capture_stderr
+
+
 def _install_node_probes(
     app: Any,
     clock0: float,
     cancel: Any | None = None,
-) -> tuple[list[dict], Any]:
+    emit: Any | None = None,
+) -> tuple[list[dict], Any, threading.Lock]:
     probes: list[dict] = []
+    lock = threading.Lock()
     restores: list[tuple[Any, Any]] = []
     nodes = getattr(app, "nodes", None)
     if not isinstance(nodes, dict):
-        return probes, lambda: None
+        return probes, lambda: None, lock
 
     for name, node in nodes.items():
         if str(name) in _SKIP_NODES:
@@ -346,24 +405,40 @@ def _install_node_probes(
                     raise RunCancelled("cancelled")
                 started_ms = round((time.perf_counter() - clock0) * 1000, 2)
                 incoming = _probe_input(args, kwargs)
+                if emit:
+                    emit({"type": "node_start", "node": node_name, "started_ms": started_ms})
+                    emit({"type": "log", "t": started_ms, "src": node_name, "text": "started"})
+                previous = getattr(_capture_tls, "sink", None)
+
+                def sink(text: str) -> None:
+                    if not emit:
+                        return
+                    now = round((time.perf_counter() - clock0) * 1000, 2)
+                    for line in str(text).splitlines():
+                        if line.strip():
+                            emit({"type": "log", "t": now, "src": node_name, "text": line})
+
+                _capture_tls.sink = sink
                 memory = _MemoryTrace()
                 try:
                     return orig(*args, **kwargs)
                 finally:
+                    _capture_tls.sink = previous
                     memory_mb, memory_peak_mb = memory.snapshot()
                     memory.close()
                     ended_ms = round((time.perf_counter() - clock0) * 1000, 2)
-                    probes.append(
-                        {
-                            "node": node_name,
-                            "started_ms": started_ms,
-                            "ended_ms": ended_ms,
-                            "elapsed_ms": round(max(0.0, ended_ms - started_ms), 2),
-                            "memory_mb": memory_mb,
-                            "memory_peak_mb": memory_peak_mb,
-                            "input": incoming,
-                        }
-                    )
+                    with lock:
+                        probes.append(
+                            {
+                                "node": node_name,
+                                "started_ms": started_ms,
+                                "ended_ms": ended_ms,
+                                "elapsed_ms": round(max(0.0, ended_ms - started_ms), 2),
+                                "memory_mb": memory_mb,
+                                "memory_peak_mb": memory_peak_mb,
+                                "input": incoming,
+                            }
+                        )
 
             return probed
 
@@ -374,14 +449,38 @@ def _install_node_probes(
         for target, original in restores:
             target.invoke = original
 
-    return probes, restore
+    return probes, restore, lock
 
 
-def _take_probe(probes: list[dict], node: str) -> dict | None:
-    for index, probe in enumerate(probes):
-        if probe.get("node") == node:
-            return probes.pop(index)
-    return None
+def _take_probe(
+    probes: list[dict],
+    node: str,
+    lock: threading.Lock | None = None,
+) -> dict | None:
+    if lock is not None:
+        lock.acquire()
+    try:
+        for index, probe in enumerate(probes):
+            if probe.get("node") == node:
+                return probes.pop(index)
+        return None
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def _apply_unused(steps: list[dict], edges: list[tuple[str, str]]) -> None:
+    for index, step in enumerate(steps):
+        next_node = steps[index + 1]["node"] if index + 1 < len(steps) else None
+        step["unused"] = unused_targets(step["node"], next_node, edges)
+
+
+def _append_log(logs: list[dict], event: dict) -> dict:
+    item = {"t": event.get("t"), "src": event.get("src") or "run", "text": event.get("text") or ""}
+    logs.append(item)
+    if len(logs) > _LOG_LIMIT:
+        del logs[:-_LOG_LIMIT]
+    return {"type": "log", **item}
 
 
 def _run_span(steps: list[dict], fallback_ms: float) -> float:
@@ -571,11 +670,41 @@ def extract_decisions(update: dict) -> list[dict]:
 
 
 def graph_edges(app: Any) -> list[tuple[str, str]]:
+    edges: list[tuple[str, str]] = []
+    builder = getattr(app, "builder", None)
+    if builder is not None:
+        for pair in getattr(builder, "edges", ()) or ():
+            if isinstance(pair, (tuple, list)) and len(pair) >= 2:
+                edges.append((str(pair[0]), str(pair[1])))
+        branches = getattr(builder, "branches", None) or {}
+        send_sources: list[str] = []
+        items = branches.items() if isinstance(branches, dict) else []
+        for source, specs in items:
+            values = specs.values() if isinstance(specs, dict) else specs or []
+            for spec in values:
+                ends = getattr(spec, "ends", None)
+                if isinstance(ends, dict) and ends:
+                    for target in ends.values():
+                        if target is None:
+                            continue
+                        edges.append((str(source), str(target)))
+                else:
+                    send_sources.append(str(source))
+        nodes = getattr(builder, "nodes", None)
+        node_names = {str(name) for name in nodes} if isinstance(nodes, dict) else set()
+        incoming = {target for _, target in edges}
+        for source in send_sources:
+            for name in node_names:
+                if name == source or name in incoming:
+                    continue
+                edges.append((source, name))
+                incoming.add(name)
+        if edges:
+            return sorted(set(edges))
     try:
         graph = app.get_graph()
     except Exception:
-        return []
-    edges: list[tuple[str, str]] = []
+        return sorted(set(edges))
     for edge in getattr(graph, "edges", []) or []:
         source = getattr(edge, "source", None)
         target = getattr(edge, "target", None)
@@ -584,7 +713,7 @@ def graph_edges(app: Any) -> list[tuple[str, str]]:
         if source is None or target is None:
             continue
         edges.append((str(source), str(target)))
-    return edges
+    return sorted(set(edges))
 
 
 def unused_targets(node: str, next_node: str | None, edges: list[tuple[str, str]]) -> list[str]:
@@ -615,6 +744,253 @@ def invoke_node(app: Any, node_name: str, state: dict) -> dict:
     raise RuntimeError(f"cannot invoke node {node_name!r}")
 
 
+def _build_step(
+    *,
+    node: str,
+    update: dict,
+    ended_ms: float,
+    state: dict,
+    visits: dict[str, int],
+    probes: list[dict],
+    probe_lock: threading.Lock,
+    completed_end: dict[str, float],
+    edges: list[tuple[str, str]],
+    wall0: float,
+) -> tuple[dict, dict]:
+    visits[node] = visits.get(node, 0) + 1
+    graph_in = copy.deepcopy(state)
+    failed = isinstance(update, dict) and update.get("error")
+    probe = _take_probe(probes, node, probe_lock)
+    if probe:
+        started_ms = float(probe["started_ms"])
+        ended_ms = float(probe["ended_ms"])
+        memory_mb = float(probe["memory_mb"])
+        memory_peak_mb = float(probe.get("memory_peak_mb") or 0)
+        invoke_input = probe.get("input")
+    else:
+        started_ms = _infer_started_ms(node, ended_ms, completed_end, edges)
+        memory_mb = 0.0
+        memory_peak_mb = 0.0
+        invoke_input = None
+    state_in = invoke_input if isinstance(invoke_input, dict) else graph_in
+    state_out = copy.deepcopy(state_in) if failed else merge_state(state_in, update)
+    step = {
+        "step_id": f"{node}#{visits[node]}",
+        "index": None,
+        "node": node,
+        "update": jsonable(update),
+        "state_in": jsonable(state_in),
+        "state_out": jsonable(state_out),
+        "reason": extract_reason(update),
+        "decisions": jsonable(extract_decisions(update)),
+        "unused": [],
+    }
+    _attach_timing(step, started_ms=started_ms, ended_ms=ended_ms, wall_start=wall0)
+    _attach_metrics(step, update, memory_mb, memory_peak_mb)
+    if failed:
+        step["error"] = str(update.get("error"))
+    completed_end[node] = ended_ms
+    graph_out = copy.deepcopy(graph_in) if failed else merge_state(graph_in, update)
+    return step, graph_out
+
+
+def _build_run(
+    *,
+    run_id: str,
+    user_input: dict,
+    steps: list[dict],
+    state: dict,
+    has_checkpointer: bool,
+    wall0: float,
+    clock0: float,
+    run_error: str | None,
+    logs: list[dict],
+    edges: list[tuple[str, str]],
+) -> dict:
+    for index, step in enumerate(steps):
+        step["index"] = index
+    _apply_unused(steps, edges)
+    span = _run_span(steps, _elapsed_ms(clock0))
+    return {
+        "id": run_id,
+        "input": jsonable(user_input),
+        "steps": steps,
+        "result": jsonable(state),
+        "has_checkpointer": has_checkpointer,
+        "thread_id": run_id if has_checkpointer else None,
+        "started_at": _iso_from_wall(wall0, 0),
+        "ended_at": _iso_from_wall(wall0, span),
+        "elapsed_ms": span,
+        "error": run_error,
+        "logs": list(logs),
+    }
+
+
+def _execute_run(
+    app: Any,
+    user_input: dict,
+    *,
+    thread_id: str | None,
+    has_checkpointer: bool,
+    cancel: Any | None,
+    max_concurrency: int,
+    emit: Any,
+) -> None:
+    run_id = thread_id or uuid4().hex
+    config: dict[str, Any] = {"max_concurrency": max_concurrency}
+    if has_checkpointer:
+        config["configurable"] = {"thread_id": run_id}
+    state = copy.deepcopy(user_input)
+    steps: list[dict] = []
+    visits: dict[str, int] = {}
+    edges = graph_edges(app)
+    raw_events: list[tuple[str, dict, float]] = []
+    logs: list[dict] = []
+    logs_lock = threading.Lock()
+    run_error: str | None = None
+    clock0 = time.perf_counter()
+    wall0 = time.time()
+
+    def push(event: dict) -> None:
+        if event.get("type") == "log":
+            with logs_lock:
+                emit(_append_log(logs, event))
+            return
+        emit(event)
+
+    emit({"type": "start", "run_id": run_id, "input": jsonable(user_input), "started_at": _iso_from_wall(wall0, 0)})
+    push({"type": "log", "t": 0, "src": "run", "text": "run started"})
+    probes, restore_probes, probe_lock = _install_node_probes(
+        app, clock0, cancel=cancel, emit=push
+    )
+    completed_end: dict[str, float] = {}
+    _install_stdio_capture()
+    try:
+        stream = app.stream(user_input, config)
+        for event in stream:
+            if cancel is not None and getattr(cancel, "is_set", lambda: False)():
+                raise RunCancelled("cancelled")
+            if not isinstance(event, dict) or not event:
+                continue
+            for node, update in event.items():
+                node = str(node)
+                if node in _SKIP_NODES:
+                    continue
+                if not isinstance(update, dict):
+                    update = {"value": update}
+                ended_ms = _elapsed_ms(clock0)
+                raw_events.append((node, update, ended_ms))
+                step, state = _build_step(
+                    node=node,
+                    update=update,
+                    ended_ms=ended_ms,
+                    state=state,
+                    visits=visits,
+                    probes=probes,
+                    probe_lock=probe_lock,
+                    completed_end=completed_end,
+                    edges=edges,
+                    wall0=wall0,
+                )
+                step["index"] = len(steps)
+                steps.append(step)
+                push({"type": "log", "t": step["ended_ms"], "src": node, "text": f"finished ({step['elapsed_ms']}ms)"})
+                emit({"type": "step", "step": step})
+                emit({"type": "state", "state": jsonable(state)})
+    except Exception as exc:
+        if _is_cancelled(exc):
+            run_error = "cancelled"
+        else:
+            run_error = _format_error(exc)
+            failed = _guess_failed_node(raw_events, edges)
+            if failed:
+                update = {"error": run_error}
+                ended_ms = _elapsed_ms(clock0)
+                raw_events.append((failed, update, ended_ms))
+                step, state = _build_step(
+                    node=failed,
+                    update=update,
+                    ended_ms=ended_ms,
+                    state=state,
+                    visits=visits,
+                    probes=probes,
+                    probe_lock=probe_lock,
+                    completed_end=completed_end,
+                    edges=edges,
+                    wall0=wall0,
+                )
+                step["index"] = len(steps)
+                steps.append(step)
+                push({"type": "log", "t": ended_ms, "src": failed, "text": run_error})
+                emit({"type": "step", "step": step})
+                emit({"type": "state", "state": jsonable(state)})
+    finally:
+        restore_probes()
+        _uninstall_stdio_capture()
+
+    if run_error:
+        push({"type": "log", "t": _elapsed_ms(clock0), "src": "run", "text": run_error})
+    else:
+        push({"type": "log", "t": _elapsed_ms(clock0), "src": "run", "text": "run finished"})
+    emit(
+        {
+            "type": "done",
+            "run": _build_run(
+                run_id=run_id,
+                user_input=user_input,
+                steps=steps,
+                state=state,
+                has_checkpointer=has_checkpointer,
+                wall0=wall0,
+                clock0=clock0,
+                run_error=run_error,
+                logs=logs,
+                edges=edges,
+            ),
+        }
+    )
+
+
+def iter_run_events(
+    app: Any,
+    user_input: dict,
+    *,
+    thread_id: str | None = None,
+    has_checkpointer: bool = False,
+    cancel: Any | None = None,
+    max_concurrency: int = MAX_RUN_THREADS,
+) -> Iterator[dict]:
+    pending: queue.Queue[dict | None] = queue.Queue()
+
+    def emit(event: dict) -> None:
+        pending.put(event)
+
+    def worker() -> None:
+        try:
+            _execute_run(
+                app,
+                user_input,
+                thread_id=thread_id,
+                has_checkpointer=has_checkpointer,
+                cancel=cancel,
+                max_concurrency=max_concurrency,
+                emit=emit,
+            )
+        except Exception as exc:
+            pending.put({"type": "error", "error": _format_error(exc)})
+        finally:
+            pending.put(None)
+
+    thread = threading.Thread(target=worker, name="graphviagent-run", daemon=True)
+    thread.start()
+    while True:
+        item = pending.get()
+        if item is None:
+            break
+        yield item
+    thread.join(timeout=1)
+
+
 def record_run(
     app: Any,
     user_input: dict,
@@ -624,93 +1000,23 @@ def record_run(
     cancel: Any | None = None,
     max_concurrency: int = MAX_RUN_THREADS,
 ) -> dict:
-    run_id = thread_id or uuid4().hex
-    config: dict[str, Any] = {"max_concurrency": max_concurrency}
-    if has_checkpointer:
-        config["configurable"] = {"thread_id": run_id}
-    state = copy.deepcopy(user_input)
-    steps: list[dict] = []
-    visits: dict[str, int] = {}
-    edges = graph_edges(app)
-
-    raw_events: list[tuple[str, dict, float]] = []
-    run_error: str | None = None
-    clock0 = time.perf_counter()
-    wall0 = time.time()
-    probes, restore_probes = _install_node_probes(app, clock0, cancel=cancel)
-    try:
-        stream = app.stream(user_input, config)
-        for event in stream:
-            if cancel is not None and getattr(cancel, "is_set", lambda: False)():
-                raise RunCancelled("cancelled")
-            if not isinstance(event, dict) or not event:
-                continue
-            node, update = next(iter(event.items()))
-            if not isinstance(update, dict):
-                update = {"value": update}
-            raw_events.append((str(node), update, _elapsed_ms(clock0)))
-    except Exception as exc:
-        if _is_cancelled(exc):
-            run_error = "cancelled"
-        else:
-            run_error = _format_error(exc)
-            failed = _guess_failed_node(raw_events, edges)
-            if failed:
-                raw_events.append((failed, {"error": run_error}, _elapsed_ms(clock0)))
-    finally:
-        restore_probes()
-
-    completed_end: dict[str, float] = {}
-    for index, (node, update, ended_ms) in enumerate(raw_events):
-        visits[node] = visits.get(node, 0) + 1
-        next_node = raw_events[index + 1][0] if index + 1 < len(raw_events) else None
-        graph_in = copy.deepcopy(state)
-        failed = isinstance(update, dict) and update.get("error")
-        probe = _take_probe(probes, node)
-        if probe:
-            started_ms = float(probe["started_ms"])
-            ended_ms = float(probe["ended_ms"])
-            memory_mb = float(probe["memory_mb"])
-            memory_peak_mb = float(probe.get("memory_peak_mb") or 0)
-            invoke_input = probe.get("input")
-        else:
-            started_ms = _infer_started_ms(node, ended_ms, completed_end, edges)
-            memory_mb = 0.0
-            memory_peak_mb = 0.0
-            invoke_input = None
-        state_in = invoke_input if isinstance(invoke_input, dict) else graph_in
-        state_out = copy.deepcopy(state_in) if failed else merge_state(state_in, update)
-        step = {
-            "step_id": f"{node}#{visits[node]}",
-            "index": index,
-            "node": node,
-            "update": jsonable(update),
-            "state_in": jsonable(state_in),
-            "state_out": jsonable(state_out),
-            "reason": extract_reason(update),
-            "decisions": jsonable(extract_decisions(update)),
-            "unused": unused_targets(node, next_node, edges),
-        }
-        _attach_timing(step, started_ms=started_ms, ended_ms=ended_ms, wall_start=wall0)
-        _attach_metrics(step, update, memory_mb, memory_peak_mb)
-        if failed:
-            step["error"] = str(update.get("error"))
-        steps.append(step)
-        completed_end[node] = ended_ms
-        state = copy.deepcopy(graph_in) if failed else merge_state(graph_in, update)
-
-    return {
-        "id": run_id,
-        "input": jsonable(user_input),
-        "steps": steps,
-        "result": jsonable(state),
-        "has_checkpointer": has_checkpointer,
-        "thread_id": run_id if has_checkpointer else None,
-        "started_at": _iso_from_wall(wall0, 0),
-        "ended_at": _iso_from_wall(wall0, _run_span(steps, _elapsed_ms(clock0))),
-        "elapsed_ms": _run_span(steps, _elapsed_ms(clock0)),
-        "error": run_error,
-    }
+    run = None
+    error = None
+    for event in iter_run_events(
+        app,
+        user_input,
+        thread_id=thread_id,
+        has_checkpointer=has_checkpointer,
+        cancel=cancel,
+        max_concurrency=max_concurrency,
+    ):
+        if event.get("type") == "done":
+            run = event.get("run")
+        elif event.get("type") == "error":
+            error = event.get("error")
+    if run is not None:
+        return run
+    raise RuntimeError(error or "run produced no result")
 
 
 def _incoming_state(

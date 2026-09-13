@@ -367,7 +367,7 @@ PAGE = r"""<!DOCTYPE html>
       color: var(--muted); margin-top: 4px;
     }
     .gantt-tip .tip-row b { color: var(--ink); font-weight: 500; }
-    .gantt-tip .tip-why { color: var(--muted); margin-top: 6px; }
+    .gantt-tip .tip-why { color: var(--muted); margin-top: 6px; line-height: 1.4; }
     .gantt-tip .tip-err { color: var(--danger); margin-top: 6px; }
     .gantt-lane { margin-bottom: 4px; }
     .gantt-lane:last-child { margin-bottom: 0; }
@@ -578,7 +578,7 @@ PAGE = r"""<!DOCTYPE html>
     }
     .spark i {
       flex: 1; min-width: 4px; border-radius: 1px 1px 0 0;
-      background: #6366f1;
+      background: #6366f1; cursor: help;
     }
     .spark i.mb { background: #06b6d4; }
     .spark i.peak { background: #38bdf8; }
@@ -600,7 +600,10 @@ PAGE = r"""<!DOCTYPE html>
       color: var(--muted); font-size: 10px; font-weight: 400;
       text-transform: none; letter-spacing: 0;
     }
-    .spark-legend span { display: inline-flex; align-items: center; gap: 3px; }
+    .spark-legend span {
+      display: inline-flex; align-items: center; gap: 3px;
+      cursor: help;
+    }
     .spark-legend i {
       width: 6px; height: 8px; border-radius: 1px;
       background: #6366f1;
@@ -971,13 +974,13 @@ PAGE = r"""<!DOCTYPE html>
         <div class="pane">
           <h2 class="pane-title">Steps
             <span class="steps-meta">
-              <span class="spark-legend" title="Bars are relative to the max of that metric in this run">
-                <span><i class="ms"></i> time</span>
-                <span><i class="mb"></i> mem</span>
-                <span><i class="peak"></i> peak</span>
-                <span><i class="prompt"></i> in</span>
-                <span><i class="completion"></i> out</span>
-                <span><i class="tool"></i> tool</span>
+              <span class="spark-legend">
+                <span data-metric="ms"><i class="ms"></i> time</span>
+                <span data-metric="mb"><i class="mb"></i> mem</span>
+                <span data-metric="peak"><i class="peak"></i> peak</span>
+                <span data-metric="prompt"><i class="prompt"></i> in</span>
+                <span data-metric="completion"><i class="completion"></i> out</span>
+                <span data-metric="tool"><i class="tool"></i> tool</span>
               </span>
               <span id="stepsMs"></span>
             </span>
@@ -1177,28 +1180,92 @@ PAGE = r"""<!DOCTYPE html>
       return metrics.tool != null ? formatElapsed(metrics.tool) : "—";
     }
 
+    const SPARK_METRICS = [
+      {
+        key: "ms",
+        cls: "ms",
+        label: "time",
+        title: "Time",
+        help: "Wall-clock duration of this node visit.",
+      },
+      {
+        key: "mb",
+        cls: "mb",
+        label: "mem",
+        title: "Mem",
+        help: "Extra Python memory still held when the node finished, versus when it started. Net leftover, not the whole process.",
+      },
+      {
+        key: "peak",
+        cls: "peak",
+        label: "peak",
+        title: "Peak",
+        help: "Highest memory this visit reached while it ran. Higher than mem when the node allocated, then freed before finishing.",
+      },
+      {
+        key: "prompt",
+        cls: "prompt",
+        label: "in",
+        title: "In — prompt tokens",
+        help: "Tokens sent to the LLM as input. Zero if this node did not call a model.",
+      },
+      {
+        key: "completion",
+        cls: "completion",
+        label: "out",
+        title: "Out — completion tokens",
+        help: "Tokens the LLM generated as output. Priced separately from in. Zero if this node did not call a model.",
+      },
+      {
+        key: "tool",
+        cls: "tool",
+        label: "tool",
+        title: "Tool",
+        help: "Time spent inside tool calls on this visit. This is latency, not a token count.",
+      },
+    ];
+
+    function sparkMetric(key) {
+      return SPARK_METRICS.find((item) => item.key === key);
+    }
+
+    function metricTipHtml(metric, valueLabel) {
+      if (!metric) return "";
+      return '<div class="tip-name">' + escapeHtml(metric.title) + "</div>" +
+        (valueLabel ? '<div class="tip-id">' + escapeHtml(valueLabel) + "</div>" : "") +
+        '<div class="tip-why">' + escapeHtml(metric.help) + "</div>";
+    }
+
+    function bindMetricTip(el, html) {
+      el.addEventListener("mouseenter", (mouse) => placeGanttTip(mouse, html));
+      el.addEventListener("mousemove", (mouse) => placeGanttTip(mouse, html));
+      el.addEventListener("mouseleave", hideGanttTip);
+    }
+
+    function bindSparkHovers(root) {
+      if (!root || !root.querySelectorAll) return;
+      root.querySelectorAll(".spark:not(.tip-spark) i[data-metric]").forEach((el) => {
+        const metric = sparkMetric(el.dataset.metric);
+        if (!metric) return;
+        bindMetricTip(el, metricTipHtml(metric, el.getAttribute("data-value")));
+      });
+    }
+
     function sparkBars(metrics, maxes, extraClass) {
-      const keys = [
-        ["ms", "ms", "time"],
-        ["mb", "mb", "mem"],
-        ["peak", "peak", "peak"],
-        ["prompt", "prompt", "in"],
-        ["completion", "completion", "out"],
-        ["tool", "tool", "tool"],
-      ];
       const memScale = Math.max((maxes && maxes.mb) || 0, (maxes && maxes.peak) || 0);
-      const bars = keys.map(([key, cls, label]) => {
-        const value = metrics[key];
-        const max = (key === "mb" || key === "peak") ? memScale : ((maxes && maxes[key]) || 0);
+      const bars = SPARK_METRICS.map((metric) => {
+        const value = metrics[metric.key];
+        const max = (metric.key === "mb" || metric.key === "peak") ? memScale : ((maxes && maxes[metric.key]) || 0);
         const missing = value == null || !Number.isFinite(value);
         const ratio = !missing && max > 0 ? value / max : 0;
         const height = missing || value === 0 ? 2 : Math.max(3, Math.round(ratio * 22));
-        const tip = label + "  " + sparkValueLabel(key, metrics);
-        return '<i class="' + cls + (missing || value === 0 ? " zero" : "") +
-          '" style="height:' + height + 'px" title="' + escapeHtml(tip) + '"></i>';
+        return '<i class="' + metric.cls + (missing || value === 0 ? " zero" : "") +
+          '" data-metric="' + metric.key +
+          '" data-value="' + escapeHtml(sparkValueLabel(metric.key, metrics)) +
+          '" style="height:' + height + 'px"></i>';
       });
       const labeled = extraClass ? '<div class="spark-labels">' +
-        keys.map((item) => "<span>" + item[2] + "</span>").join("") + "</div>" : "";
+        SPARK_METRICS.map((item) => "<span>" + item.label + "</span>").join("") + "</div>" : "";
       return '<div class="spark-wrap">' +
         '<div class="spark' + (extraClass ? " " + extraClass : "") + '">' + bars.join("") + "</div>" +
         labeled + "</div>";
@@ -2258,6 +2325,7 @@ PAGE = r"""<!DOCTYPE html>
         event.preventDefault();
         openNodeView(step, "all");
       };
+      bindSparkHovers(el);
     }
 
     function stepDetail(step) {
@@ -3876,6 +3944,11 @@ PAGE = r"""<!DOCTYPE html>
       fileChangeEvents.splice(Number(btn.getAttribute("data-fc")), 1);
       renderFileChanges();
     };
+    document.querySelectorAll(".spark-legend [data-metric]").forEach((el) => {
+      const metric = sparkMetric(el.dataset.metric);
+      if (!metric) return;
+      bindMetricTip(el, metricTipHtml(metric));
+    });
     loadPipelines().then(() => {
       showView(viewFromHash());
     }).catch((e) => alert(e.message));

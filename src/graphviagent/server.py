@@ -253,22 +253,47 @@ PAGE = r"""<!DOCTYPE html>
     }
     button.ghost:disabled:hover { background: transparent; }
     .warn { color: #c4a574; font-size: 12px; margin: 0 0 14px; }
-    .grid { display: grid; grid-template-columns: 1.15fr 1fr; gap: 12px; }
+    .grid { display: grid; grid-template-columns: 1.15fr 1fr; gap: 12px; align-items: stretch; }
     .pane {
+      display: flex; flex-direction: column; min-height: 0;
       background: var(--panel); border: 1px solid var(--line);
       border-radius: 8px; padding: 12px; min-height: 240px;
     }
     #diagram {
+      flex: 1;
       min-height: 320px;
-      overflow: auto;
+      overflow: hidden;
+      position: relative;
       border-radius: 8px;
+      cursor: grab;
       background:
         radial-gradient(circle at 1px 1px, #26262e 1px, transparent 0) 0 0 / 18px 18px;
     }
-    #diagram.empty, .empty { color: var(--muted); background: transparent; }
+    #diagram:active { cursor: grabbing; }
+    #diagram.empty { cursor: default; }
+    #diagram.empty, .empty { color: var(--muted); }
+    #diagram.empty { background: transparent; }
+    .graph-zoom { display: flex; align-items: center; gap: 4px; }
+    .graph-zoom .ghost {
+      height: 24px; min-width: 24px; padding: 0 8px;
+      font-size: 12px; line-height: 1;
+    }
+    #diagram .gzoom {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      padding-top: 12px;
+      pointer-events: none;
+    }
     .gflow {
       display: flex; flex-direction: column; align-items: center;
-      padding: 18px 36px 22px; min-width: min-content;
+      width: 228px;
+      padding: 18px 0 22px;
+      transform-origin: 114px 0;
+      pointer-events: auto;
+      will-change: transform;
     }
     .g-cap {
       height: 22px; padding: 0 10px; border-radius: 999px;
@@ -277,7 +302,7 @@ PAGE = r"""<!DOCTYPE html>
       text-transform: uppercase; display: inline-flex; align-items: center;
     }
     .g-line { width: 1px; height: 18px; background: #32323c; }
-    .g-row { position: relative; display: flex; justify-content: center; }
+    .g-row { position: relative; width: 228px; display: flex; justify-content: flex-start; }
     .g-card {
       width: 228px; display: flex; align-items: flex-start; gap: 10px;
       padding: 10px 12px; border-radius: 10px; cursor: pointer;
@@ -591,7 +616,6 @@ PAGE = r"""<!DOCTYPE html>
   <section id="compareView" class="page" hidden>
     <div class="page-inner">
       <h1>Compare</h1>
-      <p class="lede">Pick two runs. Diff input, path, per-node output, and timing.</p>
       <div class="cmp-filter">
         <label for="cmpPipe">Pipeline</label>
         <select id="cmpPipe">
@@ -614,7 +638,6 @@ PAGE = r"""<!DOCTYPE html>
   <section id="pipelinesView" class="page" hidden>
     <div class="page-inner">
       <h1>Pipelines</h1>
-      <p class="lede">Hover for the date. Click a cell or bar to open that run.</p>
       <div id="pipeBoard"></div>
     </div>
   </section>
@@ -650,10 +673,15 @@ PAGE = r"""<!DOCTYPE html>
         <button class="ghost" id="importBtn">Import</button>
         <button class="ghost" id="deleteBtn">Delete run</button>
       </div>
-      <p class="warn">Replay, Replay from, and Call node run node functions again. Side effects will fire.</p>
       <div class="grid">
         <div class="pane">
-          <h2>Graph</h2>
+          <h2 class="pane-title">Graph
+            <span class="graph-zoom">
+              <button type="button" class="ghost" id="zoomOut" title="Zoom out">−</button>
+              <button type="button" class="ghost" id="zoomFit" title="Fit to window">Fit</button>
+              <button type="button" class="ghost" id="zoomIn" title="Zoom in">+</button>
+            </span>
+          </h2>
           <div id="diagram" class="empty">Select a run to inspect the unrolled path. Double-click a node to open its view.</div>
         </div>
         <div class="pane">
@@ -730,6 +758,9 @@ PAGE = r"""<!DOCTYPE html>
     let changeSeq = 0;
     let fileChangeEvents = [];
     let compareRuns = [];
+    let graphZoom = 1;
+    let graphPanX = 0;
+    let graphPanY = 0;
 
     const $ = (id) => document.getElementById(id);
 
@@ -1485,12 +1516,51 @@ PAGE = r"""<!DOCTYPE html>
       return seen;
     }
 
+    function applyGraphZoom() {
+      const box = $("diagram");
+      const flow = box && box.querySelector(".gflow");
+      const wrap = box && box.querySelector(".gzoom");
+      const empty = !box || box.classList.contains("empty") || !flow;
+      ["zoomIn", "zoomOut", "zoomFit"].forEach((id) => {
+        const btn = $(id);
+        if (btn) btn.disabled = empty;
+      });
+      if (empty || !flow) return;
+      flow.style.transform =
+        "translate(" + graphPanX + "px, " + graphPanY + "px) scale(" + graphZoom + ")";
+    }
+
+    function fitGraphZoom() {
+      const box = $("diagram");
+      const flow = box && box.querySelector(".gflow");
+      if (!box || !flow) return;
+      graphPanX = 0;
+      graphPanY = 0;
+      const pad = 24;
+      const spine = 228;
+      const sx = (box.clientWidth - pad) / spine;
+      const sy = (box.clientHeight - pad) / Math.max(flow.scrollHeight, 1);
+      graphZoom = Math.max(0.25, Math.min(1, sx, sy));
+      applyGraphZoom();
+    }
+
+    function mountGraph(target, flow) {
+      const wrap = document.createElement("div");
+      wrap.className = "gzoom";
+      wrap.appendChild(flow);
+      target.appendChild(wrap);
+      graphPanX = 0;
+      graphPanY = 0;
+      applyGraphZoom();
+    }
+
     function renderLiveGraph(spec, caption) {
       const target = $("diagram");
       const names = orderGraphNodes(spec);
       if (!names.length) {
         target.className = "empty";
         target.innerHTML = caption || "Select a run to inspect the unrolled path.";
+        applyGraphZoom();
         return;
       }
       target.className = "";
@@ -1509,7 +1579,7 @@ PAGE = r"""<!DOCTYPE html>
       });
       flow.appendChild(graphLine());
       flow.appendChild(graphCap("End"));
-      target.appendChild(flow);
+      mountGraph(target, flow);
     }
 
     function renderGraph(run) {
@@ -1518,6 +1588,7 @@ PAGE = r"""<!DOCTYPE html>
       if (pipe && pipe.error) {
         target.className = "empty";
         target.innerHTML = escapeHtml(pipe.error);
+        applyGraphZoom();
         return;
       }
       if (pipe && pipe.graph && (!run || isOutdated(run))) {
@@ -1530,6 +1601,7 @@ PAGE = r"""<!DOCTYPE html>
       if (!run) {
         target.className = "empty";
         target.innerHTML = "Select a run to inspect the unrolled path. Double-click a node to open its view.";
+        applyGraphZoom();
         return;
       }
       target.className = "";
@@ -1563,7 +1635,7 @@ PAGE = r"""<!DOCTYPE html>
       flow.appendChild(graphLine());
       flow.appendChild(graphCap("End"));
       target.innerHTML = "";
-      target.appendChild(flow);
+      mountGraph(target, flow);
       highlightSelection();
     }
 
@@ -2064,6 +2136,40 @@ PAGE = r"""<!DOCTYPE html>
         window.addEventListener("mousemove", move);
         window.addEventListener("mouseup", up);
       });
+    })();
+    $("zoomIn").onclick = () => {
+      graphZoom = Math.min(2.5, Math.round(graphZoom * 1.2 * 100) / 100);
+      applyGraphZoom();
+    };
+    $("zoomOut").onclick = () => {
+      graphZoom = Math.max(0.25, Math.round(graphZoom / 1.2 * 100) / 100);
+      applyGraphZoom();
+    };
+    $("zoomFit").onclick = () => fitGraphZoom();
+    (function bindGraphPan() {
+      const box = $("diagram");
+      let dragging = false;
+      let lastX = 0;
+      let lastY = 0;
+      box.addEventListener("pointerdown", (event) => {
+        if (box.classList.contains("empty")) return;
+        if (event.target.closest("button, a, input, textarea")) return;
+        dragging = true;
+        lastX = event.clientX;
+        lastY = event.clientY;
+        box.setPointerCapture(event.pointerId);
+      });
+      box.addEventListener("pointermove", (event) => {
+        if (!dragging) return;
+        graphPanX += event.clientX - lastX;
+        graphPanY += event.clientY - lastY;
+        lastX = event.clientX;
+        lastY = event.clientY;
+        applyGraphZoom();
+      });
+      const stop = () => { dragging = false; };
+      box.addEventListener("pointerup", stop);
+      box.addEventListener("pointercancel", stop);
     })();
     $("runBtn").onclick = () => runGraph().catch((e) => alert(e.message));
     $("replayBtn").onclick = () => openFromButton("replay");

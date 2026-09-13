@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>GraphVIAgent — local LangGraph inspector</title>
+  <meta name="description" content="Inspect and replay LangGraph pipelines locally. No LangSmith. Pipelines stay uninstrumented. Only the runs you start are stored."/>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml"/>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+  <style>
+    :root {
+      --bg: #0e0e11;
+      --raised: #16161a;
+      --panel: #1c1c22;
+      --ink: #ececee;
+      --muted: #9b9ba3;
+      --line: #2a2a32;
+      --accent: #7c5cff;
+      --accent-dim: rgba(124, 92, 255, 0.16);
+      --danger: #f07178;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+      font-size: 14px;
+      letter-spacing: -0.01em;
+      background: var(--bg);
+      color: var(--ink);
+      line-height: 1.5;
+    }
+    a { color: #c4b5fd; text-decoration: none; }
+    a:hover { color: #fff; }
+    header {
+      position: sticky; top: 0; z-index: 20;
+      display: flex; align-items: center; justify-content: space-between;
+      height: 48px; padding: 0 16px;
+      background: var(--raised); border-bottom: 1px solid var(--line);
+    }
+    .brand { display: flex; align-items: center; gap: 14px; font-weight: 600; }
+    .mark {
+      width: 22px; height: 22px; border-radius: 6px;
+      background: linear-gradient(135deg, #7c5cff, #4f46e5);
+      color: #fff; font-size: 10px; font-weight: 600;
+      display: grid; place-items: center;
+    }
+    .nav { display: flex; align-items: center; gap: 4px; margin-left: 8px; }
+    .nav-link {
+      height: 30px; padding: 0 10px; border: 0; border-radius: 7px;
+      background: transparent; color: var(--muted); font: 500 12px Inter, sans-serif;
+      cursor: pointer; text-decoration: none; display: inline-flex; align-items: center;
+    }
+    .nav-link:hover { color: var(--ink); background: #1f1f26; }
+    .nav-link.active { color: var(--ink); background: var(--accent-dim); }
+    .header-actions { display: flex; align-items: center; gap: 8px; }
+    button.primary, button.ghost, a.primary, a.ghost {
+      height: 30px; padding: 0 12px; border-radius: 7px; cursor: pointer;
+      font: 500 12px Inter, sans-serif; display: inline-flex; align-items: center;
+      text-decoration: none;
+    }
+    button.primary, a.primary { background: var(--accent); color: #fff; border: 0; }
+    button.ghost, a.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+    button.primary:hover, a.primary:hover { filter: brightness(1.06); color: #fff; }
+    button.ghost:hover, a.ghost:hover { border-color: #45454f; color: var(--ink); }
+    main { max-width: 1080px; margin: 0 auto; padding: 36px 24px 72px; }
+    .hero {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 40px;
+      align-items: center; margin: 12px 0 56px;
+    }
+    .kicker {
+      font-size: 11px; font-weight: 500; letter-spacing: 0.08em;
+      text-transform: uppercase; color: #c4b5fd; margin: 0 0 10px;
+    }
+    h1 { font-size: 40px; font-weight: 600; letter-spacing: -0.03em; line-height: 1.15; margin: 0 0 14px; }
+    .lede { color: var(--muted); margin: 0 0 22px; font-size: 15px; max-width: 42em; }
+    .hero-cta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 14px; }
+    .install {
+      display: flex; align-items: center; gap: 10px;
+      background: #17171c; border: 1px solid var(--line); border-radius: 10px;
+      padding: 8px 10px 8px 12px; max-width: 100%;
+    }
+    .install code {
+      font: 500 12px "IBM Plex Mono", ui-monospace, monospace;
+      color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; }
+    .pill {
+      font-size: 11px; font-weight: 500; color: #c4b5fd; background: var(--accent-dim);
+      border-radius: 999px; padding: 3px 9px;
+    }
+    .mock {
+      background: #17171c; border: 1px solid var(--line); border-radius: 12px;
+      padding: 14px 16px 18px; box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+    }
+    .mock-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+    .mock-title { font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+    .live { color: #c4b5fd; font-size: 11px; font-weight: 500; }
+    .gflow { display: flex; flex-direction: column; align-items: center; gap: 0; }
+    .g-cap {
+      height: 22px; padding: 0 10px; border-radius: 999px;
+      border: 1px solid #2e2e36; background: #121216; color: #8b8b96;
+      font-size: 10px; font-weight: 500; letter-spacing: 0.08em;
+      text-transform: uppercase; display: inline-flex; align-items: center;
+    }
+    .g-line { width: 1px; height: 14px; background: #32323c; }
+    .g-row { display: flex; gap: 12px; justify-content: center; }
+    .g-card {
+      width: 168px; display: flex; align-items: flex-start; gap: 8px;
+      padding: 8px 10px; border-radius: 10px; text-align: left;
+      background: linear-gradient(180deg, #1a1a20, #16161b);
+      border: 1px solid #2e2e36;
+    }
+    .g-card.taken { border-color: #3f3f68; }
+    .g-card.running {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-dim);
+      animation: g-pulse 1.2s ease-in-out infinite;
+    }
+    .g-card.skipped { opacity: 0.55; width: 132px; }
+    .g-dot { width: 8px; height: 8px; border-radius: 99px; flex: 0 0 8px; margin-top: 4px; background: #6366f1; }
+    .g-card.decision .g-dot { background: #f59e0b; }
+    .g-card.loop .g-dot { background: #22c55e; }
+    .g-name { font-size: 12px; font-weight: 500; }
+    .g-sub { color: var(--muted); font-size: 10px; }
+    @keyframes g-pulse {
+      0%, 100% { box-shadow: 0 0 0 2px var(--accent-dim); }
+      50% { box-shadow: 0 0 0 6px var(--accent-dim); }
+    }
+    .logs {
+      margin-top: 14px; background: #121216; border-radius: 8px; padding: 8px 10px;
+      font: 11px/1.45 "IBM Plex Mono", ui-monospace, monospace;
+    }
+    .log-info { color: #93c5fd; }
+    .log-print { color: #c8c8d0; }
+    .log-warn { color: #fbbf24; }
+    section { margin: 0 0 48px; }
+    h2 {
+      font-size: 11px; font-weight: 500; text-transform: uppercase;
+      letter-spacing: 0.06em; color: var(--muted); margin: 0 0 14px;
+    }
+    h3 { font-size: 16px; font-weight: 600; margin: 0 0 8px; }
+    p { margin: 0 0 12px; color: var(--muted); }
+    p strong { color: var(--ink); font-weight: 500; }
+    ul, ol { margin: 0 0 12px; padding-left: 18px; color: var(--muted); }
+    li { margin: 4px 0; }
+    li strong { color: var(--ink); font-weight: 500; }
+    .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+    .af-card {
+      background: #17171c; border: 1px solid var(--line);
+      border-radius: 10px; padding: 16px 18px 18px;
+    }
+    .af-card h3 { font-size: 15px; }
+    pre, .code {
+      margin: 0 0 14px; padding: 12px 14px; overflow: auto;
+      background: #121216; border: 1px solid var(--line); border-radius: 10px;
+      font: 12px/1.5 "IBM Plex Mono", ui-monospace, monospace; color: var(--ink);
+    }
+    table { width: 100%; border-collapse: collapse; margin: 0 0 14px; }
+    th, td {
+      text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line);
+      vertical-align: top; font-size: 13px;
+    }
+    th { color: var(--muted); font-weight: 500; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; }
+    td code, p code, li code {
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 12px; color: #ddd6fe;
+    }
+    footer {
+      max-width: 1080px; margin: 0 auto; padding: 0 24px 40px;
+      color: var(--muted); font-size: 12px;
+      display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+    }
+    @media (max-width: 860px) {
+      .hero, .grid { grid-template-columns: 1fr; }
+      h1 { font-size: 32px; }
+      .nav { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="mark">GVA</span> GraphVIAgent
+      <nav class="nav">
+        <a class="nav-link" href="#features">Features</a>
+        <a class="nav-link" href="#start">Start</a>
+        <a class="nav-link" href="#manual">Manual</a>
+        <a class="nav-link" href="#cli">CLI</a>
+      </nav>
+    </div>
+    <div class="header-actions">
+      <a class="ghost" href="https://pypi.org/project/graphviagent/">PyPI</a>
+      <a class="primary" href="https://github.com/antsticky/graphviagent">GitHub</a>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div>
+        <p class="kicker">Local Graph-View-Agent</p>
+        <h1>See your LangGraph run as it happens.</h1>
+        <p class="lede">
+          GraphVIAgent is a local inspector for LangGraph. Point it at a folder of
+          <code>*_pipeline.py</code> files, press Run, and watch topology, steps, state, and logs
+          update live. Pipelines stay uninstrumented. Nothing is sent to LangSmith.
+          Only the runs you start are stored.
+        </p>
+        <div class="hero-cta">
+          <div class="install">
+            <code id="installCmd">pip install graphviagent</code>
+            <button type="button" class="ghost" id="copyInstall">Copy</button>
+          </div>
+          <a class="primary" href="#start">Get started</a>
+        </div>
+        <div class="pills">
+          <span class="pill">local only</span>
+          <span class="pill">no LangSmith</span>
+          <span class="pill">uninstrumented pipelines</span>
+          <span class="pill">Python 3.10+</span>
+        </div>
+      </div>
+      <div class="mock" aria-hidden="true">
+        <div class="mock-bar">
+          <span class="mock-title">Graph</span>
+          <span class="live">Running 1/3</span>
+        </div>
+        <div class="gflow">
+          <div class="g-cap">Start</div>
+          <div class="g-line"></div>
+          <div class="g-card taken"><span class="g-dot"></span><span><span class="g-name">greet</span><span class="g-sub">Hello, Ada!</span></span></div>
+          <div class="g-line"></div>
+          <div class="g-card taken decision"><span class="g-dot"></span><span><span class="g-name">choose_path</span><span class="g-sub">len ≤ 3 → shout</span></span></div>
+          <div class="g-line"></div>
+          <div class="g-row">
+            <div class="g-card running"><span class="g-dot"></span><span><span class="g-name">shout</span><span class="g-sub">running</span></span></div>
+            <div class="g-card skipped"><span class="g-dot"></span><span><span class="g-name">skip</span><span class="g-sub">not taken</span></span></div>
+          </div>
+        </div>
+        <div class="logs">
+          <div class="log-info">2.2ms  greet  INFO  started</div>
+          <div class="log-print">2.6ms  greet  PRINT  Hello, Ada!</div>
+          <div class="log-warn">8.1ms  choose_path  WARN  short name</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="features">
+      <h2>Features</h2>
+      <div class="grid">
+        <article class="af-card">
+          <h3>Live topology</h3>
+          <p>The graph is a map of your pipeline, not an unrolled column. Cards pulse while a node runs. Taken, skipped, loop, and parallel edges stay on one picture, including <code>×N</code> fan-out.</p>
+        </article>
+        <article class="af-card">
+          <h3>Steps, Gantt, Agents</h3>
+          <p>Switch the same run between a topology map, a Gantt of wall time, and an Agents view when nodes return <code>messages</code>. Click a node to select it. Double-click to open Node view.</p>
+        </article>
+        <article class="af-card">
+          <h3>Logs you already write</h3>
+          <p><code>print()</code> and stderr are captured as PRINT / STDERR. Python <code>logging</code> keeps its level. DEBUG, INFO, WARN, ERROR, and CRIT each have their own color. Logger names show when they differ from the node.</p>
+        </article>
+        <article class="af-card">
+          <h3>Replay a node, or from a node</h3>
+          <p><strong>Replay step</strong> runs only the selected node. <strong>Replay from</strong> continues the graph from that node. Both invoke the real function — side effects will fire. Outdated runs (graph hash changed) ask before replay.</p>
+        </article>
+        <article class="af-card">
+          <h3>Pipelines board and Compare</h3>
+          <p>Pipelines is an Airflow-style grid of duration and task × run. Compare diffs input, path, per-node output, and timing between two runs.</p>
+        </article>
+        <article class="af-card">
+          <h3>Cancel, three at a time</h3>
+          <p>Up to three runs can execute together. Cancel is cooperative: an in-flight <code>sleep</code> finishes, then the run stops. History keeps failed runs.</p>
+        </article>
+        <article class="af-card">
+          <h3>Local history</h3>
+          <p>Each run is JSON under <code>.graphviagent/runs/&lt;pipeline&gt;/</code>. Export, import, or drop a file on the run list. Search input fields. Filter success or failed.</p>
+        </article>
+        <article class="af-card">
+          <h3>State you can trust</h3>
+          <p>Final state, a Memory table of who wrote and read each key, and a per-node state diff in Node view. Optional <code>decisions</code>, <code>reason</code>, and <code>choice</code> label branches on the graph.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="start">
+      <h2>Start</h2>
+      <h3>1. Install</h3>
+      <p>Python 3.10 or newer. Use a virtualenv.</p>
+      <pre>python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install graphviagent</pre>
+      <p>The package does not copy example files into your project. You add your own pipeline.</p>
+
+      <h3>2. Add a pipeline</h3>
+      <p>The file name must end with <code>_pipeline.py</code>. Save this as <code>echo_pipeline.py</code> in an empty folder:</p>
+      <pre>from typing import TypedDict
+from langgraph.graph import END, START, StateGraph
+
+EXAMPLES = [
+    {"label": "hello", "input": {"text": "hello"}},
+    {"label": "GraphVIAgent", "input": {"text": "GraphVIAgent"}},
+]
+
+class EchoState(TypedDict):
+    text: str
+    echoed: str
+    length: int
+
+def echo(state: EchoState) -> dict:
+    text = state["text"]
+    return {
+        "echoed": text[::-1],
+        "length": len(text),
+        "reason": f"reversed {len(text)} chars",
+    }
+
+def build_graph():
+    graph = StateGraph(EchoState)
+    graph.add_node("echo", echo)
+    graph.add_edge(START, "echo")
+    graph.add_edge("echo", END)
+    return graph.compile()</pre>
+      <p><code>EXAMPLES</code> is optional. The first item prefills the input box. Use <code>{"label": "…", "input": {…}}</code> or a bare dict.</p>
+
+      <h3>3. Open the UI</h3>
+      <pre>graphviagent serve . --open</pre>
+      <p>Or open <a href="http://127.0.0.1:8765">http://127.0.0.1:8765</a>. Leave the terminal running. New or edited <code>*_pipeline.py</code> files refresh the sidebar without a restart.</p>
+      <pre>graphviagent serve . --port 9000
+graphviagent serve . --host 127.0.0.1</pre>
+
+      <h3>4. Run</h3>
+      <ol>
+        <li>Select the pipeline in the sidebar.</li>
+        <li>Edit the JSON input if you need to.</li>
+        <li>Click <strong>Run</strong>. The topology appears immediately and pulses while nodes execute.</li>
+        <li>Single-click a node to select it. Double-click to open Node view.</li>
+      </ol>
+    </section>
+
+    <section id="manual">
+      <h2>Manual</h2>
+      <h3>Pipeline contract</h3>
+      <p>A file is viewable if it is named <code>*_pipeline.py</code> and exposes one of:</p>
+      <ul>
+        <li><code>build_graph()</code> / <code>get_graph()</code> / <code>create_graph()</code></li>
+        <li>compiled <code>GRAPH</code> or <code>app</code></li>
+        <li><code>__graph__ = "factory_name"</code></li>
+      </ul>
+      <p>Do not import GraphVIAgent in the pipeline. The viewer loads the file and records runs you start from the UI or CLI.</p>
+
+      <h3>Trace</h3>
+      <ul>
+        <li><strong>Graph</strong> — static map of nodes and edges. Taken paths, skipped branches, loops, and parallel <code>Send</code> fan-out.</li>
+        <li><strong>Gantt</strong> — wall-clock bars per node. Hover for timing, memory, and tokens when present.</li>
+        <li><strong>Agents</strong> — speaker chain when a node returns <code>messages</code>.</li>
+        <li><strong>Steps</strong> — visit order with duration and spark metrics.</li>
+        <li><strong>Final state</strong>, <strong>Log</strong>, <strong>Memory</strong>, and <strong>Text tree</strong> fold under Steps.</li>
+      </ul>
+      <p>History search matches input fields. Filter all / success / failed. <strong>Export</strong> downloads the open run as JSON. <strong>Import</strong> or drop a file on the run list. <strong>Delete run</strong> removes the open run.</p>
+
+      <h3>Node view</h3>
+      <p>Shows node input, output, a state diff (<code>state_in</code> vs <code>state_out</code>), and tools when the update has tool calls. <strong>Call node</strong> is the same as Replay step: it invokes the real node.</p>
+
+      <h3>Replay</h3>
+      <p><strong>Replay step</strong> re-runs only the selected node with its recorded input (or an edit you make). <strong>Replay from</strong> continues the graph from that node. Both hit your real functions. If the pipeline file or graph hash changed, the run is marked <strong>outdated</strong> and replay asks before continuing.</p>
+
+      <h3>Pipelines</h3>
+      <p>Airflow-style cards: duration bars, then task × run (<code>✓</code> / <code>✕</code> / <code>○</code>). Click the name to open Trace. Click a bar, cell, or play control to open that run. <strong>Clear</strong> deletes every run for that pipeline.</p>
+
+      <h3>Compare</h3>
+      <p>Open Compare. Filter by pipeline (default all). Pick Run A and Run B. Diff input, path, per-node output, and timing. Hover a cell to copy.</p>
+
+      <h3>Privacy and storage</h3>
+      <p>Everything stays on your machine. Runs are written under the folder you served or ran from:</p>
+      <pre>my_graphs/.graphviagent/runs/echo_pipeline/&lt;id&gt;.json</pre>
+      <p>Add <code>.graphviagent/</code> to <code>.gitignore</code>.</p>
+
+      <h3>Limits</h3>
+      <ul>
+        <li>Alpha: APIs, UI, and on-disk run format may change.</li>
+        <li>Local only. Nothing is uploaded.</li>
+        <li><code>logging</code> still respects the logger’s level. Root defaults to WARNING, so <code>logger.info</code> appears only if that logger is enabled for INFO.</li>
+        <li>Cancel waits for the current blocking call (for example <code>sleep</code>) to return.</li>
+      </ul>
+    </section>
+
+    <section id="cli">
+      <h2>CLI</h2>
+      <table>
+        <thead>
+          <tr><th>Command</th><th>What it does</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>graphviagent .</code><br/><code>graphviagent list .</code></td>
+            <td>List <code>*_pipeline.py</code> files under a folder.</td>
+          </tr>
+          <tr>
+            <td><code>graphviagent run echo_pipeline.py --input '{"text":"hi"}'</code></td>
+            <td>Record a run without the browser. Stored under <code>.graphviagent/</code> in the current directory. Exit status is 1 if the graph raised.</td>
+          </tr>
+          <tr>
+            <td><code>graphviagent serve .</code><br/><code>graphviagent serve . --open</code></td>
+            <td>Open the local UI (default <code>127.0.0.1:8765</code>). <code>--open</code> launches a browser. <code>--host</code> and <code>--port</code> override the bind address.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>With a clone of the repo you can also run <code>graphviagent serve examples</code> to browse the bundled pipelines (branch, loop, parallel <code>Send</code>, tools, agents, errors).</p>
+    </section>
+  </main>
+
+  <footer>
+    <div>GraphVIAgent · MIT · local only · nothing is sent to LangSmith</div>
+    <div>
+      <a href="https://pypi.org/project/graphviagent/">PyPI</a>
+      ·
+      <a href="https://github.com/antsticky/graphviagent">GitHub</a>
+    </div>
+  </footer>
+
+  <script>
+    const cmd = document.getElementById("installCmd");
+    const btn = document.getElementById("copyInstall");
+    btn.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(cmd.textContent);
+        btn.textContent = "Copied";
+        setTimeout(() => { btn.textContent = "Copy"; }, 1200);
+      } catch (err) {
+        btn.textContent = "Copy failed";
+      }
+    };
+    const links = Array.from(document.querySelectorAll(".nav a.nav-link, nav .nav-link"));
+    const mark = () => {
+      const id = (location.hash || "#features").slice(1);
+      links.forEach((el) => el.classList.toggle("active", el.getAttribute("href") === "#" + id));
+    };
+    window.addEventListener("hashchange", mark);
+    mark();
+  </script>
+</body>
+</html>

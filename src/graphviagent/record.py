@@ -9,6 +9,11 @@ from typing import Any
 from uuid import uuid4
 
 _SKIP_NODES = {"__start__", "START", "__end__", "END"}
+MAX_RUN_THREADS = 3
+
+
+class RunCancelled(Exception):
+    pass
 
 
 def _elapsed_ms(started: float) -> float:
@@ -283,6 +288,29 @@ def _attach_metrics(
     return step
 
 
+def _probe_input(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict | None:
+    for candidate in (args[0] if args else None, kwargs.get("input"), kwargs.get("state")):
+        if isinstance(candidate, dict):
+            return jsonable(candidate)
+    return None
+
+
+def _with_recorded_payload(base: dict, recorded: dict) -> dict:
+    incoming = copy.deepcopy(base) if isinstance(base, dict) else {}
+    recorded_in = recorded.get("state_in") if isinstance(recorded.get("state_in"), dict) else {}
+    send_like = "source" in recorded_in
+    for key, value in recorded_in.items():
+        if send_like or key not in incoming:
+            incoming[key] = copy.deepcopy(value)
+    update = recorded.get("update") if isinstance(recorded.get("update"), dict) else {}
+    if "source" not in incoming:
+        for item in update.get("partials") or []:
+            if isinstance(item, dict) and item.get("source"):
+                incoming["source"] = item["source"]
+                break
+    return incoming
+
+
 def _invoke_target(node: Any) -> Any | None:
     for attr in ("proc", "bound", "runnable"):
         child = getattr(node, attr, None)
@@ -293,7 +321,11 @@ def _invoke_target(node: Any) -> Any | None:
     return None
 
 
-def _install_node_probes(app: Any, clock0: float) -> tuple[list[dict], Any]:
+def _install_node_probes(
+    app: Any,
+    clock0: float,
+    cancel: Any | None = None,
+) -> tuple[list[dict], Any]:
     probes: list[dict] = []
     restores: list[tuple[Any, Any]] = []
     nodes = getattr(app, "nodes", None)
@@ -310,7 +342,10 @@ def _install_node_probes(app: Any, clock0: float) -> tuple[list[dict], Any]:
 
         def make_probed(node_name: str, orig: Any) -> Any:
             def probed(*args: Any, **kwargs: Any) -> Any:
+                if cancel is not None and getattr(cancel, "is_set", lambda: False)():
+                    raise RunCancelled("cancelled")
                 started_ms = round((time.perf_counter() - clock0) * 1000, 2)
+                incoming = _probe_input(args, kwargs)
                 memory = _MemoryTrace()
                 try:
                     return orig(*args, **kwargs)
@@ -326,6 +361,7 @@ def _install_node_probes(app: Any, clock0: float) -> tuple[list[dict], Any]:
                             "elapsed_ms": round(max(0.0, ended_ms - started_ms), 2),
                             "memory_mb": memory_mb,
                             "memory_peak_mb": memory_peak_mb,
+                            "input": incoming,
                         }
                     )
 
@@ -415,6 +451,17 @@ def merge_state(current: dict, update: dict) -> dict:
 
 def _format_error(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
+
+
+def _is_cancelled(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, RunCancelled) or str(current) == "cancelled":
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _branch_hints(update: dict) -> list[str]:
@@ -578,9 +625,13 @@ def record_run(
     *,
     thread_id: str | None = None,
     has_checkpointer: bool = False,
+    cancel: Any | None = None,
+    max_concurrency: int = MAX_RUN_THREADS,
 ) -> dict:
     run_id = thread_id or uuid4().hex
-    config = {"configurable": {"thread_id": run_id}} if has_checkpointer else {}
+    config: dict[str, Any] = {"max_concurrency": max_concurrency}
+    if has_checkpointer:
+        config["configurable"] = {"thread_id": run_id}
     state = copy.deepcopy(user_input)
     steps: list[dict] = []
     visits: dict[str, int] = {}
@@ -590,10 +641,12 @@ def record_run(
     run_error: str | None = None
     clock0 = time.perf_counter()
     wall0 = time.time()
-    probes, restore_probes = _install_node_probes(app, clock0)
+    probes, restore_probes = _install_node_probes(app, clock0, cancel=cancel)
     try:
-        stream = app.stream(user_input, config) if config else app.stream(user_input)
+        stream = app.stream(user_input, config)
         for event in stream:
+            if cancel is not None and getattr(cancel, "is_set", lambda: False)():
+                raise RunCancelled("cancelled")
             if not isinstance(event, dict) or not event:
                 continue
             node, update = next(iter(event.items()))
@@ -601,10 +654,13 @@ def record_run(
                 update = {"value": update}
             raw_events.append((str(node), update, _elapsed_ms(clock0)))
     except Exception as exc:
-        run_error = _format_error(exc)
-        failed = _guess_failed_node(raw_events, edges)
-        if failed:
-            raw_events.append((failed, {"error": run_error}, _elapsed_ms(clock0)))
+        if _is_cancelled(exc):
+            run_error = "cancelled"
+        else:
+            run_error = _format_error(exc)
+            failed = _guess_failed_node(raw_events, edges)
+            if failed:
+                raw_events.append((failed, {"error": run_error}, _elapsed_ms(clock0)))
     finally:
         restore_probes()
 
@@ -612,19 +668,22 @@ def record_run(
     for index, (node, update, ended_ms) in enumerate(raw_events):
         visits[node] = visits.get(node, 0) + 1
         next_node = raw_events[index + 1][0] if index + 1 < len(raw_events) else None
-        state_in = copy.deepcopy(state)
+        graph_in = copy.deepcopy(state)
         failed = isinstance(update, dict) and update.get("error")
-        state_out = copy.deepcopy(state_in) if failed else merge_state(state, update)
         probe = _take_probe(probes, node)
         if probe:
             started_ms = float(probe["started_ms"])
             ended_ms = float(probe["ended_ms"])
             memory_mb = float(probe["memory_mb"])
             memory_peak_mb = float(probe.get("memory_peak_mb") or 0)
+            invoke_input = probe.get("input")
         else:
             started_ms = _infer_started_ms(node, ended_ms, completed_end, edges)
             memory_mb = 0.0
             memory_peak_mb = 0.0
+            invoke_input = None
+        state_in = invoke_input if isinstance(invoke_input, dict) else graph_in
+        state_out = copy.deepcopy(state_in) if failed else merge_state(state_in, update)
         step = {
             "step_id": f"{node}#{visits[node]}",
             "index": index,
@@ -642,7 +701,7 @@ def record_run(
             step["error"] = str(update.get("error"))
         steps.append(step)
         completed_end[node] = ended_ms
-        state = state_out
+        state = copy.deepcopy(graph_in) if failed else merge_state(graph_in, update)
 
     return {
         "id": run_id,
@@ -676,7 +735,7 @@ def replay_step(
     state_in: dict | None = None,
 ) -> dict:
     step = _find_step(run, step_id)
-    state_in = _incoming_state(step, state_patch, state_in)
+    state_in = _with_recorded_payload(_incoming_state(step, state_patch, state_in), step)
     clock0 = time.perf_counter()
     wall0 = time.time()
     memory = _MemoryTrace()
@@ -746,35 +805,36 @@ def resume_from_step(
         except Exception:
             pass
 
-    raw: list[tuple[str, dict, float, float, float]] = []
+    raw: list[tuple[str, dict, dict, float, float, float]] = []
     current = state
     run_error: str | None = None
     clock0 = time.perf_counter()
     wall0 = time.time()
     for recorded in remaining:
+        incoming = _with_recorded_payload(current, recorded)
         memory = _MemoryTrace()
         try:
-            update = invoke_node(app, recorded["node"], current)
+            update = invoke_node(app, recorded["node"], incoming)
             if not isinstance(update, dict):
                 update = {"value": update}
         except Exception as exc:
             run_error = _format_error(exc)
             update = {"error": run_error}
             memory_mb, memory_peak_mb = memory.snapshot()
-            raw.append((recorded["node"], update, _elapsed_ms(clock0), memory_mb, memory_peak_mb))
+            raw.append((recorded["node"], incoming, update, _elapsed_ms(clock0), memory_mb, memory_peak_mb))
             memory.close()
             break
         memory_mb, memory_peak_mb = memory.snapshot()
-        raw.append((recorded["node"], update, _elapsed_ms(clock0), memory_mb, memory_peak_mb))
+        raw.append((recorded["node"], incoming, update, _elapsed_ms(clock0), memory_mb, memory_peak_mb))
         memory.close()
         current = merge_state(current, update)
 
     current = copy.deepcopy(state)
     prev_end = 0.0
-    for index, (node, update, ended_ms, memory_mb, memory_peak_mb) in enumerate(raw):
+    for index, (node, incoming, update, ended_ms, memory_mb, memory_peak_mb) in enumerate(raw):
         visits[node] = visits.get(node, 0) + 1
         next_node = raw[index + 1][0] if index + 1 < len(raw) else None
-        state_in = copy.deepcopy(current)
+        state_in = copy.deepcopy(incoming)
         failed = isinstance(update, dict) and update.get("error")
         state_out = copy.deepcopy(state_in) if failed else merge_state(current, update)
         started_ms = prev_end

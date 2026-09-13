@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1-dev
+
+### Added
+
+- Node inspect shows a state diff of `state_in` vs `state_out` (changed, added, removed, unchanged)
+
 ## 1.0.0-dev
 
 First public alpha. MVP for inspecting and replaying local LangGraph pipelines without LangSmith.

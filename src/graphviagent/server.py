@@ -493,6 +493,10 @@ PAGE = r"""<!DOCTYPE html>
     }
     .json:hover .copy-btn, .cmp-a:hover .copy-btn, .cmp-b:hover .copy-btn,
     .copy-wrap:hover .copy-btn { opacity: 1; pointer-events: auto; }
+    #stateDiff.json:hover .copy-btn { opacity: 0; pointer-events: none; }
+    #stateDiff .cmp-a:hover .copy-btn, #stateDiff .cmp-b:hover .copy-btn {
+      opacity: 1; pointer-events: auto;
+    }
     .copy-btn:hover { color: var(--ink); border-color: #45454f; }
     .j-node { margin: 0; color: inherit; }
     .j-node > summary {
@@ -543,6 +547,21 @@ PAGE = r"""<!DOCTYPE html>
     .nv-meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
     .io { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     .io .pane { min-height: 0; }
+    .io-diff { grid-column: 1 / -1; }
+    .io-diff[hidden] { display: none !important; }
+    .io h2 .diff-legend,
+    .io h2 .diff-legend span {
+      display: flex; flex-wrap: wrap; gap: 10px;
+      color: var(--muted); font-size: 10px; font-weight: 400;
+      text-transform: none; letter-spacing: 0; margin-left: 0;
+    }
+    .io h2 .diff-legend span { display: inline-flex; align-items: center; gap: 4px; }
+    .diff-legend i { width: 7px; height: 7px; border-radius: 99px; }
+    .diff-legend i.changed { background: #fbbf24; }
+    .diff-legend i.added { background: #86efac; }
+    .diff-legend i.removed { background: var(--danger); }
+    .diff-legend i.same { background: #5c5c66; }
+    .cmp-row.same .cmp-a, .cmp-row.same .cmp-b { color: var(--muted); }
     .io h2 span { color: var(--ink); text-transform: none; letter-spacing: 0; font-size: 12px; margin-left: 6px; }
     .io .json { max-height: 360px; }
     #nodeInput {
@@ -854,6 +873,17 @@ PAGE = r"""<!DOCTYPE html>
         <div class="pane">
           <h2>Node output</h2>
           <div id="stepOut" class="json empty">The keys this node returned.</div>
+        </div>
+        <div class="pane io-diff" hidden>
+          <h2 class="pane-title">State diff
+            <span class="diff-legend">
+              <span><i class="changed"></i> changed</span>
+              <span><i class="added"></i> added</span>
+              <span><i class="removed"></i> removed</span>
+              <span><i class="same"></i> unchanged</span>
+            </span>
+          </h2>
+          <div id="stateDiff" class="json empty">Select a node to see what changed in state.</div>
         </div>
       </div>
     </div>
@@ -1554,6 +1584,45 @@ PAGE = r"""<!DOCTYPE html>
       el.appendChild(copy);
     }
 
+    function stateDiffRows(before, after) {
+      const left = before && typeof before === "object" && !Array.isArray(before) ? before : {};
+      const right = after && typeof after === "object" && !Array.isArray(after) ? after : {};
+      const keys = Array.from(new Set([...Object.keys(left), ...Object.keys(right)])).sort();
+      const rank = { changed: 0, "only-b": 1, "only-a": 2, same: 3 };
+      return keys.map((key) => {
+        const hasA = Object.prototype.hasOwnProperty.call(left, key);
+        const hasB = Object.prototype.hasOwnProperty.call(right, key);
+        let kind = "same";
+        if (hasA && hasB) kind = jsonEqual(left[key], right[key]) ? "same" : "changed";
+        else if (hasA) kind = "only-a";
+        else kind = "only-b";
+        return {
+          key,
+          a: hasA ? left[key] : undefined,
+          b: hasB ? right[key] : undefined,
+          kind,
+        };
+      }).sort((a, b) => (rank[a.kind] - rank[b.kind]) || a.key.localeCompare(b.key));
+    }
+
+    function renderStateDiff(step) {
+      const board = $("stateDiff");
+      const pane = board && board.closest(".io-diff");
+      const inspect = nodeViewMode === "all";
+      if (pane) pane.hidden = !inspect;
+      if (!inspect) return;
+      if (!step) {
+        board.className = "json empty";
+        board.textContent = "Select a node to see what changed in state.";
+        return;
+      }
+      const rows = stateDiffRows(step.state_in, step.state_out);
+      board.className = "json";
+      board.innerHTML =
+        '<div class="cmp-head"><div>Before</div><div>After</div></div>' +
+        (rows.length ? diffRowsHtml(rows) : '<p class="empty">No state keys</p>');
+    }
+
     function showStepIO(step) {
       const empty = $("stepIn");
       const editor = $("nodeInput");
@@ -1567,6 +1636,7 @@ PAGE = r"""<!DOCTYPE html>
         editor.classList.remove("visible");
         actions.classList.remove("visible");
         setJson($("stepOut"), null, "The keys this node returned.");
+        renderStateDiff(null);
         return;
       }
       $("nvTitle").textContent = step.node || "Node";
@@ -1587,6 +1657,7 @@ PAGE = r"""<!DOCTYPE html>
       actions.classList.add("visible");
       editor.value = JSON.stringify(step.state_in ?? {}, null, 2);
       setJson($("stepOut"), step.update);
+      renderStateDiff(step);
     }
 
     function isNodeViewOpen() {
@@ -1597,8 +1668,10 @@ PAGE = r"""<!DOCTYPE html>
       nodeViewMode = mode || "all";
       const call = $("callBtn");
       const from = $("replayFromHereBtn");
+      const diff = $("stateDiff") && $("stateDiff").closest(".io-diff");
       call.hidden = nodeViewMode === "replay_from";
       from.hidden = nodeViewMode === "replay";
+      if (diff) diff.hidden = nodeViewMode !== "all";
       call.textContent = nodeViewMode === "replay" ? "Replay step" : "Call node";
       call.className = "primary";
       from.className = nodeViewMode === "replay_from" ? "primary" : "ghost";
@@ -1610,8 +1683,8 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function openNodeView(step, mode) {
-      selectStep(step);
       setNodeViewMode(mode || "all");
+      selectStep(step);
       $("nodeView").hidden = false;
       $("nodeInput").focus();
     }

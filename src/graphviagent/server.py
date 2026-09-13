@@ -544,9 +544,23 @@ PAGE = r"""<!DOCTYPE html>
     .run-log {
       max-height: 220px; overflow: auto; margin: 0; padding: 8px 10px;
       border-radius: 8px; background: #121216; color: #c8c8d0;
-      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
     }
     .run-log:empty::before { content: "No log lines yet."; color: var(--muted); }
+    .log-line {
+      display: grid; grid-template-columns: 56px minmax(64px, auto) 52px 1fr;
+      gap: 8px; align-items: start;
+    }
+    .log-t { color: var(--muted); }
+    .log-src { color: #d4d4dc; }
+    .log-lvl { font-weight: 700; letter-spacing: 0.04em; }
+    .log-msg { white-space: pre-wrap; word-break: break-word; }
+    .log-line.log-debug, .log-line.log-debug .log-lvl { color: #8b8b96; }
+    .log-line.log-info, .log-line.log-info .log-lvl { color: #93c5fd; }
+    .log-line.log-print, .log-line.log-print .log-lvl { color: #c8c8d0; }
+    .log-line.log-warning, .log-line.log-warn, .log-line.log-warning .log-lvl, .log-line.log-warn .log-lvl { color: #fbbf24; }
+    .log-line.log-error, .log-line.log-stderr, .log-line.log-error .log-lvl, .log-line.log-stderr .log-lvl { color: #f07178; }
+    .log-line.log-critical, .log-line.log-fatal, .log-line.log-critical .log-lvl { color: #fb7185; font-weight: 700; }
     .bar { width: 3px; border-radius: 99px; background: #6366f1; margin: 2px 0 2px 6px; }
     .bar.decision { background: #f59e0b; }
     .bar.loop { background: #22c55e; }
@@ -975,7 +989,7 @@ PAGE = r"""<!DOCTYPE html>
           </details>
           <details class="tree-details section" id="logDetails">
             <summary>Log</summary>
-            <pre id="runLog" class="run-log"></pre>
+            <div id="runLog" class="run-log"></div>
           </details>
           <details class="tree-details section">
             <summary>Memory</summary>
@@ -2969,6 +2983,21 @@ PAGE = r"""<!DOCTYPE html>
       highlightSelection();
     }
 
+    function logLevel(item) {
+      const raw = String((item && item.level) || "print").toLowerCase();
+      if (raw === "warn") return "warning";
+      if (raw === "fatal") return "critical";
+      return raw;
+    }
+
+    function logLevelLabel(level) {
+      if (level === "warning") return "WARN";
+      if (level === "critical") return "CRIT";
+      if (level === "print") return "PRINT";
+      if (level === "stderr") return "STDERR";
+      return String(level || "INFO").toUpperCase();
+    }
+
     function renderLogs(logs) {
       const box = $("runLog");
       if (!box) return;
@@ -2979,10 +3008,19 @@ PAGE = r"""<!DOCTYPE html>
     function appendLog(item, scroll) {
       const box = $("runLog");
       if (!box || !item) return;
+      const level = logLevel(item);
       const t = item.t == null || item.t === "" ? "" : formatElapsed(item.t);
-      const line = (t ? t + "  " : "") + (item.src || "run") + "  " + (item.text || "");
-      if (box.textContent) box.textContent += String.fromCharCode(10);
-      box.textContent += line;
+      const src = item.logger && item.logger !== item.src
+        ? (item.src || "run") + " · " + item.logger
+        : (item.src || "run");
+      const row = document.createElement("div");
+      row.className = "log-line log-" + level;
+      row.innerHTML =
+        '<span class="log-t">' + escapeHtml(t) + "</span>" +
+        '<span class="log-src">' + escapeHtml(src) + "</span>" +
+        '<span class="log-lvl">' + escapeHtml(logLevelLabel(level)) + "</span>" +
+        '<span class="log-msg">' + escapeHtml(item.text || "") + "</span>";
+      box.appendChild(row);
       if (scroll !== false) box.scrollTop = box.scrollHeight;
     }
 
@@ -3176,7 +3214,7 @@ PAGE = r"""<!DOCTYPE html>
       }
       if (type === "log") {
         currentRun.logs = (currentRun.logs || []).concat([{
-          t: event.t, src: event.src, text: event.text,
+          t: event.t, src: event.src, text: event.text, level: event.level, logger: event.logger,
         }]);
         appendLog(event, true);
         return;

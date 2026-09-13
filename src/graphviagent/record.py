@@ -2,12 +2,65 @@ from __future__ import annotations
 
 import copy
 import time
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
+
+_SKIP_NODES = {"__start__", "START", "__end__", "END"}
 
 
 def _elapsed_ms(started: float) -> float:
     return round((time.perf_counter() - started) * 1000, 2)
+
+
+def _iso_from_wall(wall_start: float, offset_ms: float) -> str:
+    return datetime.fromtimestamp(wall_start + offset_ms / 1000.0, timezone.utc).isoformat()
+
+
+def _infer_started_ms(
+    node: str,
+    ended_ms: float,
+    completed_end: dict[str, float],
+    edges: list[tuple[str, str]],
+) -> float:
+    pred_ends = [
+        completed_end[source]
+        for source, target in edges
+        if target == node and source not in _SKIP_NODES and source in completed_end
+    ]
+    if pred_ends:
+        start = max(pred_ends)
+    elif not completed_end:
+        start = 0.0
+    else:
+        start = max(completed_end.values())
+    if start > ended_ms:
+        return 0.0
+    return round(start, 2)
+
+
+def _attach_timing(
+    step: dict,
+    *,
+    started_ms: float,
+    ended_ms: float,
+    wall_start: float,
+) -> dict:
+    started_ms = round(max(0.0, started_ms), 2)
+    ended_ms = round(max(started_ms, ended_ms), 2)
+    step["started_ms"] = started_ms
+    step["ended_ms"] = ended_ms
+    step["elapsed_ms"] = round(ended_ms - started_ms, 2)
+    step["started_at"] = _iso_from_wall(wall_start, started_ms)
+    step["ended_at"] = _iso_from_wall(wall_start, ended_ms)
+    return step
+
+
+def _run_span(steps: list[dict], fallback_ms: float) -> float:
+    ends = [float(step.get("ended_ms") or 0) for step in steps]
+    if ends:
+        return round(max(ends), 2)
+    return fallback_ms
 
 
 def jsonable(obj: Any) -> Any:
@@ -195,7 +248,8 @@ def record_run(
     stream = app.stream(user_input, config) if config else app.stream(user_input)
     raw_events: list[tuple[str, dict, float]] = []
     run_error: str | None = None
-    started = time.perf_counter()
+    clock0 = time.perf_counter()
+    wall0 = time.time()
     try:
         for event in stream:
             if not isinstance(event, dict) or not event:
@@ -203,20 +257,21 @@ def record_run(
             node, update = next(iter(event.items()))
             if not isinstance(update, dict):
                 update = {"value": update}
-            raw_events.append((str(node), update, _elapsed_ms(started)))
-            started = time.perf_counter()
+            raw_events.append((str(node), update, _elapsed_ms(clock0)))
     except Exception as exc:
         run_error = _format_error(exc)
         failed = _guess_failed_node(raw_events, edges)
         if failed:
-            raw_events.append((failed, {"error": run_error}, _elapsed_ms(started)))
+            raw_events.append((failed, {"error": run_error}, _elapsed_ms(clock0)))
 
-    for index, (node, update, elapsed_ms) in enumerate(raw_events):
+    completed_end: dict[str, float] = {}
+    for index, (node, update, ended_ms) in enumerate(raw_events):
         visits[node] = visits.get(node, 0) + 1
         next_node = raw_events[index + 1][0] if index + 1 < len(raw_events) else None
         state_in = copy.deepcopy(state)
         failed = isinstance(update, dict) and update.get("error")
         state_out = copy.deepcopy(state_in) if failed else merge_state(state, update)
+        started_ms = _infer_started_ms(node, ended_ms, completed_end, edges)
         step = {
             "step_id": f"{node}#{visits[node]}",
             "index": index,
@@ -227,11 +282,12 @@ def record_run(
             "reason": extract_reason(update),
             "decisions": jsonable(extract_decisions(update)),
             "unused": unused_targets(node, next_node, edges),
-            "elapsed_ms": elapsed_ms,
         }
+        _attach_timing(step, started_ms=started_ms, ended_ms=ended_ms, wall_start=wall0)
         if failed:
             step["error"] = str(update.get("error"))
         steps.append(step)
+        completed_end[node] = ended_ms
         state = state_out
 
     return {
@@ -241,7 +297,9 @@ def record_run(
         "result": jsonable(state),
         "has_checkpointer": has_checkpointer,
         "thread_id": run_id if has_checkpointer else None,
-        "elapsed_ms": round(sum(step.get("elapsed_ms") or 0 for step in steps), 2),
+        "started_at": _iso_from_wall(wall0, 0),
+        "ended_at": _iso_from_wall(wall0, _run_span(steps, _elapsed_ms(clock0))),
+        "elapsed_ms": _run_span(steps, _elapsed_ms(clock0)),
         "error": run_error,
     }
 
@@ -265,7 +323,8 @@ def replay_step(
 ) -> dict:
     step = _find_step(run, step_id)
     state_in = _incoming_state(step, state_patch, state_in)
-    started = time.perf_counter()
+    clock0 = time.perf_counter()
+    wall0 = time.time()
     try:
         update = invoke_node(app, step["node"], state_in)
         if not isinstance(update, dict):
@@ -274,7 +333,7 @@ def replay_step(
     except Exception as exc:
         run_error = _format_error(exc)
         update = {"error": run_error}
-    elapsed_ms = _elapsed_ms(started)
+    ended_ms = _elapsed_ms(clock0)
     state_out = copy.deepcopy(state_in) if run_error else merge_state(state_in, update)
     new_step = {
         "step_id": f"{step['node']}#replay",
@@ -286,8 +345,8 @@ def replay_step(
         "reason": extract_reason(update),
         "decisions": jsonable(extract_decisions(update)),
         "unused": [],
-        "elapsed_ms": elapsed_ms,
     }
+    _attach_timing(new_step, started_ms=0, ended_ms=ended_ms, wall_start=wall0)
     if run_error:
         new_step["error"] = run_error
     return {
@@ -300,7 +359,9 @@ def replay_step(
         "parent_id": run["id"],
         "mode": "replay",
         "from_step": step_id,
-        "elapsed_ms": elapsed_ms,
+        "started_at": new_step["started_at"],
+        "ended_at": new_step["ended_at"],
+        "elapsed_ms": new_step["elapsed_ms"],
         "error": run_error,
     }
 
@@ -329,8 +390,9 @@ def resume_from_step(
     raw: list[tuple[str, dict, float]] = []
     current = state
     run_error: str | None = None
+    clock0 = time.perf_counter()
+    wall0 = time.time()
     for recorded in remaining:
-        started = time.perf_counter()
         try:
             update = invoke_node(app, recorded["node"], current)
             if not isinstance(update, dict):
@@ -338,18 +400,20 @@ def resume_from_step(
         except Exception as exc:
             run_error = _format_error(exc)
             update = {"error": run_error}
-            raw.append((recorded["node"], update, _elapsed_ms(started)))
+            raw.append((recorded["node"], update, _elapsed_ms(clock0)))
             break
-        raw.append((recorded["node"], update, _elapsed_ms(started)))
+        raw.append((recorded["node"], update, _elapsed_ms(clock0)))
         current = merge_state(current, update)
 
     current = copy.deepcopy(state)
-    for index, (node, update, elapsed_ms) in enumerate(raw):
+    prev_end = 0.0
+    for index, (node, update, ended_ms) in enumerate(raw):
         visits[node] = visits.get(node, 0) + 1
         next_node = raw[index + 1][0] if index + 1 < len(raw) else None
         state_in = copy.deepcopy(current)
         failed = isinstance(update, dict) and update.get("error")
         state_out = copy.deepcopy(state_in) if failed else merge_state(current, update)
+        started_ms = prev_end
         step = {
             "step_id": f"{node}#{visits[node]}",
             "index": index,
@@ -360,11 +424,12 @@ def resume_from_step(
             "reason": extract_reason(update),
             "decisions": jsonable(extract_decisions(update)),
             "unused": unused_targets(node, next_node, edges),
-            "elapsed_ms": elapsed_ms,
         }
+        _attach_timing(step, started_ms=started_ms, ended_ms=ended_ms, wall_start=wall0)
         if failed:
             step["error"] = str(update.get("error"))
         steps.append(step)
+        prev_end = ended_ms
         current = state_out
 
     return {
@@ -377,7 +442,9 @@ def resume_from_step(
         "parent_id": run["id"],
         "mode": "replay_from",
         "from_step": step_id,
-        "elapsed_ms": round(sum(item.get("elapsed_ms") or 0 for item in steps), 2),
+        "started_at": _iso_from_wall(wall0, 0),
+        "ended_at": _iso_from_wall(wall0, _run_span(steps, _elapsed_ms(clock0))),
+        "elapsed_ms": _run_span(steps, _elapsed_ms(clock0)),
         "error": run_error,
     }
 

@@ -286,6 +286,64 @@ PAGE = r"""<!DOCTYPE html>
     #diagram.empty { cursor: default; }
     #diagram.empty, .empty { color: var(--muted); }
     #diagram.empty { background: transparent; }
+    .view-switch { display: flex; align-items: center; gap: 4px; margin-right: 8px; }
+    .view-switch .ghost.active {
+      background: var(--accent-dim); color: var(--ink); border-color: transparent;
+    }
+    .gflow.gantt {
+      width: max-content;
+      min-width: 520px;
+      padding: 16px 20px 20px;
+      transform-origin: top left;
+    }
+    .gantt-head, .gantt-row {
+      display: grid;
+      grid-template-columns: 104px 480px;
+      gap: 10px;
+      align-items: center;
+    }
+    .gantt-head {
+      color: var(--muted); font-size: 10px; font-weight: 500;
+      text-transform: uppercase; letter-spacing: 0.04em;
+      margin-bottom: 8px;
+    }
+    .gantt-ticks { display: flex; justify-content: space-between; }
+    .gantt-row { margin: 0 0 7px; }
+    .gantt-label {
+      font-size: 12px; color: var(--ink);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .gantt-track {
+      position: relative; height: 22px;
+      background: #141418; border-radius: 6px;
+    }
+    .gantt-bar {
+      position: absolute; top: 3px; height: 16px; min-width: 4px;
+      border: 0; border-radius: 4px; cursor: pointer; padding: 0;
+      background: #6366f1;
+    }
+    .gantt-bar.decision { background: #f59e0b; }
+    .gantt-bar.loop { background: #22c55e; }
+    .gantt-bar.error { background: var(--danger); }
+    .gantt-bar:hover { filter: brightness(1.08); }
+    .gantt-bar.selected { box-shadow: 0 0 0 2px #fff; }
+    .gantt-tip {
+      position: fixed; z-index: 40; min-width: 196px; max-width: 280px;
+      padding: 8px 10px; background: #1c1c22; border: 1px solid #3a3a44;
+      border-radius: 8px; box-shadow: 0 12px 28px rgba(0, 0, 0, 0.4);
+      pointer-events: none; font-size: 12px;
+    }
+    .gantt-tip .tip-name { font-weight: 500; }
+    .gantt-tip .tip-id { color: var(--muted); font-size: 11px; margin-top: 2px; }
+    .gantt-tip .tip-row {
+      display: flex; justify-content: space-between; gap: 14px;
+      color: var(--muted); margin-top: 4px;
+    }
+    .gantt-tip .tip-row b { color: var(--ink); font-weight: 500; }
+    .gantt-tip .tip-why { color: var(--muted); margin-top: 6px; }
+    .gantt-tip .tip-err { color: var(--danger); margin-top: 6px; }
+    .gantt-lane { margin-bottom: 4px; }
+    .gantt-lane:last-child { margin-bottom: 0; }
     .graph-zoom { display: flex; align-items: center; gap: 4px; }
     .graph-zoom .ghost {
       height: 24px; min-width: 24px; padding: 0 8px;
@@ -692,10 +750,16 @@ PAGE = r"""<!DOCTYPE html>
       <div class="grid">
         <div class="pane">
           <h2 class="pane-title">Graph
-            <span class="graph-zoom">
-              <button type="button" class="ghost" id="zoomOut" title="Zoom out">−</button>
-              <button type="button" class="ghost" id="zoomFit" title="Fit to window">Fit</button>
-              <button type="button" class="ghost" id="zoomIn" title="Zoom in">+</button>
+            <span style="display:flex;align-items:center">
+              <span class="view-switch">
+                <button type="button" class="ghost active" id="viewGraph">Graph</button>
+                <button type="button" class="ghost" id="viewGantt">Gantt</button>
+              </span>
+              <span class="graph-zoom">
+                <button type="button" class="ghost" id="zoomOut" title="Zoom out">−</button>
+                <button type="button" class="ghost" id="zoomFit" title="Fit to window">Fit</button>
+                <button type="button" class="ghost" id="zoomIn" title="Zoom in">+</button>
+              </span>
             </span>
           </h2>
           <div id="diagram" class="empty">Select a run to inspect the unrolled path. Double-click a node to open its view.</div>
@@ -777,6 +841,7 @@ PAGE = r"""<!DOCTYPE html>
     let graphZoom = 1;
     let graphPanX = 0;
     let graphPanY = 0;
+    let graphViewMode = "graph";
 
     const $ = (id) => document.getElementById(id);
 
@@ -1429,7 +1494,7 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function highlightSelection() {
-      document.querySelectorAll(".step, .g-card[data-step-id]").forEach((el) => {
+      document.querySelectorAll(".step, .g-card[data-step-id], .gantt-bar[data-step-id]").forEach((el) => {
         el.classList.toggle("selected", el.dataset.stepId === selectedStep);
       });
     }
@@ -1547,7 +1612,7 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function graphPartsRect(flow) {
-      const parts = flow.querySelectorAll(".g-cap, .g-card, .g-line, .g-skip");
+      const parts = flow.querySelectorAll(".g-cap, .g-card, .g-line, .g-skip, .gantt-head, .gantt-row, .gantt-bar");
       if (!parts.length) return flow.getBoundingClientRect();
       let left = Infinity;
       let top = Infinity;
@@ -1624,7 +1689,171 @@ PAGE = r"""<!DOCTYPE html>
       mountGraph(target, flow);
     }
 
+    function stepSpan(step, fallbackStart) {
+      const start = Number(step.started_ms);
+      const end = Number(step.ended_ms);
+      if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+        return { start, end };
+      }
+      const dur = Number(step.elapsed_ms);
+      const width = Number.isFinite(dur) && dur > 0 ? dur : 0.1;
+      return { start: fallbackStart, end: fallbackStart + width };
+    }
+
+    function ganttModel(run) {
+      const events = [];
+      let cursor = 0;
+      (run.steps || []).forEach((step) => {
+        const span = stepSpan(step, cursor);
+        events.push({ step, start: span.start, end: span.end });
+        cursor = Number.isFinite(Number(step.ended_ms)) ? Number(step.ended_ms) : span.end;
+      });
+      const total = Math.max(0.1, ...events.map((event) => event.end), cursor);
+      const groups = [];
+      const index = {};
+      events.forEach((event) => {
+        const name = event.step.node || "node";
+        if (index[name] == null) {
+          index[name] = groups.length;
+          groups.push({ node: name, lanes: [[]] });
+        }
+        const group = groups[index[name]];
+        let lane = group.lanes.find((row) => row.every((other) => event.end <= other.start || event.start >= other.end));
+        if (!lane) {
+          lane = [];
+          group.lanes.push(lane);
+        }
+        lane.push(event);
+      });
+      return { groups, total };
+    }
+
+    function ensureGanttTip() {
+      let tip = document.getElementById("ganttTip");
+      if (!tip) {
+        tip = document.createElement("div");
+        tip.id = "ganttTip";
+        tip.className = "gantt-tip";
+        tip.hidden = true;
+        document.body.appendChild(tip);
+      }
+      return tip;
+    }
+
+    function hideGanttTip() {
+      const tip = document.getElementById("ganttTip");
+      if (tip) tip.hidden = true;
+    }
+
+    function ganttTipHtml(event) {
+      const step = event.step;
+      const kind = step.error ? "error" : stepKind(step.node);
+      const kindLabel = kind === "decision" ? "decision" : kind === "loop" ? "loop" : kind === "error" ? "error" : "node";
+      const startAt = formatTime(step.started_at);
+      const endAt = formatTime(step.ended_at);
+      const rows = [
+        ["Start", formatElapsed(event.start) + (startAt ? "  ·  " + startAt : "")],
+        ["End", formatElapsed(event.end) + (endAt ? "  ·  " + endAt : "")],
+        ["Duration", formatElapsed(event.end - event.start) || formatElapsed(step.elapsed_ms)],
+        ["Kind", kindLabel],
+      ];
+      return (
+        '<div class="tip-name">' + escapeHtml(step.node || "") + "</div>" +
+        '<div class="tip-id">' + escapeHtml(step.step_id || "") + "</div>" +
+        rows.map((row) =>
+          '<div class="tip-row"><span>' + row[0] + "</span><b>" + escapeHtml(row[1]) + "</b></div>"
+        ).join("") +
+        (step.reason ? '<div class="tip-why">' + escapeHtml(step.reason) + "</div>" : "") +
+        (step.error ? '<div class="tip-err">' + escapeHtml(step.error) + "</div>" : "")
+      );
+    }
+
+    function placeGanttTip(mouse, html) {
+      const tip = ensureGanttTip();
+      tip.innerHTML = html;
+      tip.hidden = false;
+      const pad = 14;
+      const width = tip.offsetWidth;
+      const height = tip.offsetHeight;
+      let x = mouse.clientX + pad;
+      let y = mouse.clientY + pad;
+      if (x + width > window.innerWidth - 8) x = mouse.clientX - width - pad;
+      if (y + height > window.innerHeight - 8) y = mouse.clientY - height - pad;
+      tip.style.left = Math.max(8, x) + "px";
+      tip.style.top = Math.max(8, y) + "px";
+    }
+
+    function bindGanttHover(bar, event) {
+      const html = ganttTipHtml(event);
+      bar.addEventListener("mouseenter", (mouse) => placeGanttTip(mouse, html));
+      bar.addEventListener("mousemove", (mouse) => placeGanttTip(mouse, html));
+      bar.addEventListener("mouseleave", hideGanttTip);
+    }
+
+    function renderGantt(run) {
+      const target = $("diagram");
+      hideGanttTip();
+      if (!run || !(run.steps || []).length) {
+        target.className = "empty";
+        target.innerHTML = "Select a run to see the Gantt timeline.";
+        applyGraphZoom();
+        return;
+      }
+      const model = ganttModel(run);
+      const ticks = [0, 0.25, 0.5, 0.75, 1].map((part) => formatElapsed(model.total * part));
+      const flow = document.createElement("div");
+      flow.className = "gflow gantt";
+      flow.innerHTML =
+        '<div class="gantt-head"><span>Node</span><div class="gantt-ticks">' +
+        ticks.map((tick) => "<span>" + escapeHtml(tick) + "</span>").join("") +
+        "</div></div>";
+      model.groups.forEach((group) => {
+        group.lanes.forEach((lane, laneIndex) => {
+          const row = document.createElement("div");
+          row.className = "gantt-row";
+          const label = document.createElement("div");
+          label.className = "gantt-label";
+          label.textContent = laneIndex === 0 ? group.node : "";
+          const track = document.createElement("div");
+          track.className = "gantt-track";
+          lane.forEach((event) => {
+            const kind = event.step.error ? "error" : stepKind(event.step.node);
+            const bar = document.createElement("button");
+            bar.type = "button";
+            bar.className = "gantt-bar" + (kind ? " " + kind : "");
+            bar.dataset.stepId = event.step.step_id;
+            const left = (event.start / model.total) * 100;
+            const width = Math.max(((event.end - event.start) / model.total) * 100, 1.2);
+            bar.style.left = left + "%";
+            bar.style.width = width + "%";
+            bindStepActions(bar, event.step);
+            bindGanttHover(bar, event);
+            track.appendChild(bar);
+          });
+          row.appendChild(label);
+          row.appendChild(track);
+          flow.appendChild(row);
+        });
+      });
+      target.className = "";
+      target.innerHTML = "";
+      mountGraph(target, flow);
+      highlightSelection();
+    }
+
+    function setGraphView(mode) {
+      graphViewMode = mode === "gantt" ? "gantt" : "graph";
+      hideGanttTip();
+      $("viewGraph").classList.toggle("active", graphViewMode === "graph");
+      $("viewGantt").classList.toggle("active", graphViewMode === "gantt");
+      renderGraph(currentRun);
+    }
+
     function renderGraph(run) {
+      if (graphViewMode === "gantt") {
+        renderGantt(run);
+        return;
+      }
       const target = $("diagram");
       const pipe = currentPipeline();
       if (pipe && pipe.error) {
@@ -2188,6 +2417,8 @@ PAGE = r"""<!DOCTYPE html>
       applyGraphZoom();
     };
     $("zoomFit").onclick = () => fitGraphZoom();
+    $("viewGraph").onclick = () => setGraphView("graph");
+    $("viewGantt").onclick = () => setGraphView("gantt");
     (function bindGraphPan() {
       const box = $("diagram");
       let dragging = false;
@@ -2196,6 +2427,7 @@ PAGE = r"""<!DOCTYPE html>
       box.addEventListener("pointerdown", (event) => {
         if (box.classList.contains("empty")) return;
         if (event.target.closest("button, a, input, textarea")) return;
+        hideGanttTip();
         dragging = true;
         lastX = event.clientX;
         lastY = event.clientY;

@@ -12,7 +12,7 @@ from uuid import uuid4
 from graphviagent.discover import discover_pipelines
 from graphviagent.graph_hash import attach_graph_meta
 from graphviagent.load import LoadedPipeline, load_pipeline
-from graphviagent.record import MAX_RUN_THREADS, record_run, replay_step, resume_from_step
+from graphviagent.record import MAX_RUN_THREADS, iter_run_events, record_run, replay_step, resume_from_step
 from graphviagent.render import ascii_tree, unrolled_mermaid
 from graphviagent.store import (
     delete_run,
@@ -429,6 +429,58 @@ PAGE = r"""<!DOCTYPE html>
       pointer-events: auto;
       will-change: transform;
     }
+    .gflow.topo {
+      width: max-content;
+      min-width: 228px;
+      padding: 28px 80px 44px;
+      transform-origin: 50% 0;
+      position: relative;
+      gap: 52px;
+    }
+    .topo-svg {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      overflow: visible; pointer-events: none; z-index: 2;
+    }
+    .topo-edge { fill: none; stroke: #6b6b78; stroke-width: 2; }
+    .topo-edge.taken { stroke: #a5b4fc; stroke-width: 2.2; }
+    .topo-edge.parallel { stroke: #c4b5fd; stroke-width: 2.4; }
+    .topo-edge.skipped { stroke: #fbbf24; stroke-width: 2; stroke-dasharray: 5 4; }
+    .topo-edge.back { stroke: #4ade80; stroke-width: 2; stroke-dasharray: 6 4; }
+    .topo-edge.idle { stroke: #6b6b78; }
+    .topo-label-bg { fill: #121216; stroke: #3a3a44; stroke-width: 1; }
+    .topo-label-bg.skipped { stroke: #92400e; }
+    .topo-label-bg.parallel { stroke: #4c1d95; }
+    .topo-label-bg.back { stroke: #166534; }
+    .topo-label {
+      fill: #ececee; font-size: 11px; font-weight: 600;
+      font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+    }
+    .topo-label.skipped { fill: #fbbf24; }
+    .topo-label.parallel { fill: #ddd6fe; }
+    .topo-label.back { fill: #86efac; }
+    .topo-layer {
+      display: flex; gap: 20px; justify-content: center; align-items: flex-start;
+      position: relative; z-index: 1;
+    }
+    .topo-node { position: relative; }
+    .g-badge {
+      position: absolute; top: -7px; right: -7px;
+      min-width: 18px; height: 18px; padding: 0 5px; border-radius: 99px;
+      background: #4f46e5; color: #fff; font-size: 10px; font-weight: 600;
+      display: grid; place-items: center;
+    }
+    .g-card.idle { opacity: 0.55; }
+    .g-card.taken { border-color: #3f3f68; }
+    .g-card.running {
+      opacity: 1;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-dim), 0 8px 24px rgba(0, 0, 0, 0.18);
+      animation: g-pulse 1s ease-in-out infinite;
+    }
+    @keyframes g-pulse {
+      0%, 100% { box-shadow: 0 0 0 2px var(--accent-dim), 0 8px 24px rgba(0, 0, 0, 0.18); }
+      50% { box-shadow: 0 0 0 6px var(--accent-dim), 0 8px 24px rgba(0, 0, 0, 0.18); }
+    }
     .g-cap {
       height: 22px; padding: 0 10px; border-radius: 999px;
       border: 1px solid #2e2e36; background: #121216; color: #8b8b96;
@@ -487,6 +539,14 @@ PAGE = r"""<!DOCTYPE html>
     .step:hover { background: #22222a; }
     .step.selected { background: var(--accent-dim); }
     .step.error .step-why { color: var(--danger); }
+    .step.pending { opacity: 0.7; }
+    .step.pending .step-why { color: var(--accent); }
+    .run-log {
+      max-height: 220px; overflow: auto; margin: 0; padding: 8px 10px;
+      border-radius: 8px; background: #121216; color: #c8c8d0;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap;
+    }
+    .run-log:empty::before { content: "No log lines yet."; color: var(--muted); }
     .bar { width: 3px; border-radius: 99px; background: #6366f1; margin: 2px 0 2px 6px; }
     .bar.decision { background: #f59e0b; }
     .bar.loop { background: #22c55e; }
@@ -912,6 +972,10 @@ PAGE = r"""<!DOCTYPE html>
           <details class="tree-details section">
             <summary>Final state</summary>
             <div id="state" class="json"></div>
+          </details>
+          <details class="tree-details section" id="logDetails">
+            <summary>Log</summary>
+            <pre id="runLog" class="run-log"></pre>
           </details>
           <details class="tree-details section">
             <summary>Memory</summary>
@@ -1777,6 +1841,7 @@ PAGE = r"""<!DOCTYPE html>
     function memoryModel(run) {
       const rows = {};
       ((run && run.steps) || []).forEach((step) => {
+        if (!step || step.pending) return;
         const left = stateObject(step.state_in);
         const right = stateObject(step.state_out);
         const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
@@ -2208,6 +2273,7 @@ PAGE = r"""<!DOCTYPE html>
       const kind = skipped ? "" : stepKind(step.node);
       card.type = "button";
       card.className = "g-card" + (kind ? " " + kind : "") + (skipped ? " skipped" : "") + (step.error ? " error" : "");
+      if (step.node) card.dataset.node = step.node;
       if (!skipped && step.step_id) card.dataset.stepId = step.step_id;
       const detail = skipped ? (step.reason || "not taken") : stepDetail(step);
       card.innerHTML =
@@ -2243,6 +2309,284 @@ PAGE = r"""<!DOCTYPE html>
       return seen;
     }
 
+    function topoName(name) {
+      if (name === "__start__" || name === "START") return "START";
+      if (name === "__end__" || name === "END") return "END";
+      return name || "";
+    }
+
+    function graphSpec(run) {
+      const pipe = currentPipeline();
+      if (pipe && pipe.graph && (pipe.graph.nodes || []).length) return pipe.graph;
+      if (run && run.graph && (run.graph.nodes || []).length) return run.graph;
+      return null;
+    }
+
+    function nodeCardSel(name) {
+      const safe = (window.CSS && CSS.escape) ? CSS.escape(name) : String(name).replace(/"/g, '\\"');
+      return '.g-card[data-node="' + safe + '"]';
+    }
+
+    function topologyModel(spec, run) {
+      const rawNodes = ((spec && spec.nodes) || []).map(topoName).filter((name) => name && name !== "START" && name !== "END");
+      const rawEdges = ((spec && spec.edges) || []).map((pair) => [topoName(pair[0]), topoName(pair[1])]).filter((pair) => pair[0] && pair[1] && pair[0] !== pair[1]);
+      const seenEdge = {};
+      const edges = [];
+      rawEdges.forEach((pair) => {
+        const key = pair[0] + "->" + pair[1];
+        if (seenEdge[key]) return;
+        seenEdge[key] = 1;
+        edges.push(pair);
+      });
+      const names = rawNodes.slice();
+      edges.forEach((pair) => {
+        pair.forEach((name) => {
+          if (name !== "START" && name !== "END" && names.indexOf(name) < 0) names.push(name);
+        });
+      });
+      const adj = {};
+      const backKey = {};
+      edges.forEach((pair) => { (adj[pair[0]] || (adj[pair[0]] = [])).push(pair[1]); });
+      const depth = { START: 0 };
+      const queue = ["START"];
+      const visited = { START: 1 };
+      while (queue.length) {
+        const from = queue.shift();
+        (adj[from] || []).forEach((to) => {
+          if (visited[to]) {
+            backKey[from + "->" + to] = 1;
+            return;
+          }
+          visited[to] = 1;
+          depth[to] = (depth[from] || 0) + 1;
+          queue.push(to);
+        });
+      }
+      names.forEach((name) => { if (depth[name] == null) depth[name] = 1; });
+      if (depth.END == null) depth.END = 1;
+      let changed = true;
+      let guard = 0;
+      while (changed && guard < 24) {
+        changed = false;
+        guard += 1;
+        edges.forEach((pair) => {
+          if (backKey[pair[0] + "->" + pair[1]]) return;
+          const next = (depth[pair[0]] || 0) + 1;
+          if (next > (depth[pair[1]] || 0)) {
+            depth[pair[1]] = next;
+            changed = true;
+          }
+        });
+      }
+      const bodyMax = Math.max(0, ...names.map((name) => depth[name] || 0));
+      depth.END = Math.max(depth.END || 0, bodyMax + 1);
+      const byLayer = {};
+      ["START"].concat(names, ["END"]).forEach((name) => {
+        const layer = depth[name] || 0;
+        (byLayer[layer] || (byLayer[layer] = [])).push(name);
+      });
+      const layers = Object.keys(byLayer).sort((a, b) => Number(a) - Number(b)).map((key) => byLayer[key]);
+      const steps = (run && run.steps) || [];
+      const visits = {};
+      const lastStep = {};
+      const errored = {};
+      steps.forEach((step) => {
+        if (!step || step.pending) return;
+        const name = topoName(step.node);
+        visits[name] = (visits[name] || 0) + 1;
+        lastStep[name] = step;
+        if (step.error) errored[name] = step;
+      });
+      const pairCount = {};
+      const completed = steps.filter((step) => step && !step.pending);
+      for (let i = 0; i < completed.length - 1; i += 1) {
+        const key = topoName(completed[i].node) + "->" + topoName(completed[i + 1].node);
+        pairCount[key] = (pairCount[key] || 0) + 1;
+      }
+      if (completed.length) {
+        pairCount["START->" + topoName(completed[0].node)] = 1;
+        const last = topoName(completed[completed.length - 1].node);
+        const unusedLast = (completed[completed.length - 1].unused || []).map(topoName);
+        if (unusedLast.indexOf("END") < 0) pairCount[last + "->END"] = (pairCount[last + "->END"] || 0) + 1;
+      }
+      const unusedFrom = {};
+      completed.forEach((step) => {
+        (step.unused || []).forEach((target) => {
+          unusedFrom[topoName(step.node) + "->" + topoName(target)] = 1;
+        });
+      });
+      const live = !!(run && completed.length);
+      const marked = edges.map((pair) => {
+        const key = pair[0] + "->" + pair[1];
+        const count = pairCount[key] || 0;
+        const back = (depth[pair[1]] || 0) <= (depth[pair[0]] || 0);
+        let kind = "idle";
+        if (live && count) kind = count > 1 ? "parallel" : (back ? "back" : "taken");
+        else if (live && (visits[pair[0]] || pair[0] === "START") && (unusedFrom[key] || !visits[pair[1]])) {
+          if (pair[1] === "END" && count) kind = "taken";
+          else if (pair[1] !== "END" || unusedFrom[key]) kind = "skipped";
+        }
+        return { from: pair[0], to: pair[1], kind: kind, visits: count, back: back };
+      });
+      const nodes = names.map((name) => {
+        let status = "idle";
+        if (live && visits[name]) status = "taken";
+        else if (live) status = "skipped";
+        return {
+          name: name,
+          status: status,
+          visits: visits[name] || 0,
+          lastStep: lastStep[name] || null,
+          error: !!(errored[name]),
+        };
+      });
+      return { layers: layers, edges: marked, nodes: nodes, live: live };
+    }
+
+    function topoNodeBox(flow, name) {
+      const el = flow.querySelector('[data-node="' + name + '"]');
+      if (!el) return null;
+      const box = flow.getBoundingClientRect();
+      const rect = el.getBoundingClientRect();
+      return {
+        left: rect.left - box.left,
+        right: rect.right - box.left,
+        top: rect.top - box.top,
+        bottom: rect.bottom - box.top,
+        cx: rect.left + rect.width / 2 - box.left,
+        cy: rect.top + rect.height / 2 - box.top,
+      };
+    }
+
+    function topoEdgeColor(kind, back) {
+      if (kind === "skipped") return "#fbbf24";
+      if (kind === "parallel") return "#c4b5fd";
+      if (back) return "#4ade80";
+      if (kind === "taken") return "#a5b4fc";
+      return "#8b8b96";
+    }
+
+    function addTopoLabel(svg, x, y, label, kind) {
+      const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      const bg = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      const width = Math.max(28, label.length * 6.8 + 12);
+      const height = 18;
+      bg.setAttribute("class", "topo-label-bg " + kind);
+      bg.setAttribute("x", String(x - width / 2));
+      bg.setAttribute("y", String(y - height / 2));
+      bg.setAttribute("width", String(width));
+      bg.setAttribute("height", String(height));
+      bg.setAttribute("rx", "8");
+      text.setAttribute("class", "topo-label " + kind);
+      text.setAttribute("x", String(x));
+      text.setAttribute("y", String(y + 4));
+      text.setAttribute("text-anchor", "middle");
+      text.textContent = label;
+      g.appendChild(bg);
+      g.appendChild(text);
+      svg.appendChild(g);
+    }
+
+    function drawTopoEdges(flow) {
+      const edges = flow._topoEdges || [];
+      let svg = flow.querySelector("svg.topo-svg");
+      if (!svg) {
+        svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.classList.add("topo-svg");
+        flow.insertBefore(svg, flow.firstChild);
+      }
+      svg.innerHTML = "";
+      const width = Math.max(flow.scrollWidth, flow.clientWidth);
+      const height = Math.max(flow.scrollHeight, flow.clientHeight);
+      svg.setAttribute("width", String(width));
+      svg.setAttribute("height", String(height));
+      svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+      const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+      ["taken", "parallel", "skipped", "back", "idle"].forEach((kind) => {
+        const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
+        marker.setAttribute("id", "topo-arrow-" + kind);
+        marker.setAttribute("markerWidth", "8");
+        marker.setAttribute("markerHeight", "8");
+        marker.setAttribute("refX", "7");
+        marker.setAttribute("refY", "4");
+        marker.setAttribute("orient", "auto");
+        const tip = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        tip.setAttribute("d", "M0,0 L8,4 L0,8 z");
+        tip.setAttribute("fill", topoEdgeColor(kind, kind === "back"));
+        marker.appendChild(tip);
+        defs.appendChild(marker);
+      });
+      svg.appendChild(defs);
+      let minLeft = width;
+      let maxRight = 0;
+      edges.forEach((edge) => {
+        const from = topoNodeBox(flow, edge.from);
+        const to = topoNodeBox(flow, edge.to);
+        if (!from || !to) return;
+        minLeft = Math.min(minLeft, from.left, to.left);
+        maxRight = Math.max(maxRight, from.right, to.right);
+      });
+      if (!Number.isFinite(minLeft)) minLeft = 0;
+      const midGraph = (minLeft + maxRight) / 2;
+      const leftRail = Math.max(16, minLeft - 36);
+      const rightRail = Math.min(width - 16, maxRight + 36);
+      let leftCount = 0;
+      let rightCount = 0;
+      let forwardCount = 0;
+      const labels = [];
+      edges.forEach((edge) => {
+        const from = topoNodeBox(flow, edge.from);
+        const to = topoNodeBox(flow, edge.to);
+        if (!from || !to) return;
+        const back = !!(edge.back && edge.kind !== "skipped");
+        const kind = back ? "back" : edge.kind;
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("class", "topo-edge " + kind);
+        path.setAttribute("marker-end", "url(#topo-arrow-" + kind + ")");
+        let lx;
+        let ly;
+        if (back) {
+          const useLeft = from.cx <= midGraph;
+          const offset = (useLeft ? leftCount++ : rightCount++) * 14;
+          const rail = useLeft ? leftRail - offset : rightRail + offset;
+          const drop = from.bottom + 10;
+          const enter = to.top - 10;
+          path.setAttribute(
+            "d",
+            "M " + from.cx + " " + from.bottom +
+            " L " + from.cx + " " + drop +
+            " L " + rail + " " + drop +
+            " L " + rail + " " + enter +
+            " L " + to.cx + " " + enter +
+            " L " + to.cx + " " + to.top
+          );
+          lx = rail;
+          ly = (drop + enter) / 2;
+        } else {
+          const midY = (from.bottom + to.top) / 2 + (forwardCount++ % 3) * 5 - 5;
+          path.setAttribute(
+            "d",
+            "M " + from.cx + " " + from.bottom +
+            " L " + from.cx + " " + midY +
+            " L " + to.cx + " " + midY +
+            " L " + to.cx + " " + to.top
+          );
+          const vertical = Math.abs(from.cx - to.cx) < 8;
+          lx = vertical ? from.cx + 20 : (from.cx + to.cx) / 2;
+          ly = midY;
+        }
+        svg.appendChild(path);
+        let label = "";
+        if (edge.kind === "parallel" && edge.visits > 1) label = "×" + edge.visits;
+        else if (edge.kind === "skipped") label = "not taken";
+        else if (back && edge.visits > 1) label = "loop ×" + edge.visits;
+        else if (back) label = "loop";
+        if (label) labels.push({ x: lx, y: ly, label: label, kind: kind });
+      });
+      labels.forEach((item) => addTopoLabel(svg, item.x, item.y, item.label, item.kind));
+    }
+
     function applyGraphZoom() {
       const box = $("diagram");
       const flow = box && box.querySelector(".gflow");
@@ -2258,7 +2602,7 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function graphPartsRect(flow) {
-      const parts = flow.querySelectorAll(".g-cap, .g-card, .g-line, .g-skip, .gantt-head, .gantt-row, .gantt-bar");
+      const parts = flow.querySelectorAll(".g-cap, .g-card, .g-line, .g-skip, .gantt-head, .gantt-row, .gantt-bar, .topo-svg");
       if (!parts.length) return flow.getBoundingClientRect();
       let left = Infinity;
       let top = Infinity;
@@ -2282,6 +2626,7 @@ PAGE = r"""<!DOCTYPE html>
       graphPanY = 0;
       graphZoom = 1;
       flow.style.transform = "none";
+      if (flow.classList.contains("topo")) drawTopoEdges(flow);
       const pad = 24;
       const availW = Math.max(box.clientWidth - pad, 1);
       const availH = Math.max(box.clientHeight - pad, 1);
@@ -2307,32 +2652,62 @@ PAGE = r"""<!DOCTYPE html>
       requestAnimationFrame(() => fitGraphZoom());
     }
 
-    function renderLiveGraph(spec, caption) {
+    function renderLiveGraph(spec, caption, run) {
+      renderTopoGraph(spec, run || null, caption);
+    }
+
+    function renderTopoGraph(spec, run, caption) {
       const target = $("diagram");
-      const names = orderGraphNodes(spec);
-      if (!names.length) {
+      const model = topologyModel(spec, run);
+      if (!model.layers.length) {
         target.className = "empty";
-        target.innerHTML = caption || "Select a run to inspect the unrolled path.";
+        target.innerHTML = caption || "Select a run to inspect the graph.";
         applyGraphZoom();
         return;
       }
+      const byName = {};
+      model.nodes.forEach((node) => { byName[node.name] = node; });
       target.className = "";
       target.innerHTML = caption
         ? '<p class="empty" style="margin:0 0 10px">' + escapeHtml(caption) + "</p>"
         : "";
       const flow = document.createElement("div");
-      flow.className = "gflow";
-      flow.appendChild(graphCap("Start"));
-      names.forEach((name) => {
-        flow.appendChild(graphLine());
+      flow.className = "gflow topo";
+      flow._topoEdges = model.edges;
+      model.layers.forEach((layer) => {
         const row = document.createElement("div");
-        row.className = "g-row";
-        row.appendChild(graphCard({ node: name, reason: "", step_id: name }, false));
+        row.className = "topo-layer";
+        layer.forEach((name) => {
+          if (name === "START" || name === "END") {
+            const cap = graphCap(name === "START" ? "Start" : "End");
+            cap.dataset.node = name;
+            row.appendChild(cap);
+            return;
+          }
+          const info = byName[name] || { name: name, status: "idle", visits: 0, lastStep: null, error: false };
+          const skipped = info.status === "skipped";
+          const step = info.lastStep || { node: name, reason: skipped ? "not taken" : "", step_id: "" };
+          const card = graphCard(step, skipped);
+          card.dataset.node = name;
+          if (info.status === "idle") card.classList.add("idle");
+          if (info.status === "taken") card.classList.add("taken");
+          if (info.error) card.classList.add("error");
+          if (info.lastStep) bindStepActions(card, info.lastStep);
+          const wrap = document.createElement("div");
+          wrap.className = "topo-node";
+          wrap.appendChild(card);
+          if (info.visits > 1) {
+            const badge = document.createElement("span");
+            badge.className = "g-badge";
+            badge.textContent = "×" + info.visits;
+            wrap.appendChild(badge);
+          }
+          row.appendChild(wrap);
+        });
         flow.appendChild(row);
       });
-      flow.appendChild(graphLine());
-      flow.appendChild(graphCap("End"));
       mountGraph(target, flow);
+      highlightSelection();
     }
 
     function stepSpan(step, fallbackStart) {
@@ -2543,16 +2918,19 @@ PAGE = r"""<!DOCTYPE html>
         applyGraphZoom();
         return;
       }
-      if (pipe && pipe.graph && (!run || isOutdated(run))) {
-        renderLiveGraph(
-          pipe.graph,
-          run ? "Current pipeline — this run is outdated" : "Current pipeline",
-        );
+      const spec = graphSpec(run);
+      if (spec) {
+        const caption = !run
+          ? "Current pipeline"
+          : isOutdated(run)
+            ? "Current pipeline — this run is outdated"
+            : "";
+        renderTopoGraph(spec, isOutdated(run) ? null : run, caption);
         return;
       }
       if (!run) {
         target.className = "empty";
-        target.innerHTML = "Select a run to inspect the unrolled path. Double-click a node to open its view.";
+        target.innerHTML = "Select a run to inspect the graph. Double-click a node to open its view.";
         applyGraphZoom();
         return;
       }
@@ -2591,11 +2969,88 @@ PAGE = r"""<!DOCTYPE html>
       highlightSelection();
     }
 
+    function renderLogs(logs) {
+      const box = $("runLog");
+      if (!box) return;
+      box.textContent = "";
+      (logs || []).forEach((item) => appendLog(item, false));
+    }
+
+    function appendLog(item, scroll) {
+      const box = $("runLog");
+      if (!box || !item) return;
+      const t = item.t == null || item.t === "" ? "" : formatElapsed(item.t);
+      const line = (t ? t + "  " : "") + (item.src || "run") + "  " + (item.text || "");
+      if (box.textContent) box.textContent += String.fromCharCode(10);
+      box.textContent += line;
+      if (scroll !== false) box.scrollTop = box.scrollHeight;
+    }
+
+    function renderLiveSteps(run) {
+      const steps = $("steps");
+      steps.innerHTML = "";
+      const wall = run && run.elapsed_ms != null
+        ? Number(run.elapsed_ms)
+        : Math.max(0, ...((run && run.steps) || []).map((step) => Number(step.ended_ms) || 0));
+      $("stepsMs").textContent = run && (run.steps || []).some((step) => !step.pending)
+        ? formatElapsed(wall)
+        : (run ? "…" : "");
+      const maxes = runMetricMax(run);
+      (run && run.steps || []).forEach((step) => {
+        const row = document.createElement("div");
+        row.className = "step"
+          + (selectedStep === step.step_id ? " selected" : "")
+          + (step.error ? " error" : "")
+          + (step.pending ? " pending" : "");
+        row.dataset.stepId = step.step_id;
+        const kind = step.error ? "error" : stepKind(step.node);
+        const elapsed = step.pending ? "…" : formatElapsed(step.elapsed_ms);
+        row.innerHTML =
+          '<div class="bar ' + kind + '"></div><div>' +
+          '<div class="step-id">' + escapeHtml(step.step_id) + "</div>" +
+          '<div class="step-name">' + escapeHtml(step.node) + "</div>" +
+          '<div class="step-why">' + escapeHtml(step.pending ? "running" : (step.reason || "")) + "</div></div>" +
+          (step.pending ? "<div></div>" : sparkBars(stepMetrics(step), maxes)) +
+          '<div class="step-ms">' + escapeHtml(elapsed) + "</div>";
+        if (!step.pending) bindStepActions(row, step);
+        steps.appendChild(row);
+      });
+    }
+
+    function pulseNode(name, on) {
+      document.querySelectorAll(nodeCardSel(name)).forEach((card) => {
+        card.classList.toggle("running", !!on);
+        if (on) card.classList.remove("idle");
+      });
+    }
+
+    function markLiveCard(step) {
+      document.querySelectorAll(nodeCardSel(step.node)).forEach((card) => {
+        card.classList.remove("running", "idle");
+        card.classList.add("taken");
+        if (step.error) card.classList.add("error");
+        if (step.step_id) card.dataset.stepId = step.step_id;
+        const detail = stepDetail(step);
+        let sub = card.querySelector(".g-sub");
+        if (detail) {
+          if (!sub) {
+            sub = document.createElement("span");
+            sub.className = "g-sub";
+            const body = card.querySelector(".g-body");
+            if (body) body.appendChild(sub);
+          }
+          sub.textContent = detail;
+        }
+        bindStepActions(card, step);
+      });
+    }
+
     function renderRun(run) {
       const steps = $("steps");
       steps.innerHTML = "";
       setJson($("state"), run ? run.result : {}, null, { thread: false });
       renderMemory(run);
+      renderLogs(run ? run.logs : []);
       $("ascii").textContent = run ? run.ascii : "";
       const wall = run && run.elapsed_ms != null
         ? Number(run.elapsed_ms)
@@ -2647,6 +3102,96 @@ PAGE = r"""<!DOCTYPE html>
       live.textContent = n ? "Running " + n + "/3" : "Running";
     }
 
+    async function readSse(res, onEvent) {
+      if (!res.body) throw new Error("streaming is not supported");
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      const nl = String.fromCharCode(10);
+      let buf = "";
+      const consume = (chunk, final) => {
+        buf += chunk;
+        const parts = buf.split(nl + nl);
+        if (!final) buf = parts.pop() || "";
+        else buf = "";
+        parts.forEach((part) => {
+          part.split(nl).forEach((line) => {
+            if (line.charCodeAt(line.length - 1) === 13) line = line.slice(0, -1);
+            if (line.indexOf("data: ") !== 0) return;
+            onEvent(JSON.parse(line.slice(6)));
+          });
+        });
+      };
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          consume(decoder.decode(), true);
+          break;
+        }
+        consume(decoder.decode(value, { stream: true }), false);
+      }
+    }
+
+    function handleLiveEvent(event, pendingByNode) {
+      const type = event && event.type;
+      if (type === "start") {
+        currentRun.id = event.run_id || currentRun.id;
+        currentRun.input = event.input || currentRun.input;
+        currentRun.started_at = event.started_at;
+        return;
+      }
+      if (type === "node_start") {
+        pulseNode(event.node, true);
+        const pending = {
+          step_id: event.node + "#…",
+          node: event.node,
+          pending: true,
+          started_ms: event.started_ms,
+        };
+        (pendingByNode[event.node] || (pendingByNode[event.node] = [])).push(pending);
+        currentRun.steps = (currentRun.steps || []).concat([pending]);
+        renderLiveSteps(currentRun);
+        return;
+      }
+      if (type === "step") {
+        const step = event.step;
+        pulseNode(step.node, false);
+        markLiveCard(step);
+        const queue = pendingByNode[step.node] || [];
+        const pending = queue.shift();
+        const steps = currentRun.steps || [];
+        const idx = pending ? steps.indexOf(pending) : -1;
+        if (idx >= 0) steps[idx] = step;
+        else steps.push(step);
+        currentRun.steps = steps;
+        renderLiveSteps(currentRun);
+        if (graphViewMode === "gantt") renderGantt(currentRun);
+        if (graphViewMode === "agents") renderAgents(currentRun);
+        renderMemory(currentRun);
+        return;
+      }
+      if (type === "state") {
+        currentRun.result = event.state;
+        setJson($("state"), event.state, null, { thread: false });
+        return;
+      }
+      if (type === "log") {
+        currentRun.logs = (currentRun.logs || []).concat([{
+          t: event.t, src: event.src, text: event.text,
+        }]);
+        appendLog(event, true);
+        return;
+      }
+      if (type === "done") {
+        currentRun = event.run;
+        selectedStep = null;
+        renderRun(currentRun);
+        return;
+      }
+      if (type === "error") {
+        throw new Error(event.error || "run failed");
+      }
+    }
+
     async function runGraph() {
       if (inflightRuns.length >= 3) {
         alert("At most 3 runs can execute at once");
@@ -2660,15 +3205,40 @@ PAGE = r"""<!DOCTYPE html>
       const job = { id: runId, controller: controller };
       inflightRuns.push(job);
       syncRunControls();
+      selectedStep = null;
+      currentRun = { id: runId, input: input, steps: [], result: {}, logs: [] };
+      const logDetails = $("logDetails");
+      if (logDetails) logDetails.open = true;
+      renderLogs([]);
+      setJson($("state"), {}, null, { thread: false });
+      $("ascii").textContent = "";
+      $("steps").innerHTML = "";
+      $("stepsMs").textContent = "…";
+      renderMemory(null);
+      if (graphViewMode === "graph") {
+        const spec = graphSpec(null);
+        if (spec) renderTopoGraph(spec, { live: true, steps: [] }, "Running…");
+      }
+      const pendingByNode = {};
       try {
-        currentRun = await api("/api/run", {
+        const res = await fetch("/api/run/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ file: fileId, input: input, run_id: runId }),
           signal: controller.signal,
         });
-        selectedStep = null;
-        renderRun(currentRun);
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || res.statusText);
+        }
+        let finished = false;
+        await readSse(res, (event) => {
+          handleLiveEvent(event, pendingByNode);
+          if (event && event.type === "done") finished = true;
+        });
+        if (!finished && !(currentRun && currentRun.error)) {
+          throw new Error("run produced no result");
+        }
       } catch (err) {
         if (err && err.name === "AbortError") return;
         throw err;
@@ -3301,6 +3871,20 @@ class GraphVIHandler(BaseHTTPRequestHandler):
     def _json(self, code: int, payload: dict) -> None:
         self._send(code, json.dumps(payload).encode(), "application/json")
 
+    def _sse_begin(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache, no-store")
+        self.send_header("Connection", "close")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        self.close_connection = True
+
+    def _sse_data(self, payload: dict) -> None:
+        body = f"data: {json.dumps(payload, default=str)}\n\n".encode()
+        self.wfile.write(body)
+        self.wfile.flush()
+
     def _normalize_run_id(self, value: object) -> str | None:
         if not value:
             return None
@@ -3492,6 +4076,48 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                 if not run_id:
                     raise ValueError("run_id is required")
                 self._json(200, {"ok": self._cancel_run(run_id)})
+                return
+            if parsed.path == "/api/run/stream":
+                loaded = self._get_loaded(payload["file"])
+                run_id = self._normalize_run_id(payload.get("run_id")) or uuid4().hex
+                cancel = self._begin_run(run_id)
+                started = False
+                try:
+                    self._sse_begin()
+                    started = True
+                    for event in iter_run_events(
+                        loaded.app,
+                        payload.get("input") or {},
+                        thread_id=run_id,
+                        has_checkpointer=loaded.has_checkpointer,
+                        cancel=cancel,
+                    ):
+                        if event.get("type") == "done":
+                            run = event.get("run") or {}
+                            saved = save_run(
+                                self.workspace,
+                                loaded.stem,
+                                attach_graph_meta(
+                                    run,
+                                    loaded.graph,
+                                    loaded.graph_hash,
+                                    loaded.file_sha256,
+                                ),
+                            )
+                            event = {"type": "done", "run": self._with_render(saved)}
+                        self._sse_data(event)
+                except (BrokenPipeError, ConnectionResetError):
+                    self._cancel_run(run_id)
+                except Exception as exc:
+                    if started:
+                        try:
+                            self._sse_data({"type": "error", "error": str(exc)})
+                        except Exception:
+                            pass
+                    else:
+                        raise
+                finally:
+                    self._end_run(run_id)
                 return
             if parsed.path == "/api/run":
                 loaded = self._get_loaded(payload["file"])

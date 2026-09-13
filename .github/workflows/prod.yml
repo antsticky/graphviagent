@@ -1,18 +1,79 @@
-name: Publish
+name: Prod
 
 on:
   push:
     branches:
       - prod
-    paths:
-      - "src/**"
-      - "pyproject.toml"
-      - "CHANGELOG.md"
-      - ".github/workflows/publish.yml"
+  workflow_dispatch:
 
 jobs:
+  filter:
+    name: Filter
+    runs-on: ubuntu-latest
+    outputs:
+      docs: ${{ steps.filter.outputs.docs }}
+      package: ${{ steps.filter.outputs.package }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: filter
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "docs=true" >> "$GITHUB_OUTPUT"
+            echo "package=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          before="${{ github.event.before }}"
+          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+            files=$(git diff --name-only HEAD~1)
+          else
+            files=$(git diff --name-only "$before" HEAD)
+          fi
+          echo "$files"
+          docs=false
+          package=false
+          while IFS= read -r f; do
+            case "$f" in
+              docs/*) docs=true ;;
+              src/*|pyproject.toml|CHANGELOG.md) package=true ;;
+            esac
+          done <<< "$files"
+          echo "docs=$docs" >> "$GITHUB_OUTPUT"
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+
+  pages:
+    name: Deploy docs
+    needs: filter
+    if: needs.filter.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
   pypi:
     name: Upload to PyPI
+    needs: filter
+    if: needs.filter.outputs.package == 'true'
     runs-on: ubuntu-latest
     environment:
       name: pypi

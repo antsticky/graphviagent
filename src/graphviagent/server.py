@@ -181,14 +181,21 @@ PAGE = r"""<!DOCTYPE html>
       height: 10px; margin: 6px 40px 6px 0; border-radius: 4px; background: #222228;
     }
     .af-empty { color: var(--muted); font-size: 12px; padding: 8px 0; }
-    .layout { display: grid; grid-template-columns: 280px 1fr; height: calc(100vh - 48px); }
+    .layout { display: grid; grid-template-columns: 280px 1fr; height: calc(100vh - 48px); min-height: 0; }
     aside {
       background: var(--raised);
       border-right: 1px solid var(--line);
       padding: 12px;
       overflow: auto;
+      min-height: 0;
     }
-    main { padding: 16px 18px; overflow: auto; }
+    main {
+      padding: 16px 18px;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
     h2 {
       font-size: 11px; font-weight: 500; text-transform: uppercase;
       letter-spacing: 0.06em; color: var(--muted); margin: 14px 0 8px;
@@ -253,15 +260,21 @@ PAGE = r"""<!DOCTYPE html>
     }
     button.ghost:disabled:hover { background: transparent; }
     .warn { color: #c4a574; font-size: 12px; margin: 0 0 14px; }
-    .grid { display: grid; grid-template-columns: 1.15fr 1fr; gap: 12px; align-items: stretch; }
+    .grid {
+      display: grid; grid-template-columns: 1.15fr 1fr; gap: 12px;
+      align-items: stretch;
+      flex: 1 1 auto;
+      min-height: 320px;
+    }
     .pane {
       display: flex; flex-direction: column; min-height: 0;
+      height: 100%;
       background: var(--panel); border: 1px solid var(--line);
-      border-radius: 8px; padding: 12px; min-height: 240px;
+      border-radius: 8px; padding: 12px;
     }
     #diagram {
       flex: 1;
-      min-height: 320px;
+      min-height: 0;
       overflow: hidden;
       position: relative;
       border-radius: 8px;
@@ -342,7 +355,10 @@ PAGE = r"""<!DOCTYPE html>
       box-shadow: none; background: #141418;
     }
     .g-card.skipped:hover { border-color: #2e2e36; }
-    .waterfall { display: flex; flex-direction: column; gap: 4px; }
+    .waterfall {
+      display: flex; flex-direction: column; gap: 4px;
+      flex: 1; min-height: 0; overflow: auto;
+    }
     .step {
       display: grid; grid-template-columns: 14px 1fr auto; gap: 8px;
       padding: 8px 8px 8px 0; border-radius: 8px; cursor: pointer;
@@ -1530,17 +1546,43 @@ PAGE = r"""<!DOCTYPE html>
         "translate(" + graphPanX + "px, " + graphPanY + "px) scale(" + graphZoom + ")";
     }
 
+    function graphPartsRect(flow) {
+      const parts = flow.querySelectorAll(".g-cap, .g-card, .g-line, .g-skip");
+      if (!parts.length) return flow.getBoundingClientRect();
+      let left = Infinity;
+      let top = Infinity;
+      let right = -Infinity;
+      let bottom = -Infinity;
+      parts.forEach((el) => {
+        const rect = el.getBoundingClientRect();
+        left = Math.min(left, rect.left);
+        top = Math.min(top, rect.top);
+        right = Math.max(right, rect.right);
+        bottom = Math.max(bottom, rect.bottom);
+      });
+      return { left, top, right, bottom, width: right - left, height: bottom - top };
+    }
+
     function fitGraphZoom() {
       const box = $("diagram");
       const flow = box && box.querySelector(".gflow");
       if (!box || !flow) return;
       graphPanX = 0;
       graphPanY = 0;
+      graphZoom = 1;
+      flow.style.transform = "none";
       const pad = 24;
-      const spine = 228;
-      const sx = (box.clientWidth - pad) / spine;
-      const sy = (box.clientHeight - pad) / Math.max(flow.scrollHeight, 1);
-      graphZoom = Math.max(0.25, Math.min(1, sx, sy));
+      const availW = Math.max(box.clientWidth - pad, 1);
+      const availH = Math.max(box.clientHeight - pad, 1);
+      const natural = graphPartsRect(flow);
+      const width = Math.max(natural.width, 1);
+      const height = Math.max(natural.height, 1);
+      graphZoom = Math.max(0.25, Math.min(availW / width, availH / height));
+      applyGraphZoom();
+      const boxRect = box.getBoundingClientRect();
+      const graphRect = graphPartsRect(flow);
+      graphPanX += (boxRect.left + boxRect.width / 2) - (graphRect.left + graphRect.width / 2);
+      graphPanY += (boxRect.top + boxRect.height / 2) - (graphRect.top + graphRect.height / 2);
       applyGraphZoom();
     }
 
@@ -1551,7 +1593,7 @@ PAGE = r"""<!DOCTYPE html>
       target.appendChild(wrap);
       graphPanX = 0;
       graphPanY = 0;
-      applyGraphZoom();
+      requestAnimationFrame(() => fitGraphZoom());
     }
 
     function renderLiveGraph(spec, caption) {

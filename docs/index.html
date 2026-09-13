@@ -50,6 +50,15 @@
       background: var(--raised); border-bottom: 1px solid var(--line);
     }
     .brand { display: flex; align-items: center; gap: 14px; font-weight: 600; }
+    .wordmark { font-weight: 600; letter-spacing: -0.02em; }
+    .wordmark .ia {
+      color: #c4b5fd;
+      background: var(--accent-dim);
+      border-radius: 5px;
+      padding: 0 3px;
+      font-style: normal;
+    }
+    .wordmark-lg { font-size: 15px; letter-spacing: 0.04em; }
     .mark {
       width: 22px; height: 22px; border-radius: 6px;
       background: linear-gradient(135deg, #7c5cff, #4f46e5);
@@ -82,6 +91,9 @@
     .kicker {
       font-size: 11px; font-weight: 500; letter-spacing: 0.08em;
       text-transform: uppercase; color: #c4b5fd; margin: 0 0 12px;
+    }
+    .kicker .wordmark {
+      text-transform: none; letter-spacing: -0.02em; color: var(--ink);
     }
     h1 { font-size: 52px; font-weight: 600; letter-spacing: -0.035em; line-height: 1.08; margin: 0 0 16px; }
     h1 em { font-style: normal; color: #a78bfa; }
@@ -327,7 +339,8 @@
 <body>
   <header>
     <div class="brand">
-      <span class="mark">GVA</span> GraphVIAgent
+      <span class="mark">IA</span>
+      <span class="wordmark">GraphV<span class="ia">IA</span>gent</span>
       <nav class="nav">
         <a class="nav-link" href="#features">Features</a>
         <a class="nav-link" href="#start">Start</a>
@@ -344,7 +357,10 @@
   <main>
     <section class="hero">
       <div>
-        <p class="kicker">Graph-View-Agent</p>
+        <p class="kicker">
+          <span class="wordmark wordmark-lg">GraphV<span class="ia">IA</span>gent</span>
+          · Graph-View-Agent
+        </p>
         <h1>See your LangGraph run <em>as it happens</em>.</h1>
         <p class="lede">
           GraphVIAgent is an inspector for LangGraph. Point it at a folder of
@@ -612,7 +628,7 @@ graphviagent serve . --host 127.0.0.1</pre>
   </main>
 
   <footer>
-    <div>GraphVIAgent · MIT · @antsticky</div>
+    <div><span class="wordmark">GraphV<span class="ia">IA</span>gent</span> · MIT · @antsticky</div>
     <div>
       <a href="https://pypi.org/project/graphviagent/">PyPI</a>
       ·

@@ -985,13 +985,25 @@ PAGE = r"""<!DOCTYPE html>
       }[ch]));
     }
 
+    const EN_MONTHS = ["Jan.", "Feb.", "Mar.", "Apr.", "May", "June", "July", "Aug.", "Sept.", "Oct.", "Nov.", "Dec."];
+
+    function pad2(value) {
+      return String(value).padStart(2, "0");
+    }
+
+    function formatClock(date) {
+      return pad2(date.getHours()) + ":" + pad2(date.getMinutes());
+    }
+
+    function formatDayEn(date) {
+      return EN_MONTHS[date.getMonth()] + " " + date.getDate();
+    }
+
     function formatTime(iso) {
       if (!iso) return "";
       const d = new Date(iso);
       if (Number.isNaN(d.getTime())) return iso.slice(0, 16);
-      const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-      const date = d.toLocaleDateString([], { month: "short", day: "numeric" });
-      return time + "  " + date;
+      return formatClock(d) + "  " + formatDayEn(d);
     }
 
     function formatElapsed(ms) {
@@ -1117,12 +1129,9 @@ PAGE = r"""<!DOCTYPE html>
     function runDateParts(run) {
       const date = run.created_at ? new Date(run.created_at) : null;
       if (!date || Number.isNaN(date.getTime())) return { day: "", time: "", key: "" };
-      const months = ["Jan.", "Feb.", "Mar.", "Apr.", "May", "June", "July", "Aug.", "Sept.", "Oct.", "Nov.", "Dec."];
-      const hh = String(date.getHours()).padStart(2, "0");
-      const mm = String(date.getMinutes()).padStart(2, "0");
       return {
-        day: months[date.getMonth()] + " " + date.getDate(),
-        time: hh + ":" + mm,
+        day: formatDayEn(date),
+        time: formatClock(date),
         key: date.getFullYear() + "-" + date.getMonth() + "-" + date.getDate(),
       };
     }
@@ -1130,7 +1139,7 @@ PAGE = r"""<!DOCTYPE html>
     function runHoverText(run) {
       const when = run.created_at ? new Date(run.created_at) : null;
       const date = when && !Number.isNaN(when.getTime())
-        ? when.toLocaleString()
+        ? formatClock(when) + "  " + formatDayEn(when)
         : (run.created_at || "");
       return [date, run.mode || "run", formatElapsed(run.elapsed_ms)].filter(Boolean).join("  ·  ");
     }

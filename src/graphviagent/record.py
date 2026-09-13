@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import queue
 import sys
 import threading
@@ -19,6 +20,8 @@ _capture_lock = threading.Lock()
 _capture_depth = 0
 _capture_stdout: Any = None
 _capture_stderr: Any = None
+_log_handler: logging.Handler | None = None
+_log_handle_orig: Any = None
 
 
 class RunCancelled(Exception):
@@ -331,8 +334,9 @@ def _invoke_target(node: Any) -> Any | None:
 
 
 class _CaptureStream:
-    def __init__(self, original: Any) -> None:
+    def __init__(self, original: Any, kind: str = "stdout") -> None:
         self.original = original
+        self.kind = kind
 
     def write(self, data: Any) -> int:
         text = data if isinstance(data, str) else str(data)
@@ -340,9 +344,13 @@ class _CaptureStream:
             written = self.original.write(data)
         except Exception:
             written = len(text)
-        sink = getattr(_capture_tls, "sink", None)
-        if sink is not None:
-            sink(text)
+        if getattr(_capture_tls, "in_logging", 0):
+            return written if isinstance(written, int) else len(text)
+        hook = getattr(_capture_tls, "on_stdio", None)
+        if hook is not None:
+            for line in text.splitlines():
+                if line.strip():
+                    hook(line, self.kind)
         return written if isinstance(written, int) else len(text)
 
     def flush(self) -> None:
@@ -359,23 +367,80 @@ class _CaptureStream:
 
 
 def _install_stdio_capture() -> None:
-    global _capture_depth, _capture_stdout, _capture_stderr
+    global _capture_depth, _capture_stdout, _capture_stderr, _log_handler
     with _capture_lock:
         if _capture_depth == 0:
             _capture_stdout = sys.stdout
             _capture_stderr = sys.stderr
-            sys.stdout = _CaptureStream(_capture_stdout)
-            sys.stderr = _CaptureStream(_capture_stderr)
+            sys.stdout = _CaptureStream(_capture_stdout, "stdout")
+            sys.stderr = _CaptureStream(_capture_stderr, "stderr")
+            _patch_logging_handle()
+            _log_handler = _RunLogHandler()
+            logging.getLogger().addHandler(_log_handler)
         _capture_depth += 1
 
 
 def _uninstall_stdio_capture() -> None:
-    global _capture_depth
+    global _capture_depth, _log_handler, _log_handle_orig
     with _capture_lock:
         _capture_depth = max(0, _capture_depth - 1)
         if _capture_depth == 0 and _capture_stdout is not None:
             sys.stdout = _capture_stdout
             sys.stderr = _capture_stderr
+            if _log_handler is not None:
+                logging.getLogger().removeHandler(_log_handler)
+                _log_handler = None
+            if _log_handle_orig is not None:
+                logging.Handler.handle = _log_handle_orig
+                _log_handle_orig = None
+
+
+class _RunLogHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.setFormatter(logging.Formatter("%(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        emit = getattr(_capture_tls, "emit", None)
+        if emit is None:
+            return
+        try:
+            text = record.getMessage()
+            if record.exc_info and record.exc_info[0] is not None:
+                text = text + "\n" + self.formatter.formatException(record.exc_info)
+        except Exception:
+            text = str(getattr(record, "msg", "") or "")
+        clock0 = getattr(_capture_tls, "clock0", None)
+        now = round((time.perf_counter() - clock0) * 1000, 2) if clock0 else 0
+        node = getattr(_capture_tls, "node", None)
+        emit(
+            {
+                "type": "log",
+                "t": now,
+                "src": node or record.name,
+                "text": text,
+                "level": (record.levelname or "INFO").lower(),
+                "logger": record.name,
+            }
+        )
+
+
+def _patch_logging_handle() -> None:
+    global _log_handle_orig
+    if _log_handle_orig is not None:
+        return
+    original = logging.Handler.handle
+    _log_handle_orig = original
+
+    def handle(self: logging.Handler, record: logging.LogRecord) -> Any:
+        depth = getattr(_capture_tls, "in_logging", 0)
+        _capture_tls.in_logging = depth + 1
+        try:
+            return original(self, record)
+        finally:
+            _capture_tls.in_logging = depth
+
+    logging.Handler.handle = handle  # type: ignore[method-assign]
 
 
 def _install_node_probes(
@@ -407,23 +472,14 @@ def _install_node_probes(
                 incoming = _probe_input(args, kwargs)
                 if emit:
                     emit({"type": "node_start", "node": node_name, "started_ms": started_ms})
-                    emit({"type": "log", "t": started_ms, "src": node_name, "text": "started"})
-                previous = getattr(_capture_tls, "sink", None)
-
-                def sink(text: str) -> None:
-                    if not emit:
-                        return
-                    now = round((time.perf_counter() - clock0) * 1000, 2)
-                    for line in str(text).splitlines():
-                        if line.strip():
-                            emit({"type": "log", "t": now, "src": node_name, "text": line})
-
-                _capture_tls.sink = sink
+                    emit({"type": "log", "t": started_ms, "src": node_name, "text": "started", "level": "info"})
+                previous_node = getattr(_capture_tls, "node", None)
+                _capture_tls.node = node_name
                 memory = _MemoryTrace()
                 try:
                     return orig(*args, **kwargs)
                 finally:
-                    _capture_tls.sink = previous
+                    _capture_tls.node = previous_node
                     memory_mb, memory_peak_mb = memory.snapshot()
                     memory.close()
                     ended_ms = round((time.perf_counter() - clock0) * 1000, 2)
@@ -476,7 +532,14 @@ def _apply_unused(steps: list[dict], edges: list[tuple[str, str]]) -> None:
 
 
 def _append_log(logs: list[dict], event: dict) -> dict:
-    item = {"t": event.get("t"), "src": event.get("src") or "run", "text": event.get("text") or ""}
+    item = {
+        "t": event.get("t"),
+        "src": event.get("src") or "run",
+        "text": event.get("text") or "",
+        "level": str(event.get("level") or "info").lower(),
+    }
+    if event.get("logger"):
+        item["logger"] = event["logger"]
     logs.append(item)
     if len(logs) > _LOG_LIMIT:
         del logs[:-_LOG_LIMIT]
@@ -858,8 +921,25 @@ def _execute_run(
             return
         emit(event)
 
+    def on_stdio(line: str, stream: str) -> None:
+        now = round((time.perf_counter() - clock0) * 1000, 2)
+        node = getattr(_capture_tls, "node", None) or "run"
+        push(
+            {
+                "type": "log",
+                "t": now,
+                "src": node,
+                "text": line,
+                "level": "print" if stream == "stdout" else "stderr",
+            }
+        )
+
+    _capture_tls.emit = push
+    _capture_tls.clock0 = clock0
+    _capture_tls.on_stdio = on_stdio
+    _capture_tls.node = None
     emit({"type": "start", "run_id": run_id, "input": jsonable(user_input), "started_at": _iso_from_wall(wall0, 0)})
-    push({"type": "log", "t": 0, "src": "run", "text": "run started"})
+    push({"type": "log", "t": 0, "src": "run", "text": "run started", "level": "info"})
     probes, restore_probes, probe_lock = _install_node_probes(
         app, clock0, cancel=cancel, emit=push
     )
@@ -894,7 +974,7 @@ def _execute_run(
                 )
                 step["index"] = len(steps)
                 steps.append(step)
-                push({"type": "log", "t": step["ended_ms"], "src": node, "text": f"finished ({step['elapsed_ms']}ms)"})
+                push({"type": "log", "t": step["ended_ms"], "src": node, "text": f"finished ({step['elapsed_ms']}ms)", "level": "info"})
                 emit({"type": "step", "step": step})
                 emit({"type": "state", "state": jsonable(state)})
     except Exception as exc:
@@ -921,17 +1001,21 @@ def _execute_run(
                 )
                 step["index"] = len(steps)
                 steps.append(step)
-                push({"type": "log", "t": ended_ms, "src": failed, "text": run_error})
+                push({"type": "log", "t": ended_ms, "src": failed, "text": run_error, "level": "error"})
                 emit({"type": "step", "step": step})
                 emit({"type": "state", "state": jsonable(state)})
     finally:
         restore_probes()
         _uninstall_stdio_capture()
+        _capture_tls.emit = None
+        _capture_tls.on_stdio = None
+        _capture_tls.node = None
+        _capture_tls.clock0 = None
 
     if run_error:
-        push({"type": "log", "t": _elapsed_ms(clock0), "src": "run", "text": run_error})
+        push({"type": "log", "t": _elapsed_ms(clock0), "src": "run", "text": run_error, "level": "error"})
     else:
-        push({"type": "log", "t": _elapsed_ms(clock0), "src": "run", "text": "run finished"})
+        push({"type": "log", "t": _elapsed_ms(clock0), "src": "run", "text": "run finished", "level": "info"})
     emit(
         {
             "type": "done",

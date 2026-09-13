@@ -7,11 +7,12 @@ from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from uuid import uuid4
 
 from graphviagent.discover import discover_pipelines
 from graphviagent.graph_hash import attach_graph_meta
 from graphviagent.load import LoadedPipeline, load_pipeline
-from graphviagent.record import record_run, replay_step, resume_from_step
+from graphviagent.record import MAX_RUN_THREADS, record_run, replay_step, resume_from_step
 from graphviagent.render import ascii_tree, unrolled_mermaid
 from graphviagent.store import (
     delete_run,
@@ -270,6 +271,21 @@ PAGE = r"""<!DOCTYPE html>
       opacity: 0.4; cursor: not-allowed;
     }
     button.ghost:disabled:hover { background: transparent; }
+    button.cancel { border-color: #7f1d1d; color: #fca5a5; }
+    button.cancel:hover { background: #2a1518; }
+    .run-live {
+      color: #c4b5fd; font-size: 12px; font-weight: 500;
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .run-live[hidden] { display: none; }
+    .run-live::before {
+      content: ""; width: 8px; height: 8px; border-radius: 99px;
+      background: var(--accent); animation: live-pulse 1.1s ease-in-out infinite;
+    }
+    @keyframes live-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.35; }
+    }
     .warn { color: #c4a574; font-size: 12px; margin: 0 0 14px; }
     .grid {
       display: grid; grid-template-columns: 1.15fr 1fr; gap: 12px;
@@ -852,6 +868,8 @@ PAGE = r"""<!DOCTYPE html>
       <div id="exampleChips" class="chips"></div>
       <div class="toolbar">
         <button class="primary" id="runBtn">Run</button>
+        <button class="ghost cancel" id="cancelBtn" hidden>Cancel</button>
+        <span id="runLive" class="run-live" hidden>Running</span>
         <button class="ghost" id="replayBtn" disabled>Replay step</button>
         <button class="ghost" id="replayFromBtn" disabled>Replay from</button>
         <button class="ghost" id="exportBtn" disabled>Export</button>
@@ -987,6 +1005,7 @@ PAGE = r"""<!DOCTYPE html>
     let graphPanX = 0;
     let graphPanY = 0;
     let graphViewMode = "graph";
+    let inflightRuns = [];
 
     const $ = (id) => document.getElementById(id);
 
@@ -2614,19 +2633,64 @@ PAGE = r"""<!DOCTYPE html>
       syncStepButtons();
     }
 
+    function newRunId() {
+      if (crypto.randomUUID) return crypto.randomUUID().replace(/-/g, "");
+      return Math.random().toString(16).slice(2) + Date.now().toString(16);
+    }
+
+    function syncRunControls() {
+      const n = inflightRuns.length;
+      $("runBtn").disabled = n >= 3;
+      $("runBtn").textContent = n ? "Run (" + n + "/3)" : "Run";
+      $("cancelBtn").hidden = n === 0;
+      const live = $("runLive");
+      live.hidden = n === 0;
+      live.textContent = n ? "Running " + n + "/3" : "Running";
+    }
+
     async function runGraph() {
+      if (inflightRuns.length >= 3) {
+        alert("At most 3 runs can execute at once");
+        return;
+      }
       let input;
       try { input = JSON.parse($("input").value || "{}"); }
       catch (err) { alert("Input must be JSON"); return; }
-      currentRun = await api("/api/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ file: fileId, input }),
-      });
-      selectedStep = null;
-      renderRun(currentRun);
-      await loadHistory();
-      await loadPipelines();
+      const runId = newRunId();
+      const controller = new AbortController();
+      const job = { id: runId, controller: controller };
+      inflightRuns.push(job);
+      syncRunControls();
+      try {
+        currentRun = await api("/api/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ file: fileId, input: input, run_id: runId }),
+          signal: controller.signal,
+        });
+        selectedStep = null;
+        renderRun(currentRun);
+      } catch (err) {
+        if (err && err.name === "AbortError") return;
+        throw err;
+      } finally {
+        inflightRuns = inflightRuns.filter((item) => item !== job);
+        syncRunControls();
+        await loadHistory();
+        await loadPipelines();
+      }
+    }
+
+    async function cancelRuns() {
+      const jobs = inflightRuns.slice();
+      if (!jobs.length) return;
+      await Promise.all(jobs.map((job) =>
+        fetch("/api/run/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ run_id: job.id }),
+        }).catch(() => null)
+      ));
     }
 
     function currentPipeline() {
@@ -3116,6 +3180,7 @@ PAGE = r"""<!DOCTYPE html>
       box.addEventListener("pointercancel", stop);
     })();
     $("runBtn").onclick = () => runGraph().catch((e) => alert(e.message));
+    $("cancelBtn").onclick = () => cancelRuns().catch((e) => alert(e.message));
     $("replayBtn").onclick = () => openFromButton("replay");
     $("replayFromBtn").onclick = () => openFromButton("replay_from");
     $("replayFromHereBtn").onclick = () => rerun("resume").catch((e) => alert(e.message));
@@ -3219,6 +3284,8 @@ class GraphVIHandler(BaseHTTPRequestHandler):
     workspace: Path
     cache: dict[str, LoadedPipeline]
     watcher: PipelineWatcher | None = None
+    active_runs: dict[str, threading.Event] = {}
+    run_lock = threading.Lock()
 
     def log_message(self, format: str, *args) -> None:
         print(f"[graphviagent] {args[0]}")
@@ -3234,6 +3301,34 @@ class GraphVIHandler(BaseHTTPRequestHandler):
 
     def _json(self, code: int, payload: dict) -> None:
         self._send(code, json.dumps(payload).encode(), "application/json")
+
+    def _normalize_run_id(self, value: object) -> str | None:
+        if not value:
+            return None
+        text = str(value).replace("-", "")
+        if not text or len(text) > 64 or any(ch not in "0123456789abcdefABCDEF" for ch in text):
+            raise ValueError("run_id must be a hex id")
+        return text.lower()
+
+    def _begin_run(self, run_id: str) -> threading.Event:
+        with self.run_lock:
+            if len(self.active_runs) >= MAX_RUN_THREADS:
+                raise RuntimeError("at most 3 runs can execute at once")
+            cancel = threading.Event()
+            self.active_runs[run_id] = cancel
+            return cancel
+
+    def _end_run(self, run_id: str) -> None:
+        with self.run_lock:
+            self.active_runs.pop(run_id, None)
+
+    def _cancel_run(self, run_id: str) -> bool:
+        with self.run_lock:
+            cancel = self.active_runs.get(run_id)
+        if cancel is None:
+            return False
+        cancel.set()
+        return True
 
     def _read_json(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
@@ -3393,19 +3488,32 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             payload = self._read_json()
+            if parsed.path == "/api/run/cancel":
+                run_id = self._normalize_run_id(payload.get("run_id"))
+                if not run_id:
+                    raise ValueError("run_id is required")
+                self._json(200, {"ok": self._cancel_run(run_id)})
+                return
             if parsed.path == "/api/run":
                 loaded = self._get_loaded(payload["file"])
-                run = record_run(
-                    loaded.app,
-                    payload.get("input") or {},
-                    has_checkpointer=loaded.has_checkpointer,
-                )
-                saved = save_run(
-                    self.workspace,
-                    loaded.stem,
-                    attach_graph_meta(run, loaded.graph, loaded.graph_hash, loaded.file_sha256),
-                )
-                self._json(200, self._with_render(saved))
+                run_id = self._normalize_run_id(payload.get("run_id")) or uuid4().hex
+                cancel = self._begin_run(run_id)
+                try:
+                    run = record_run(
+                        loaded.app,
+                        payload.get("input") or {},
+                        thread_id=run_id,
+                        has_checkpointer=loaded.has_checkpointer,
+                        cancel=cancel,
+                    )
+                    saved = save_run(
+                        self.workspace,
+                        loaded.stem,
+                        attach_graph_meta(run, loaded.graph, loaded.graph_hash, loaded.file_sha256),
+                    )
+                    self._json(200, self._with_render(saved))
+                finally:
+                    self._end_run(run_id)
                 return
             if parsed.path == "/api/rerun":
                 run = load_run(self.workspace, payload["run_id"])

@@ -122,21 +122,21 @@ PAGE = r"""<!DOCTYPE html>
       font-family: "IBM Plex Mono", ui-monospace, monospace;
     }
     .af-actions { display: flex; align-items: center; gap: 10px; }
-    .af-grid { width: max-content; min-width: min-content; }
+    .af-grid { width: 100%; min-width: 0; }
     .af-bars, .af-plays, .af-row, .af-days, .af-times {
-      display: grid; align-items: end; column-gap: 3px;
+      display: grid; align-items: end; column-gap: 4px;
     }
     .af-bars { height: 58px; margin-bottom: 4px; }
     .af-days { margin-bottom: 1px; }
     .af-times { margin-bottom: 2px; }
     .af-day, .af-time {
       border: 0; background: transparent; padding: 0; cursor: pointer;
-      font-family: "IBM Plex Mono", ui-monospace, monospace;
-      text-align: center; line-height: 1.2; letter-spacing: -0.02em;
-      overflow: hidden; text-overflow: clip; white-space: nowrap;
+      font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+      text-align: center; line-height: 1.25; letter-spacing: 0;
+      overflow: visible; white-space: nowrap;
     }
-    .af-day { color: #7d7d86; font-size: 9px; font-weight: 500; }
-    .af-time { color: #5c5c66; font-size: 9px; }
+    .af-day { color: #7d7d86; font-size: 10px; font-weight: 500; }
+    .af-time { color: #5c5c66; font-size: 10px; }
     .af-day:hover, .af-time:hover { color: #a1a1aa; }
     .af-bar {
       width: 100%; border: 0; border-radius: 2px 2px 0 0; padding: 0;
@@ -1117,9 +1117,12 @@ PAGE = r"""<!DOCTYPE html>
     function runDateParts(run) {
       const date = run.created_at ? new Date(run.created_at) : null;
       if (!date || Number.isNaN(date.getTime())) return { day: "", time: "", key: "" };
+      const months = ["Jan.", "Feb.", "Mar.", "Apr.", "May", "June", "July", "Aug.", "Sept.", "Oct.", "Nov.", "Dec."];
+      const hh = String(date.getHours()).padStart(2, "0");
+      const mm = String(date.getMinutes()).padStart(2, "0");
       return {
-        day: date.toLocaleDateString([], { month: "short", day: "numeric" }),
-        time: date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        day: months[date.getMonth()] + " " + date.getDate(),
+        time: hh + ":" + mm,
         key: date.getFullYear() + "-" + date.getMonth() + "-" + date.getDate(),
       };
     }
@@ -1160,15 +1163,15 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function gridTemplate(count) {
-      return "200px repeat(" + Math.max(count, 1) + ", 24px)";
+      return "200px repeat(" + Math.max(count, 1) + ", minmax(54px, 1fr))";
     }
 
-    function gridSlotCount(runCount) {
+    function gridSlotCount() {
       const view = $("pipelinesView");
       const width = (view && view.clientWidth) || document.body.clientWidth || 960;
       const avail = width - 28 * 2 - 18 * 2 - 200;
-      const fit = Math.floor((avail + 3) / 27);
-      return Math.max(runCount, Math.min(Math.max(fit, 12), 48));
+      const fit = Math.floor((avail + 4) / 58);
+      return Math.max(1, fit);
     }
 
     function skelNode(tag, className) {
@@ -1180,6 +1183,11 @@ PAGE = r"""<!DOCTYPE html>
       return el;
     }
 
+    function eachSlot(placeholders, columns, fn) {
+      for (let i = 0; i < placeholders; i += 1) fn(null);
+      columns.forEach((run) => fn(run));
+    }
+
     function renderPipeBoard() {
       const board = $("pipeBoard");
       board.innerHTML = "";
@@ -1187,13 +1195,13 @@ PAGE = r"""<!DOCTYPE html>
         board.innerHTML = '<p class="empty">No pipelines</p>';
         return;
       }
-      const slots = gridSlotCount(0);
+      const slots = gridSlotCount();
       pipelines.forEach((p) => {
         const card = document.createElement("div");
         card.className = "af-card" + (p.id === fileId ? " active" : "");
         const newestFirst = p.recent || [];
-        const columns = newestFirst.slice(0, 30).slice().reverse();
-        const placeholders = Math.max(0, Math.max(slots, columns.length) - columns.length);
+        const columns = newestFirst.slice(0, slots).slice().reverse();
+        const placeholders = Math.max(0, slots - columns.length);
         const last = newestFirst[0];
         const head = document.createElement("div");
         head.className = "af-head";
@@ -1220,14 +1228,17 @@ PAGE = r"""<!DOCTYPE html>
         card.appendChild(head);
         const grid = document.createElement("div");
         grid.className = "af-grid";
-        const total = columns.length + placeholders;
-        const template = gridTemplate(total);
+        const template = gridTemplate(slots);
         const maxMs = Math.max(...columns.map((run) => Number(run.elapsed_ms) || 0), 1);
         const bars = document.createElement("div");
         bars.className = "af-bars";
         bars.style.gridTemplateColumns = template;
         bars.appendChild(document.createElement("div"));
-        columns.forEach((run) => {
+        eachSlot(placeholders, columns, (run) => {
+          if (!run) {
+            bars.appendChild(skelNode("div", "af-bar skel"));
+            return;
+          }
           const bar = document.createElement("button");
           bar.type = "button";
           bar.className = "af-bar " + runDotClass(run);
@@ -1236,7 +1247,6 @@ PAGE = r"""<!DOCTYPE html>
           bar.onclick = () => openPipelineRun(p.id, run.id);
           bars.appendChild(bar);
         });
-        for (let i = 0; i < placeholders; i++) bars.appendChild(skelNode("div", "af-bar skel"));
         const days = document.createElement("div");
         days.className = "af-days";
         days.style.gridTemplateColumns = template;
@@ -1246,7 +1256,12 @@ PAGE = r"""<!DOCTYPE html>
         times.style.gridTemplateColumns = template;
         times.appendChild(document.createElement("div"));
         let previousDay = "";
-        columns.forEach((run) => {
+        eachSlot(placeholders, columns, (run) => {
+          if (!run) {
+            days.appendChild(skelNode("div", "af-day skel"));
+            times.appendChild(skelNode("div", "af-time skel"));
+            return;
+          }
           const parts = runDateParts(run);
           const day = document.createElement("button");
           day.type = "button";
@@ -1264,15 +1279,15 @@ PAGE = r"""<!DOCTYPE html>
           times.appendChild(time);
           previousDay = parts.key || previousDay;
         });
-        for (let i = 0; i < placeholders; i++) {
-          days.appendChild(skelNode("div", "af-day skel"));
-          times.appendChild(skelNode("div", "af-time skel"));
-        }
         const plays = document.createElement("div");
         plays.className = "af-plays";
         plays.style.gridTemplateColumns = template;
         plays.appendChild(document.createElement("div"));
-        columns.forEach((run) => {
+        eachSlot(placeholders, columns, (run) => {
+          if (!run) {
+            plays.appendChild(skelNode("div", "af-play skel"));
+            return;
+          }
           const play = document.createElement("button");
           play.type = "button";
           play.className = "af-play";
@@ -1281,23 +1296,22 @@ PAGE = r"""<!DOCTYPE html>
           play.onclick = () => openPipelineRun(p.id, run.id);
           plays.appendChild(play);
         });
-        for (let i = 0; i < placeholders; i++) plays.appendChild(skelNode("div", "af-play skel"));
         grid.appendChild(bars);
         grid.appendChild(days);
         grid.appendChild(times);
         grid.appendChild(plays);
-        const tasks = taskOrder(newestFirst);
-        const rows = tasks.length ? tasks : [null, null, null];
+        const tasks = taskOrder(columns.slice().reverse());
+        const rows = tasks.length ? tasks : [];
         rows.forEach((node) => {
           const row = document.createElement("div");
           row.className = "af-row";
           row.style.gridTemplateColumns = template;
           const label = document.createElement("div");
-          label.className = node ? "af-task" : "af-task skel";
-          if (node) label.textContent = node;
+          label.className = "af-task";
+          label.textContent = node;
           row.appendChild(label);
-          columns.forEach((run) => {
-            if (!node) {
+          eachSlot(placeholders, columns, (run) => {
+            if (!run) {
               const cell = skelNode("div", "af-cell skel");
               cell.appendChild(skelNode("span", "af-mark skel"));
               row.appendChild(cell);
@@ -1315,11 +1329,6 @@ PAGE = r"""<!DOCTYPE html>
             cell.appendChild(mark);
             row.appendChild(cell);
           });
-          for (let i = 0; i < placeholders; i++) {
-            const cell = skelNode("div", "af-cell skel");
-            cell.appendChild(skelNode("span", "af-mark skel"));
-            row.appendChild(cell);
-          }
           grid.appendChild(row);
         });
         card.appendChild(grid);

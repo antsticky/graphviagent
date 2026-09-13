@@ -158,6 +158,17 @@ PAGE = r"""<!DOCTYPE html>
     .af-task {
       color: var(--ink); font-size: 12px; padding: 3px 12px 3px 0;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .af-dot {
+      width: 8px; height: 8px; border-radius: 99px; flex: 0 0 8px;
+      background: #6366f1;
+    }
+    .af-dot.decision { background: #f59e0b; }
+    .af-dot.loop { background: #22c55e; }
+    .af-dot.error { background: var(--danger); }
+    .af-task-name {
+      min-width: 0; overflow: hidden; text-overflow: ellipsis;
     }
     .af-cell {
       width: 100%; height: 22px; border: 0; padding: 0; background: transparent;
@@ -821,7 +832,7 @@ PAGE = r"""<!DOCTYPE html>
       <div id="pipelines"></div>
       <h2>Runs</h2>
       <div class="hist-tools">
-        <input id="runFilter" type="search" placeholder="input…"/>
+        <input id="runFilter" type="search" placeholder="search input fields…"/>
         <select id="runStatus">
           <option value="all">all</option>
           <option value="ok">success</option>
@@ -1317,7 +1328,14 @@ PAGE = r"""<!DOCTYPE html>
           row.style.gridTemplateColumns = template;
           const label = document.createElement("div");
           label.className = "af-task";
-          label.textContent = node;
+          const kind = stepKind(node);
+          const dot = document.createElement("span");
+          dot.className = "af-dot" + (kind ? " " + kind : "");
+          const name = document.createElement("span");
+          name.className = "af-task-name";
+          name.textContent = node;
+          label.appendChild(dot);
+          label.appendChild(name);
           row.appendChild(label);
           eachSlot(placeholders, columns, (run) => {
             if (!run) {
@@ -1437,6 +1455,43 @@ PAGE = r"""<!DOCTYPE html>
       renderRun(null);
     }
 
+    function flattenInput(value, prefix, out) {
+      const acc = out || [];
+      if (value === null || value === undefined) {
+        if (prefix) acc.push(prefix, prefix + ":null", prefix + "=null");
+        return acc;
+      }
+      if (typeof value === "object") {
+        if (Array.isArray(value)) {
+          if (prefix) acc.push(prefix);
+          value.forEach((item, index) => {
+            flattenInput(item, prefix ? prefix + "[" + index + "]" : String(index), acc);
+            if (prefix) flattenInput(item, prefix, acc);
+          });
+          return acc;
+        }
+        Object.keys(value).forEach((key) => {
+          const path = prefix ? prefix + "." + key : key;
+          acc.push(key, path);
+          flattenInput(value[key], path, acc);
+        });
+        return acc;
+      }
+      const text = String(value);
+      acc.push(text);
+      if (prefix) acc.push(prefix + ":" + text, prefix + "=" + text, prefix + " " + text);
+      return acc;
+    }
+
+    function inputSearchText(input) {
+      const data = input && typeof input === "object" ? input : {};
+      return (
+        flattenInput(data).join(" ") + " " +
+        JSON.stringify(data) + " " +
+        JSON.stringify(data, null, 2)
+      ).toLowerCase();
+    }
+
     function runMatchesFilter(run) {
       const status = $("runStatus").value;
       if (status !== "all" && run.status !== status) return false;
@@ -1444,10 +1499,7 @@ PAGE = r"""<!DOCTYPE html>
       if (!q) return true;
       if (q === "has error" || q === "error" || q === "failed") return run.status === "error";
       if (q === "ok" || q === "success") return run.status === "ok";
-      const input = JSON.stringify(run.input || {}).toLowerCase();
-      const nodes = (run.steps || []).map((step) => String(step.node || "").toLowerCase()).join(" ");
-      const blob = [run.status, run.mode, run.pipeline, input, nodes, run.id].join(" ").toLowerCase();
-      return blob.includes(q);
+      return inputSearchText(run.input).includes(q);
     }
 
     function renderHistory() {
@@ -3077,6 +3129,7 @@ PAGE = r"""<!DOCTYPE html>
     };
     $("deleteBtn").onclick = () => removeRun().catch((e) => alert(e.message));
     $("runFilter").oninput = () => renderHistory();
+    $("runFilter").onsearch = () => renderHistory();
     $("runStatus").onchange = () => renderHistory();
     $("cmpPipe").onchange = () => applyCompareFilter().catch((e) => alert(e.message));
     $("cmpA").onchange = () => renderCompare().catch((e) => alert(e.message));

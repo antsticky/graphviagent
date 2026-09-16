@@ -768,6 +768,18 @@ def _is_cancelled(exc: BaseException) -> bool:
     return False
 
 
+def _is_interrupt(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    names = {"GraphInterrupt", "NodeInterrupt", "GraphBubbleUp"}
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if type(current).__name__ in names:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _branch_hints(update: dict) -> list[str]:
     hints: list[str] = []
     for key in ("path", "choice", "loop_choice"):
@@ -967,6 +979,170 @@ def invoke_node(
     raise RuntimeError(f"cannot invoke node {node_name!r}")
 
 
+def _app_has_checkpointer(app: Any) -> bool:
+    return getattr(app, "checkpointer", None) not in (None, False)
+
+
+def _stream_item(event: Any) -> tuple[str, Any]:
+    if isinstance(event, tuple) and len(event) == 2 and isinstance(event[0], str):
+        return str(event[0]), event[1]
+    return "updates", event
+
+
+def _checkpoint_id(snapshot: Any) -> str | None:
+    config = getattr(snapshot, "config", None) or {}
+    if isinstance(config, dict):
+        return (config.get("configurable") or {}).get("checkpoint_id")
+    return None
+
+
+def _attach_checkpoint_ids(app: Any, config: dict[str, Any], steps: list[dict]) -> None:
+    getter = getattr(app, "get_state_history", None)
+    if not callable(getter) or not steps:
+        return
+    try:
+        hist = list(getter(config))
+    except Exception:
+        return
+    loop = [
+        snap
+        for snap in reversed(hist)
+        if (getattr(snap, "metadata", None) or {}).get("source") == "loop"
+    ]
+    groups: dict[int, list[dict]] = {}
+    for step in steps:
+        groups.setdefault(int(step.get("superstep") or 0), []).append(step)
+    for superstep, group in groups.items():
+        after_idx = superstep + 1
+        if after_idx >= len(loop):
+            continue
+        after = loop[after_idx]
+        before = loop[superstep]
+        cid = _checkpoint_id(after)
+        parent = _checkpoint_id(before)
+        for step in group:
+            if cid:
+                step["checkpoint_id"] = cid
+            if parent:
+                step["checkpoint_parent_id"] = parent
+
+
+def _fork_thread(app: Any, snapshot: Any, new_thread_id: str) -> dict[str, Any]:
+    saver = getattr(app, "checkpointer", None)
+    if saver is None or snapshot is None:
+        raise RuntimeError("checkpoint fork requires a checkpointer")
+    get_tuple = getattr(saver, "get_tuple", None)
+    put = getattr(saver, "put", None)
+    if not callable(get_tuple) or not callable(put):
+        raise RuntimeError("checkpointer cannot copy a thread")
+    tup = get_tuple(snapshot.config)
+    if tup is None:
+        raise RuntimeError("checkpoint not found (process restart or missing thread)")
+    ns = ((getattr(snapshot, "config", None) or {}).get("configurable") or {}).get(
+        "checkpoint_ns"
+    ) or ""
+    dest = {"configurable": {"thread_id": new_thread_id, "checkpoint_ns": ns}}
+    checkpoint = tup.checkpoint
+    versions = checkpoint.get("channel_versions") if isinstance(checkpoint, dict) else {}
+    put(dest, checkpoint, tup.metadata, versions or {})
+    return {"configurable": {"thread_id": new_thread_id}}
+
+
+def _snapshot_before_step(app: Any, run: dict, step: dict) -> Any:
+    thread_id = run.get("thread_id")
+    if not thread_id:
+        raise RuntimeError("run has no thread_id")
+    getter = getattr(app, "get_state_history", None)
+    if not callable(getter):
+        raise RuntimeError("graph has no get_state_history")
+    hist = list(getter({"configurable": {"thread_id": thread_id}}))
+    parent = step.get("checkpoint_parent_id")
+    if parent:
+        for snap in hist:
+            if _checkpoint_id(snap) == parent:
+                return snap
+    node = str(step.get("node") or "")
+    matches = [
+        snap
+        for snap in reversed(hist)
+        if node in tuple(getattr(snap, "next", None) or ())
+    ]
+    visit = 0
+    for prev in run.get("steps") or []:
+        if prev.get("step_id") == step.get("step_id"):
+            break
+        if prev.get("node") == node:
+            visit += 1
+    if visit < len(matches):
+        return matches[visit]
+    if matches:
+        return matches[-1]
+    raise RuntimeError(f"no checkpoint before node {node}")
+
+
+def _predecessor_node(app: Any, node: str) -> str:
+    for source, target in graph_edges(app):
+        if target == node:
+            return "__start__" if source in _SKIP_NODES else source
+    return "__start__"
+
+
+def _seed_before_step(
+    app: Any,
+    node: str,
+    state: dict,
+    *,
+    thread_id: str,
+) -> dict[str, Any]:
+    config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    payload = state if isinstance(state, dict) else {"value": state}
+    pred = _predecessor_node(app, node)
+    last_error: BaseException | None = None
+    for as_node in (pred, "__start__"):
+        try:
+            app.update_state(config, payload, as_node=as_node)
+            snap = app.get_state(config)
+            nxt = tuple(getattr(snap, "next", None) or ())
+            if node in nxt:
+                return config
+        except Exception as exc:
+            last_error = exc
+    try:
+        app.update_state(config, payload)
+        return config
+    except Exception as exc:
+        last_error = exc
+    raise RuntimeError(
+        f"could not seed checkpoint before {node}"
+        + (f": {last_error}" if last_error else "")
+    )
+
+
+def _can_native_replay(app: Any, run: dict) -> bool:
+    return _app_has_checkpointer(app)
+
+
+def _values_equal(left: Any, right: Any) -> bool:
+    try:
+        return json.dumps(jsonable(left), sort_keys=True, default=str) == json.dumps(
+            jsonable(right), sort_keys=True, default=str
+        )
+    except TypeError:
+        return False
+
+
+def _editor_patch(
+    step: dict, incoming: dict | None, state_patch: dict | None
+) -> dict | None:
+    patch = dict(state_patch or {})
+    if isinstance(incoming, dict):
+        recorded = step.get("state_in") if isinstance(step.get("state_in"), dict) else {}
+        for key, value in incoming.items():
+            if not _values_equal(value, recorded.get(key)):
+                patch[key] = value
+    return patch or None
+
+
 def _build_step(
     *,
     node: str,
@@ -979,9 +1155,11 @@ def _build_step(
     completed_end: dict[str, float],
     edges: list[tuple[str, str]],
     wall0: float,
+    live_out: dict | None = None,
+    superstep: int = 0,
 ) -> tuple[dict, dict]:
     visits[node] = visits.get(node, 0) + 1
-    graph_in = copy.deepcopy(state)
+    graph_in = state if isinstance(state, dict) else {}
     failed = isinstance(update, dict) and update.get("error")
     probe = _take_probe(probes, node, probe_lock)
     if probe:
@@ -996,7 +1174,15 @@ def _build_step(
         memory_peak_mb = 0.0
         invoke_input = None
     state_in = invoke_input if isinstance(invoke_input, dict) else graph_in
-    state_out = copy.deepcopy(state_in) if failed else merge_state(state_in, update)
+    if failed:
+        state_out = copy.deepcopy(state_in)
+        graph_out = copy.deepcopy(graph_in)
+    elif isinstance(live_out, dict):
+        state_out = live_out
+        graph_out = live_out
+    else:
+        state_out = merge_state(state_in, update)
+        graph_out = merge_state(graph_in, update)
     step = {
         "step_id": f"{node}#{visits[node]}",
         "index": None,
@@ -1007,13 +1193,13 @@ def _build_step(
         "reason": extract_reason(update),
         "decisions": jsonable(extract_decisions(update)),
         "unused": [],
+        "superstep": superstep,
     }
     _attach_timing(step, started_ms=started_ms, ended_ms=ended_ms, wall_start=wall0)
     _attach_metrics(step, update, memory_mb, memory_peak_mb)
     if failed:
         step["error"] = str(update.get("error"))
     completed_end[node] = ended_ms
-    graph_out = copy.deepcopy(graph_in) if failed else merge_state(graph_in, update)
     return step, graph_out
 
 
@@ -1040,7 +1226,7 @@ def _build_run(
         "steps": steps,
         "result": jsonable(state),
         "has_checkpointer": has_checkpointer,
-        "thread_id": run_id if has_checkpointer else None,
+        "thread_id": run_id,
         "started_at": _iso_from_wall(wall0, 0),
         "ended_at": _iso_from_wall(wall0, span),
         "elapsed_ms": span,
@@ -1051,22 +1237,27 @@ def _build_run(
 
 def _execute_run(
     app: Any,
-    user_input: dict,
+    user_input: dict | None,
     *,
     thread_id: str | None,
     has_checkpointer: bool,
     cancel: Any | None,
     max_concurrency: int,
     emit: Any,
+    resume: bool = False,
+    interrupt_after: list[str] | None = None,
+    run_config: dict[str, Any] | None = None,
 ) -> None:
     run_id = thread_id or uuid4().hex
     usage = _UsageHandler()
     config: dict[str, Any] = _callback_config(
-        usage, {"max_concurrency": max_concurrency}
+        usage, dict(run_config or {"max_concurrency": max_concurrency})
     )
-    if has_checkpointer:
-        config["configurable"] = {"thread_id": run_id}
-    state = copy.deepcopy(user_input)
+    configurable = dict(config.get("configurable") or {})
+    configurable["thread_id"] = run_id
+    config["configurable"] = configurable
+    has_checkpointer = has_checkpointer or _app_has_checkpointer(app)
+    state: dict = copy.deepcopy(user_input) if isinstance(user_input, dict) else {}
     steps: list[dict] = []
     visits: dict[str, int] = {}
     edges = graph_edges(app)
@@ -1102,47 +1293,122 @@ def _execute_run(
     _capture_tls.on_stdio = on_stdio
     _capture_tls.node = None
     _capture_tls.usage = usage
-    emit({"type": "start", "run_id": run_id, "input": jsonable(user_input), "started_at": _iso_from_wall(wall0, 0)})
+    stored_input = user_input if isinstance(user_input, dict) else {}
+    emit({"type": "start", "run_id": run_id, "input": jsonable(stored_input), "started_at": _iso_from_wall(wall0, 0)})
     push({"type": "log", "t": 0, "src": "run", "text": "run started", "level": "info"})
     probes, restore_probes, probe_lock = _install_node_probes(
         app, clock0, cancel=cancel, emit=push
     )
     completed_end: dict[str, float] = {}
     _install_stdio_capture()
+    pending_updates: dict[str, Any] | None = None
+    superstep = 0
+
+    def consume_updates(payload: dict, live_out: dict | None) -> None:
+        nonlocal state
+        ended_ms = _elapsed_ms(clock0)
+        graph_in = state
+        for node, update in payload.items():
+            node = str(node)
+            if node in _SKIP_NODES or node == "__interrupt__":
+                continue
+            if not isinstance(update, dict):
+                update = {"value": update}
+            raw_events.append((node, update, ended_ms))
+            step, graph_out = _build_step(
+                node=node,
+                update=update,
+                ended_ms=ended_ms,
+                state=graph_in if live_out is not None else state,
+                visits=visits,
+                probes=probes,
+                probe_lock=probe_lock,
+                completed_end=completed_end,
+                edges=edges,
+                wall0=wall0,
+                live_out=live_out,
+                superstep=superstep,
+            )
+            step["index"] = len(steps)
+            steps.append(step)
+            if live_out is None:
+                state = graph_out
+            push({"type": "log", "t": step["ended_ms"], "src": node, "text": f"finished ({step['elapsed_ms']}ms)", "level": "info"})
+            emit({"type": "step", "step": step})
+        if live_out is not None:
+            state = live_out
+        emit({"type": "state", "state": jsonable(state)})
+
+    def flush_pending() -> None:
+        nonlocal pending_updates, state
+        if not pending_updates:
+            return
+        live_end = None
+        if has_checkpointer:
+            try:
+                vals = getattr(app.get_state(config), "values", None)
+                if isinstance(vals, dict):
+                    live_end = vals
+            except Exception:
+                pass
+        consume_updates(pending_updates, live_end)
+        pending_updates = None
+
+    def sync_live_state() -> None:
+        nonlocal state
+        if not has_checkpointer:
+            return
+        try:
+            vals = getattr(app.get_state(config), "values", None)
+        except Exception:
+            return
+        if isinstance(vals, dict):
+            state = vals
+        _attach_checkpoint_ids(app, config, steps)
+
     try:
-        stream = app.stream(user_input, config)
+        stream_kwargs: dict[str, Any] = {"stream_mode": ["updates", "values"]}
+        if interrupt_after:
+            stream_kwargs["interrupt_after"] = interrupt_after
+        incoming: Any = None if resume else (user_input or {})
+        try:
+            stream = app.stream(incoming, config, **stream_kwargs)
+        except TypeError:
+            stream_kwargs.pop("stream_mode", None)
+            stream = app.stream(incoming, config, **stream_kwargs)
         for event in stream:
             if cancel is not None and getattr(cancel, "is_set", lambda: False)():
                 raise RunCancelled("cancelled")
-            if not isinstance(event, dict) or not event:
+            mode, payload = _stream_item(event)
+            if mode == "updates":
+                if isinstance(payload, dict) and payload:
+                    cleaned = {
+                        key: value
+                        for key, value in payload.items()
+                        if str(key) not in _SKIP_NODES and str(key) != "__interrupt__"
+                    }
+                    if cleaned:
+                        pending_updates = cleaned
                 continue
-            for node, update in event.items():
-                node = str(node)
-                if node in _SKIP_NODES:
-                    continue
-                if not isinstance(update, dict):
-                    update = {"value": update}
-                ended_ms = _elapsed_ms(clock0)
-                raw_events.append((node, update, ended_ms))
-                step, state = _build_step(
-                    node=node,
-                    update=update,
-                    ended_ms=ended_ms,
-                    state=state,
-                    visits=visits,
-                    probes=probes,
-                    probe_lock=probe_lock,
-                    completed_end=completed_end,
-                    edges=edges,
-                    wall0=wall0,
-                )
-                step["index"] = len(steps)
-                steps.append(step)
-                push({"type": "log", "t": step["ended_ms"], "src": node, "text": f"finished ({step['elapsed_ms']}ms)", "level": "info"})
-                emit({"type": "step", "step": step})
-                emit({"type": "state", "state": jsonable(state)})
+            if mode == "values":
+                live = payload if isinstance(payload, dict) else {"value": payload}
+                if pending_updates:
+                    consume_updates(pending_updates, live)
+                    pending_updates = None
+                    superstep += 1
+                    state = live
+                else:
+                    state = live
+                continue
+            if isinstance(payload, dict) and payload:
+                consume_updates(payload, None)
+        flush_pending()
+        sync_live_state()
     except Exception as exc:
-        if _is_cancelled(exc):
+        if _is_interrupt(exc):
+            flush_pending()
+            sync_live_state()
+        elif _is_cancelled(exc):
             run_error = "cancelled"
         else:
             run_error = _format_error(exc)
@@ -1162,6 +1428,7 @@ def _execute_run(
                     completed_end=completed_end,
                     edges=edges,
                     wall0=wall0,
+                    superstep=superstep,
                 )
                 step["index"] = len(steps)
                 steps.append(step)
@@ -1181,33 +1448,32 @@ def _execute_run(
         push({"type": "log", "t": _elapsed_ms(clock0), "src": "run", "text": run_error, "level": "error"})
     else:
         push({"type": "log", "t": _elapsed_ms(clock0), "src": "run", "text": "run finished", "level": "info"})
-    emit(
-        {
-            "type": "done",
-            "run": _build_run(
-                run_id=run_id,
-                user_input=user_input,
-                steps=steps,
-                state=state,
-                has_checkpointer=has_checkpointer,
-                wall0=wall0,
-                clock0=clock0,
-                run_error=run_error,
-                logs=logs,
-                edges=edges,
-            ),
-        }
+    built = _build_run(
+        run_id=run_id,
+        user_input=stored_input,
+        steps=steps,
+        state=state,
+        has_checkpointer=has_checkpointer,
+        wall0=wall0,
+        clock0=clock0,
+        run_error=run_error,
+        logs=logs,
+        edges=edges,
     )
+    emit({"type": "done", "run": built})
 
 
 def iter_run_events(
     app: Any,
-    user_input: dict,
+    user_input: dict | None,
     *,
     thread_id: str | None = None,
     has_checkpointer: bool = False,
     cancel: Any | None = None,
     max_concurrency: int = MAX_RUN_THREADS,
+    resume: bool = False,
+    interrupt_after: list[str] | None = None,
+    run_config: dict[str, Any] | None = None,
 ) -> Iterator[dict]:
     pending: queue.Queue[dict | None] = queue.Queue()
 
@@ -1224,6 +1490,9 @@ def iter_run_events(
                 cancel=cancel,
                 max_concurrency=max_concurrency,
                 emit=emit,
+                resume=resume,
+                interrupt_after=interrupt_after,
+                run_config=run_config,
             )
         except Exception as exc:
             pending.put({"type": "error", "error": _format_error(exc)})
@@ -1242,12 +1511,15 @@ def iter_run_events(
 
 def record_run(
     app: Any,
-    user_input: dict,
+    user_input: dict | None,
     *,
     thread_id: str | None = None,
     has_checkpointer: bool = False,
     cancel: Any | None = None,
     max_concurrency: int = MAX_RUN_THREADS,
+    resume: bool = False,
+    interrupt_after: list[str] | None = None,
+    run_config: dict[str, Any] | None = None,
 ) -> dict:
     run = None
     error = None
@@ -1258,6 +1530,9 @@ def record_run(
         has_checkpointer=has_checkpointer,
         cancel=cancel,
         max_concurrency=max_concurrency,
+        resume=resume,
+        interrupt_after=interrupt_after,
+        run_config=run_config,
     ):
         if event.get("type") == "done":
             run = event.get("run")
@@ -1278,15 +1553,71 @@ def _incoming_state(
     return merge_state(copy.deepcopy(step.get("state_in") or {}), state_patch or {})
 
 
-def replay_step(
+def _finish_replay_run(
+    recorded: dict,
+    *,
+    parent_id: str,
+    mode: str,
+    from_step: str,
+    approximate: bool,
+    reason: str | None = None,
+) -> dict:
+    recorded["parent_id"] = parent_id
+    recorded["mode"] = mode
+    recorded["from_step"] = from_step
+    recorded["approximate"] = approximate
+    if reason:
+        recorded["approximate_reason"] = reason
+    if approximate:
+        recorded["has_checkpointer"] = False
+    return recorded
+
+
+def _replay_native(
     app: Any,
     run: dict,
-    step_id: str,
-    state_patch: dict | None = None,
-    state_in: dict | None = None,
+    step: dict,
+    *,
+    continue_graph: bool,
+    incoming: dict | None,
+    state_patch: dict | None,
 ) -> dict:
-    step = _find_step(run, step_id)
-    state_in = _with_recorded_payload(_incoming_state(step, state_patch, state_in), step)
+    node = str(step.get("node") or "")
+    incoming_state = _incoming_state(step, state_patch, incoming)
+    patch = _editor_patch(step, incoming, state_patch)
+    fork_id = uuid4().hex
+    config: dict[str, Any] | None = None
+    try:
+        snapshot = _snapshot_before_step(app, run, step)
+        config = _fork_thread(app, snapshot, fork_id)
+        if patch:
+            app.update_state(config, patch)
+    except Exception:
+        config = _seed_before_step(app, node, incoming_state, thread_id=fork_id)
+    recorded = record_run(
+        app,
+        run.get("input") if isinstance(run.get("input"), dict) else incoming_state,
+        thread_id=fork_id,
+        has_checkpointer=True,
+        resume=True,
+        interrupt_after=None if continue_graph else [node],
+        run_config=config,
+    )
+    return _finish_replay_run(
+        recorded,
+        parent_id=str(run.get("id") or ""),
+        mode="replay_from" if continue_graph else "replay",
+        from_step=str(step.get("step_id") or ""),
+        approximate=False,
+    )
+
+
+def _replay_step_approximate(
+    app: Any,
+    run: dict,
+    step: dict,
+    state_in: dict,
+) -> dict:
     clock0 = time.perf_counter()
     wall0 = time.time()
     memory = _MemoryTrace()
@@ -1323,24 +1654,31 @@ def replay_step(
     _attach_metrics(new_step, update, memory_mb, memory_peak_mb, extra=extra)
     if run_error:
         new_step["error"] = run_error
-    return {
-        "id": uuid4().hex,
-        "input": jsonable(state_in),
-        "steps": [new_step],
-        "result": jsonable(state_out),
-        "has_checkpointer": False,
-        "thread_id": None,
-        "parent_id": run["id"],
-        "mode": "replay",
-        "from_step": step_id,
-        "started_at": new_step["started_at"],
-        "ended_at": new_step["ended_at"],
-        "elapsed_ms": new_step["elapsed_ms"],
-        "error": run_error,
-    }
+    return _finish_replay_run(
+        {
+            "id": uuid4().hex,
+            "input": jsonable(state_in),
+            "steps": [new_step],
+            "result": jsonable(state_out),
+            "has_checkpointer": False,
+            "thread_id": None,
+            "parent_id": run["id"],
+            "mode": "replay",
+            "from_step": step.get("step_id"),
+            "started_at": new_step["started_at"],
+            "ended_at": new_step["ended_at"],
+            "elapsed_ms": new_step["elapsed_ms"],
+            "error": run_error,
+        },
+        parent_id=str(run.get("id") or ""),
+        mode="replay",
+        from_step=str(step.get("step_id") or ""),
+        approximate=True,
+        reason="no checkpointer; reducers were not applied",
+    )
 
 
-def resume_from_step(
+def replay_step(
     app: Any,
     run: dict,
     step_id: str,
@@ -1348,19 +1686,40 @@ def resume_from_step(
     state_in: dict | None = None,
 ) -> dict:
     step = _find_step(run, step_id)
-    start = step["index"]
-    remaining = run["steps"][start:]
-    state = _incoming_state(step, state_patch, state_in)
+    if _can_native_replay(app, run):
+        try:
+            return _replay_native(
+                app,
+                run,
+                step,
+                continue_graph=False,
+                incoming=state_in,
+                state_patch=state_patch,
+            )
+        except Exception as exc:
+            approx = _replay_step_approximate(
+                app,
+                run,
+                step,
+                _incoming_state(step, state_patch, state_in),
+            )
+            approx["approximate_reason"] = _format_error(exc)
+            return approx
+    return _replay_step_approximate(
+        app, run, step, _incoming_state(step, state_patch, state_in)
+    )
+
+
+def _resume_approximate(
+    app: Any,
+    run: dict,
+    step: dict,
+    state: dict,
+) -> dict:
+    remaining = (run.get("steps") or [])[int(step.get("index") or 0) :]
     steps: list[dict] = []
     visits: dict[str, int] = {}
     edges = graph_edges(app)
-
-    if run.get("has_checkpointer") and run.get("thread_id"):
-        try:
-            return _resume_with_checkpointer(app, run, step, state)
-        except Exception:
-            pass
-
     raw: list[tuple[str, dict, dict, float, float, float, dict[str, int]]] = []
     current = state
     run_error: str | None = None
@@ -1423,7 +1782,7 @@ def resume_from_step(
         failed = isinstance(update, dict) and update.get("error")
         state_out = copy.deepcopy(state_in) if failed else merge_state(current, update)
         started_ms = prev_end
-        step = {
+        built = {
             "step_id": f"{node}#{visits[node]}",
             "index": index,
             "node": node,
@@ -1434,45 +1793,64 @@ def resume_from_step(
             "decisions": jsonable(extract_decisions(update)),
             "unused": unused_targets(node, next_node, edges),
         }
-        _attach_timing(step, started_ms=started_ms, ended_ms=ended_ms, wall_start=wall0)
-        _attach_metrics(step, update, memory_mb, memory_peak_mb, extra=extra)
+        _attach_timing(built, started_ms=started_ms, ended_ms=ended_ms, wall_start=wall0)
+        _attach_metrics(built, update, memory_mb, memory_peak_mb, extra=extra)
         if failed:
-            step["error"] = str(update.get("error"))
-        steps.append(step)
+            built["error"] = str(update.get("error"))
+        steps.append(built)
         prev_end = ended_ms
         current = state_out
 
-    return {
-        "id": uuid4().hex,
-        "input": jsonable(state),
-        "steps": steps,
-        "result": jsonable(current),
-        "has_checkpointer": False,
-        "thread_id": None,
-        "parent_id": run["id"],
-        "mode": "replay_from",
-        "from_step": step_id,
-        "started_at": _iso_from_wall(wall0, 0),
-        "ended_at": _iso_from_wall(wall0, _run_span(steps, _elapsed_ms(clock0))),
-        "elapsed_ms": _run_span(steps, _elapsed_ms(clock0)),
-        "error": run_error,
-    }
+    return _finish_replay_run(
+        {
+            "id": uuid4().hex,
+            "input": jsonable(state),
+            "steps": steps,
+            "result": jsonable(current),
+            "has_checkpointer": False,
+            "thread_id": None,
+            "parent_id": run["id"],
+            "mode": "replay_from",
+            "from_step": step.get("step_id"),
+            "started_at": _iso_from_wall(wall0, 0),
+            "ended_at": _iso_from_wall(wall0, _run_span(steps, _elapsed_ms(clock0))),
+            "elapsed_ms": _run_span(steps, _elapsed_ms(clock0)),
+            "error": run_error,
+        },
+        parent_id=str(run.get("id") or ""),
+        mode="replay_from",
+        from_step=str(step.get("step_id") or ""),
+        approximate=True,
+        reason="no checkpointer; recorded path was replayed without routing",
+    )
 
 
-def _resume_with_checkpointer(app: Any, run: dict, step: dict, state_in: dict) -> dict:
-    usage = _UsageHandler()
-    config = _callback_config(usage, {"configurable": {"thread_id": run["thread_id"]}})
-    with _usage_scope(step["node"], usage):
-        update = invoke_node(app, step["node"], state_in, config=config)
-    if not isinstance(update, dict):
-        update = {"value": update}
-    app.update_state(config, update, as_node=step["node"])
-    app.invoke(None, config)
-    return record_run(
-        app,
-        run["input"],
-        thread_id=uuid4().hex,
-        has_checkpointer=True,
+def resume_from_step(
+    app: Any,
+    run: dict,
+    step_id: str,
+    state_patch: dict | None = None,
+    state_in: dict | None = None,
+) -> dict:
+    step = _find_step(run, step_id)
+    if _can_native_replay(app, run):
+        try:
+            return _replay_native(
+                app,
+                run,
+                step,
+                continue_graph=True,
+                incoming=state_in,
+                state_patch=state_patch,
+            )
+        except Exception as exc:
+            approx = _resume_approximate(
+                app, run, step, _incoming_state(step, state_patch, state_in)
+            )
+            approx["approximate_reason"] = _format_error(exc)
+            return approx
+    return _resume_approximate(
+        app, run, step, _incoming_state(step, state_patch, state_in)
     )
 
 

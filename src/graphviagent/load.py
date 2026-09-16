@@ -45,19 +45,30 @@ def _is_state_graph(obj: Any) -> bool:
     return callable(compile_fn) and hasattr(obj, "add_node") and hasattr(obj, "add_edge")
 
 
+def _with_memory_saver(compile_fn: Any) -> tuple[Any, bool]:
+    try:
+        from langgraph.checkpoint.memory import MemorySaver
+
+        return compile_fn(checkpointer=MemorySaver()), True
+    except TypeError:
+        return compile_fn(), False
+
+
 def _compile_if_needed(obj: Any) -> tuple[Any, bool]:
     if _is_runnable(obj):
         checkpointer = getattr(obj, "checkpointer", None)
-        return obj, checkpointer not in (None, False)
+        if checkpointer not in (None, False):
+            return obj, True
+        builder = getattr(obj, "builder", None)
+        compile_fn = getattr(builder, "compile", None)
+        if callable(compile_fn):
+            try:
+                return _with_memory_saver(compile_fn)
+            except Exception:
+                return obj, False
+        return obj, False
     if _is_state_graph(obj):
-        compile_fn = obj.compile
-        try:
-            from langgraph.checkpoint.memory import MemorySaver
-
-            app = compile_fn(checkpointer=MemorySaver())
-            return app, True
-        except TypeError:
-            return compile_fn(), False
+        return _with_memory_saver(obj.compile)
     raise TypeError("object is not a compiled graph or StateGraph")
 
 

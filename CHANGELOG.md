@@ -12,6 +12,9 @@
 - Graph extract order is `build_graph()` / `get_graph()` / `create_graph()` / `__graph__`, then `GRAPH`, then a compiled `app` (`stream` + `invoke` only)
 - Failed or empty modules are not cached as a loaded pipeline
 - Steps with no observed token usage set `tokens.unavailable` instead of a silent 0
+- Replay uses LangGraph checkpoints (`get_state` / `update_state` / fork thread). `merge_state` is only the labeled approximate fallback
+- Load attaches an in-process `MemorySaver` when a compiled graph has no checkpointer (`builder.compile(...)`), so Replay from can follow routing without changing `*_pipeline.py`
+- Replay from seeds a checkpoint when the original thread is gone (restart / reload), instead of walking the recorded path
 
 ## 1.1.0-dev
 

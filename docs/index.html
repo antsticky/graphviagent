@@ -457,7 +457,7 @@
         </article>
         <article class="af-card">
           <h3><span class="af-mark replay"></span> Replay a node, or from a node</h3>
-          <p><strong>Replay step</strong> runs only the selected node. <strong>Replay from</strong> continues the graph from that node. Both invoke the real function — side effects will fire. Outdated runs (graph hash changed) ask before replay.</p>
+          <p><strong>Replay step</strong> runs only the selected node. <strong>Replay from</strong> continues from that checkpoint so routing can take the other branch. Both invoke the real function — side effects will fire. Outdated runs (graph hash changed) ask before replay.</p>
         </article>
         <article class="af-card">
           <h3><span class="af-mark board"></span> Pipelines board and Compare</h3>
@@ -587,7 +587,7 @@ file = "decision_pipeline.py"</pre>
         </article>
         <article class="topic">
           <h3>Replay</h3>
-          <p><strong>Replay step</strong> re-runs only the selected node with its recorded input (or an edit you make). <strong>Replay from</strong> continues the graph from that node. Both hit your real functions. If the pipeline file or graph hash changed, the run is marked <strong>outdated</strong> and replay asks before continuing.</p>
+          <p><strong>Replay step</strong> re-runs only the selected node. <strong>Replay from</strong> continues the compiled graph from that checkpoint, so reducers and routing match <code>get_state</code> — including taking the other branch after an edit. GraphVIAgent attaches an in-process checkpointer when the pipeline did not. Approximate replay is only when that is impossible, or the original thread is gone after a restart. Both hit your real functions. If the pipeline file or graph hash changed, the run is marked <strong>outdated</strong> and replay asks before continuing.</p>
         </article>
         <article class="topic">
           <h3>Pipelines</h3>

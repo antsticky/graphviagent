@@ -233,6 +233,7 @@ PAGE = r"""<!DOCTYPE html>
     #history .pill.mode-run { color: #c4b5fd; background: rgba(124, 92, 255, 0.18); }
     #history .pill.mode-replay { color: #5eead4; background: rgba(45, 212, 191, 0.16); }
     #history .pill.mode-replay_from { color: #fbbf24; background: rgba(251, 191, 36, 0.16); }
+    #history .pill.mode-approximate { color: #fdba74; background: rgba(251, 146, 60, 0.18); }
     #history .pill.mode-error { color: #fca5a5; background: rgba(240, 113, 120, 0.16); }
     #history .pill.mode-outdated { color: #fbbf24; background: rgba(251, 191, 36, 0.16); }
     .run-pills { display: flex; gap: 4px; flex: 0 0 auto; align-items: center; }
@@ -1684,15 +1685,18 @@ PAGE = r"""<!DOCTYPE html>
         btn.className = "run" + (currentRun && currentRun.id === r.id ? " active" : "");
         const mode = r.mode || "run";
         const pill = r.status === "error" ? "error" : mode;
-        const known = { run: 1, replay: 1, replay_from: 1, error: 1 };
+        const known = { run: 1, replay: 1, replay_from: 1, error: 1, approximate: 1 };
         const pillClass = known[pill] ? pill : "run";
         const outdated = isOutdated(r)
           ? '<span class="pill mode-outdated">outdated</span>'
           : "";
+        const approx = r.approximate
+          ? '<span class="pill mode-approximate">approximate</span>'
+          : "";
         btn.innerHTML =
           '<div class="run-top"><span>' + escapeHtml(formatTime(r.created_at)) +
           '</span><span class="run-pills"><span class="pill mode-' + pillClass + '">' +
-          escapeHtml(pill) + "</span>" + outdated + "</span></div>" +
+          escapeHtml(pill) + "</span>" + approx + outdated + "</span></div>" +
           '<div class="meta">' + escapeHtml(truncateJson(r.input)) +
           (r.elapsed_ms != null ? "  ·  " + escapeHtml(formatElapsed(r.elapsed_ms)) : "") +
           "</div>";
@@ -3176,6 +3180,14 @@ PAGE = r"""<!DOCTYPE html>
         syncStepButtons();
         return;
       }
+      if (run.approximate) {
+        const note = document.createElement("div");
+        note.className = "step-why";
+        note.textContent = "Approximate replay — graph reducers and routing were not used"
+          + (run.approximate_reason ? " (" + escapeHtml(run.approximate_reason) + ")" : "")
+          + ".";
+        steps.appendChild(note);
+      }
       const selected = (run.steps || []).find((step) => step.step_id === selectedStep);
       showStepIO(selected || null);
       const maxes = runMetricMax(run);
@@ -3474,8 +3486,9 @@ PAGE = r"""<!DOCTYPE html>
         alert("Select a node first");
         return;
       }
-      if (!(await confirmOutdatedReplay())) return;
       const input = readNodeInput();
+      closeNodeView();
+      if (!(await confirmOutdatedReplay())) return;
       currentRun = await api("/api/rerun", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3486,10 +3499,8 @@ PAGE = r"""<!DOCTYPE html>
           input,
         }),
       });
-      const keepView = isNodeViewOpen();
       selectedStep = (currentRun.steps && currentRun.steps[0] && currentRun.steps[0].step_id) || null;
       renderRun(currentRun);
-      if (keepView && selectedStep) $("nodeView").hidden = false;
       await loadHistory();
       await loadPipelines();
     }

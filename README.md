@@ -119,7 +119,7 @@ New or edited `*_pipeline.py` files refresh the sidebar on their own. You do not
 6. **Export** downloads the open run as JSON. **Import** or drop a JSON file on the run list.
 7. **Delete run** removes the open run. Hover a JSON box and use **Copy** to copy it.
 
-**Replay step** runs only the selected node again. **Replay from** (and **Call node** in Node view) invoke the real node. Side effects will fire.
+**Replay step** runs only the selected node again. **Replay from** continues the compiled graph from that checkpoint (reducers and routing included). GraphVIAgent attaches an in-process checkpointer when the pipeline did not. Approximate replay is only when that is impossible, or the original thread is gone after a restart. Side effects will fire.
 
 Each run stores a SHA256 of the graph (nodes, edges, state keys, tools). If that hash no longer matches the loaded pipeline, the run is marked **outdated** and replay asks before continuing.
 

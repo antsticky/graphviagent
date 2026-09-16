@@ -7,6 +7,8 @@
 - LLM usage callbacks (`on_llm_end` / `on_chat_model_end`) so token counts follow billed `usage_metadata`, including replay and `with_structured_output`
 - Source mapping: node `file:line` from `inspect`, clickable `vscode://file` links, and traceback frames on failed steps
 - `examples/traceback_pipeline.py` — nested helpers; `{hits: 3, tries: 0}` raises so you can open the stack
+- Live control: topology gutter breakpoints (`interrupt_before`), **Step** / **Continue**, and HITL **Resume** via `Command(resume=…)`
+- `examples/hitl_pipeline.py` — draft node calls `interrupt`; Resume from the UI with `true` or `"edit this"`
 
 ### Changed
 - Require Python 3.11+ (`tomllib`)

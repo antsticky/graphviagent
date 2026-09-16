@@ -22,6 +22,7 @@ from graphviagent.store import (
     list_all_runs,
     list_runs,
     load_run,
+    merge_resume_run,
     save_run,
 )
 from graphviagent.watch import PipelineWatcher, file_sha256
@@ -490,7 +491,10 @@ PAGE = r"""<!DOCTYPE html>
       display: flex; gap: 20px; justify-content: center; align-items: flex-start;
       position: relative; z-index: 1;
     }
-    .topo-node { position: relative; }
+    .topo-node { position: relative; padding-left: 16px; }
+    .topo-node .bp-dot {
+      position: absolute; left: 0; top: 14px; z-index: 2;
+    }
     .g-badge {
       position: absolute; top: -7px; right: -7px;
       min-width: 18px; height: 18px; padding: 0 5px; border-radius: 99px;
@@ -539,6 +543,38 @@ PAGE = r"""<!DOCTYPE html>
     .g-card.error { border-color: #7f1d1d; }
     .g-card.error .g-dot { background: var(--danger); }
     .g-card.error .g-sub { color: var(--danger); }
+    .g-card.next {
+      border-color: #fbbf24;
+      box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.22);
+    }
+    .bp-dot {
+      width: 10px; height: 10px; border-radius: 99px; flex: 0 0 10px;
+      margin-top: 4px; border: 1.5px solid #5a5a64; background: transparent;
+      cursor: pointer; box-sizing: border-box;
+    }
+    .bp-dot:hover { border-color: #f43f5e; }
+    .bp-dot.on { border-color: #f43f5e; background: #f43f5e; }
+    .pause-banner {
+      margin: 8px 0 0; padding: 8px 10px; border-radius: 8px;
+      background: rgba(251, 191, 36, 0.12); color: #fbbf24;
+      font-size: 12px; font-weight: 500;
+    }
+    .pause-banner[hidden], .hitl-panel[hidden] { display: none !important; }
+    .hitl-panel {
+      margin: 8px 0 0; padding: 10px 12px; border-radius: 8px;
+      border: 1px solid var(--line); background: var(--panel);
+    }
+    .hitl-panel label { display: block; color: var(--muted); font-size: 11px; margin-bottom: 6px; }
+    .hitl-hint {
+      font: 11px/1.4 "IBM Plex Mono", ui-monospace, monospace;
+      color: var(--muted); white-space: pre-wrap; margin: 0 0 8px; max-height: 72px; overflow: auto;
+    }
+    #hitlValue {
+      width: 100%; min-height: 72px; resize: vertical;
+      background: #121216; color: var(--ink); border: 1px solid var(--line);
+      border-radius: 7px; padding: 8px; font: 12px/1.4 "IBM Plex Mono", ui-monospace, monospace;
+    }
+    #history .pill.mode-paused { color: #fbbf24; background: rgba(251, 191, 36, 0.16); }
     .g-body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
     .g-name { font-size: 13px; font-weight: 500; }
     .g-sub {
@@ -957,6 +993,7 @@ PAGE = r"""<!DOCTYPE html>
         <select id="runStatus">
           <option value="all">all</option>
           <option value="ok">success</option>
+          <option value="paused">paused</option>
           <option value="error">failed</option>
         </select>
       </div>
@@ -974,12 +1011,21 @@ PAGE = r"""<!DOCTYPE html>
       <div class="toolbar">
         <button class="primary" id="runBtn">Run</button>
         <button class="ghost cancel" id="cancelBtn" hidden>Cancel</button>
+        <button class="ghost" id="continueBtn" hidden>Continue</button>
+        <button class="ghost" id="stepBtn" hidden>Step</button>
+        <button class="primary" id="resumeBtn" hidden>Resume</button>
         <span id="runLive" class="run-live" hidden>Running</span>
         <button class="ghost" id="replayBtn" disabled>Replay step</button>
         <button class="ghost" id="replayFromBtn" disabled>Replay from</button>
         <button class="ghost" id="exportBtn" disabled>Export</button>
         <button class="ghost" id="importBtn">Import</button>
         <button class="ghost" id="deleteBtn">Delete run</button>
+      </div>
+      <div id="pauseBanner" class="pause-banner" hidden></div>
+      <div id="hitlPanel" class="hitl-panel" hidden>
+        <label for="hitlValue">Resume value</label>
+        <div id="hitlHint" class="hitl-hint"></div>
+        <textarea id="hitlValue" spellcheck="false">true</textarea>
       </div>
       <div class="grid">
         <div class="pane">
@@ -1119,8 +1165,139 @@ PAGE = r"""<!DOCTYPE html>
     let graphPanY = 0;
     let graphViewMode = "graph";
     let inflightRuns = [];
+    let breakpoints = {};
 
     const $ = (id) => document.getElementById(id);
+
+    function bpStorageKey() {
+      return fileId ? "gva.bp:" + fileId : "";
+    }
+
+    function loadBreakpoints() {
+      breakpoints = {};
+      const key = bpStorageKey();
+      if (!key) return;
+      try {
+        const raw = JSON.parse(localStorage.getItem(key) || "[]");
+        if (Array.isArray(raw)) {
+          raw.forEach((name) => {
+            if (name) breakpoints[String(name)] = true;
+          });
+        }
+      } catch (err) {}
+    }
+
+    function saveBreakpoints() {
+      const key = bpStorageKey();
+      if (!key) return;
+      localStorage.setItem(key, JSON.stringify(interruptBeforeList()));
+    }
+
+    function interruptBeforeList() {
+      return Object.keys(breakpoints).filter((name) => breakpoints[name]);
+    }
+
+    function paintBreakpointDots() {
+      document.querySelectorAll(".bp-dot[data-node]").forEach((el) => {
+        const name = el.dataset.node;
+        const on = Boolean(breakpoints[name]);
+        el.classList.toggle("on", on);
+        el.title = on ? "Clear breakpoint before " + name : "Break before " + name;
+      });
+    }
+
+    function toggleBreakpoint(name) {
+      if (!name) return;
+      if (breakpoints[name]) delete breakpoints[name];
+      else breakpoints[name] = true;
+      saveBreakpoints();
+      paintBreakpointDots();
+    }
+
+    function breakpointDot(name) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "bp-dot" + (breakpoints[name] ? " on" : "");
+      btn.dataset.node = name;
+      btn.title = breakpoints[name] ? "Clear breakpoint before " + name : "Break before " + name;
+      btn.onclick = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleBreakpoint(name);
+      };
+      return btn;
+    }
+
+    function hitlPayloads(run) {
+      const items = run && run.interrupts;
+      return Array.isArray(items) ? items : [];
+    }
+
+    function runIsPaused(run) {
+      return Boolean(run && run.paused && !run.error);
+    }
+
+    function formatResumeDefault(run) {
+      const hits = hitlPayloads(run);
+      if (!hits.length) return "true";
+      try {
+        return JSON.stringify(hits.length === 1 ? hits[0] : hits, null, 2);
+      } catch (err) {
+        return "true";
+      }
+    }
+
+    function pauseBannerText(run) {
+      const nxt = (run && run.next) || [];
+      if (hitlPayloads(run).length) {
+        return nxt.length
+          ? "Waiting for resume — next: " + nxt.join(", ")
+          : "Waiting for resume";
+      }
+      return nxt.length ? "Paused before " + nxt.join(", ") : "Paused";
+    }
+
+    function syncPauseControls() {
+      const banner = $("pauseBanner");
+      const panel = $("hitlPanel");
+      const paused = runIsPaused(currentRun) && !inflightRuns.length;
+      const hits = paused ? hitlPayloads(currentRun) : [];
+      const nxt = (currentRun && currentRun.next) || [];
+      $("continueBtn").hidden = !paused;
+      $("stepBtn").hidden = !paused;
+      $("stepBtn").disabled = !nxt.length;
+      $("resumeBtn").hidden = !paused || !hits.length;
+      if (!paused) {
+        if (banner) banner.hidden = true;
+        if (panel) panel.hidden = true;
+        return;
+      }
+      if (banner) {
+        banner.hidden = false;
+        banner.textContent = pauseBannerText(currentRun);
+      }
+      if (panel) {
+        panel.hidden = !hits.length;
+        if (hits.length) {
+          $("hitlHint").textContent = JSON.stringify(hits, null, 2);
+          $("hitlValue").value = formatResumeDefault(currentRun);
+        }
+      }
+    }
+
+    function markNextNodes(run) {
+      document.querySelectorAll(".g-card.next").forEach((el) => {
+        el.classList.remove("next");
+        if (!el.classList.contains("taken")) el.classList.remove("running");
+      });
+      if (!runIsPaused(run)) return;
+      (run.next || []).forEach((name) => {
+        document.querySelectorAll(nodeCardSel(name)).forEach((card) => {
+          card.classList.add("next", "running");
+          card.classList.remove("idle");
+        });
+      });
+    }
 
     function escapeHtml(value) {
       return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
@@ -1684,6 +1861,7 @@ PAGE = r"""<!DOCTYPE html>
       fileId = id;
       currentRun = null;
       selectedStep = null;
+      loadBreakpoints();
       const p = pipeline();
       const example = (p && p.examples && p.examples[0]) || null;
       $("input").value = JSON.stringify(exampleInput(example), null, 2);
@@ -1738,6 +1916,7 @@ PAGE = r"""<!DOCTYPE html>
       if (!q) return true;
       if (q === "has error" || q === "error" || q === "failed") return run.status === "error";
       if (q === "ok" || q === "success") return run.status === "ok";
+      if (q === "paused") return run.status === "paused";
       return inputSearchText(run.input).includes(q);
     }
 
@@ -1752,8 +1931,8 @@ PAGE = r"""<!DOCTYPE html>
         const btn = document.createElement("button");
         btn.className = "run" + (currentRun && currentRun.id === r.id ? " active" : "");
         const mode = r.mode || "run";
-        const pill = r.status === "error" ? "error" : mode;
-        const known = { run: 1, replay: 1, replay_from: 1, error: 1, approximate: 1 };
+        const pill = r.status === "error" ? "error" : r.status === "paused" ? "paused" : mode;
+        const known = { run: 1, replay: 1, replay_from: 1, error: 1, approximate: 1, paused: 1 };
         const pillClass = known[pill] ? pill : "run";
         const outdated = isOutdated(r)
           ? '<span class="pill mode-outdated">outdated</span>'
@@ -2894,6 +3073,7 @@ PAGE = r"""<!DOCTYPE html>
           if (info.lastStep) bindStepActions(card, info.lastStep);
           const wrap = document.createElement("div");
           wrap.className = "topo-node";
+          wrap.appendChild(breakpointDot(name));
           wrap.appendChild(card);
           if (info.visits > 1) {
             const badge = document.createElement("span");
@@ -2907,6 +3087,7 @@ PAGE = r"""<!DOCTYPE html>
       });
       mountGraph(target, flow);
       highlightSelection();
+      markNextNodes(run);
     }
 
     function stepSpan(step, fallbackStart) {
@@ -3289,6 +3470,7 @@ PAGE = r"""<!DOCTYPE html>
         showStepIO(null);
         closeNodeView();
         syncStepButtons();
+        syncPauseControls();
         return;
       }
       if (run.approximate) {
@@ -3323,6 +3505,7 @@ PAGE = r"""<!DOCTYPE html>
       });
       renderGraph(run);
       syncStepButtons();
+      syncPauseControls();
     }
 
     function newRunId() {
@@ -3338,6 +3521,7 @@ PAGE = r"""<!DOCTYPE html>
       const live = $("runLive");
       live.hidden = n === 0;
       live.textContent = n ? "Running " + n + "/3" : "Running";
+      syncPauseControls();
     }
 
     async function readSse(res, onEvent) {
@@ -3419,7 +3603,7 @@ PAGE = r"""<!DOCTYPE html>
         appendLog(event, true);
         return;
       }
-      if (type === "done") {
+      if (type === "done" || type === "paused") {
         currentRun = event.run;
         selectedStep = null;
         renderRun(currentRun);
@@ -3430,39 +3614,75 @@ PAGE = r"""<!DOCTYPE html>
       }
     }
 
-    async function runGraph() {
-      if (inflightRuns.length >= 3) {
+    async function streamLive(extra) {
+      extra = extra || {};
+      const resume = Boolean(extra.resume);
+      if (!resume && inflightRuns.length >= 3) {
         alert("At most 3 runs can execute at once");
         return;
       }
+      if (resume && inflightRuns.length) {
+        alert("A run is already in flight");
+        return;
+      }
+      if (resume && !runIsPaused(currentRun)) {
+        alert("Open a paused run first");
+        return;
+      }
       let input;
-      try { input = JSON.parse($("input").value || "{}"); }
-      catch (err) { alert("Input must be JSON"); return; }
-      const runId = newRunId();
+      if (!resume) {
+        try { input = JSON.parse($("input").value || "{}"); }
+        catch (err) { alert("Input must be JSON"); return; }
+      }
+      const runId = resume ? currentRun.id : newRunId();
       const controller = new AbortController();
       const job = { id: runId, controller: controller };
       inflightRuns.push(job);
       syncRunControls();
       selectedStep = null;
-      currentRun = { id: runId, input: input, steps: [], result: {}, logs: [] };
-      const logDetails = $("logDetails");
-      if (logDetails) logDetails.open = true;
-      renderLogs([]);
-      setJson($("state"), {}, null, { thread: false });
-      $("ascii").textContent = "";
-      $("steps").innerHTML = "";
-      $("stepsMs").textContent = "…";
-      renderMemory(null);
-      if (graphViewMode === "graph") {
-        const spec = graphSpec(null);
-        if (spec) renderTopoGraph(spec, { live: true, steps: [] }, "Running…");
+      if (!resume) {
+        currentRun = { id: runId, input: input, steps: [], result: {}, logs: [] };
+        const logDetails = $("logDetails");
+        if (logDetails) logDetails.open = true;
+        renderLogs([]);
+        setJson($("state"), {}, null, { thread: false });
+        $("ascii").textContent = "";
+        $("steps").innerHTML = "";
+        $("stepsMs").textContent = "…";
+        renderMemory(null);
+        if (graphViewMode === "graph") {
+          const spec = graphSpec(null);
+          if (spec) renderTopoGraph(spec, { live: true, steps: [] }, "Running…");
+        }
+      } else {
+        const logDetails = $("logDetails");
+        if (logDetails) logDetails.open = true;
+        if (graphViewMode === "graph") {
+          const spec = graphSpec(currentRun);
+          if (spec) renderTopoGraph(spec, currentRun, "Resuming…");
+        }
+      }
+      const payload = {
+        file: fileId,
+        run_id: runId,
+        interrupt_before: Object.prototype.hasOwnProperty.call(extra, "interrupt_before")
+          ? extra.interrupt_before
+          : interruptBeforeList(),
+      };
+      if (resume) payload.resume = true;
+      else payload.input = input;
+      if (extra.interrupt_after && extra.interrupt_after.length) {
+        payload.interrupt_after = extra.interrupt_after;
+      }
+      if (Object.prototype.hasOwnProperty.call(extra, "resume_value")) {
+        payload.resume_value = extra.resume_value;
       }
       const pendingByNode = {};
       try {
         const res = await fetch("/api/run/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ file: fileId, input: input, run_id: runId }),
+          body: JSON.stringify(payload),
           signal: controller.signal,
         });
         if (!res.ok) {
@@ -3472,7 +3692,7 @@ PAGE = r"""<!DOCTYPE html>
         let finished = false;
         await readSse(res, (event) => {
           handleLiveEvent(event, pendingByNode);
-          if (event && event.type === "done") finished = true;
+          if (event && (event.type === "done" || event.type === "paused")) finished = true;
         });
         if (!finished && !(currentRun && currentRun.error)) {
           throw new Error("run produced no result");
@@ -3486,6 +3706,31 @@ PAGE = r"""<!DOCTYPE html>
         await loadHistory();
         await loadPipelines();
       }
+    }
+
+    async function runGraph() {
+      await streamLive();
+    }
+
+    async function continueRun() {
+      await streamLive({ resume: true });
+    }
+
+    async function stepRun() {
+      const next = ((currentRun && currentRun.next) || [])[0];
+      if (!next) {
+        alert("Nothing to step");
+        return;
+      }
+      const before = interruptBeforeList().filter((name) => name !== next);
+      await streamLive({ resume: true, interrupt_before: before, interrupt_after: [next] });
+    }
+
+    async function resumeHitl() {
+      let value;
+      try { value = JSON.parse($("hitlValue").value || "true"); }
+      catch (err) { alert("Resume value must be JSON"); return; }
+      await streamLive({ resume: true, resume_value: value });
     }
 
     async function cancelRuns() {
@@ -3966,7 +4211,7 @@ PAGE = r"""<!DOCTYPE html>
       let lastY = 0;
       box.addEventListener("pointerdown", (event) => {
         if (box.classList.contains("empty")) return;
-        if (event.target.closest("button, a, input, textarea")) return;
+        if (event.target.closest("button, a, input, textarea, .bp-dot")) return;
         hideGanttTip();
         dragging = true;
         lastX = event.clientX;
@@ -3987,6 +4232,9 @@ PAGE = r"""<!DOCTYPE html>
     })();
     $("runBtn").onclick = () => runGraph().catch((e) => alert(e.message));
     $("cancelBtn").onclick = () => cancelRuns().catch((e) => alert(e.message));
+    $("continueBtn").onclick = () => continueRun().catch((e) => alert(e.message));
+    $("stepBtn").onclick = () => stepRun().catch((e) => alert(e.message));
+    $("resumeBtn").onclick = () => resumeHitl().catch((e) => alert(e.message));
     $("replayBtn").onclick = () => openFromButton("replay");
     $("replayFromBtn").onclick = () => openFromButton("replay_from");
     $("replayFromHereBtn").onclick = () => rerun("resume").catch((e) => alert(e.message));
@@ -4144,6 +4392,32 @@ class GraphVIHandler(BaseHTTPRequestHandler):
             raise ValueError("run_id must be a hex id")
         return text.lower()
 
+    def _name_list(self, raw: object) -> list[str] | None:
+        if raw is None or raw == "":
+            return None
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            raise ValueError("node list must be an array")
+        names = [str(item) for item in raw if item]
+        return names or None
+
+    def _save_live_run(
+        self,
+        loaded: LoadedPipeline,
+        run: dict,
+        previous: dict | None = None,
+    ) -> dict:
+        tagged = attach_graph_meta(
+            run,
+            loaded.graph,
+            loaded.graph_hash,
+            loaded.file_sha256,
+        )
+        if previous:
+            tagged = merge_resume_run(previous, tagged)
+        return save_run(self.workspace, loaded.stem, tagged)
+
     def _begin_run(self, run_id: str) -> threading.Event:
         with self.run_lock:
             if len(self.active_runs) >= MAX_RUN_THREADS:
@@ -4208,7 +4482,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
             )
         return items
 
-    def _load_listed(self, file_id: str) -> LoadedPipeline:
+    def _cached_pipeline(self, file_id: str) -> LoadedPipeline:
         path = (self.workspace / file_id).resolve()
         if self.workspace.resolve() not in path.parents and path != self.workspace.resolve():
             loaded = LoadedPipeline(path=path, stem=self._pipeline_stem(path))
@@ -4218,25 +4492,21 @@ class GraphVIHandler(BaseHTTPRequestHandler):
             sha = file_sha256(path)
         except OSError:
             sha = None
+        cached = self.cache.get(file_id)
+        if cached is not None and (
+            sha is None or getattr(cached, "_sha256", None) == sha
+        ):
+            return cached
         loaded = load_pipeline(path, self.config)
         loaded._sha256 = sha  # type: ignore[attr-defined]
         self.cache[file_id] = loaded
         return loaded
 
+    def _load_listed(self, file_id: str) -> LoadedPipeline:
+        return self._cached_pipeline(file_id)
+
     def _get_loaded(self, file_id: str) -> LoadedPipeline:
-        path = (self.workspace / file_id).resolve()
-        if self.workspace.resolve() not in path.parents and path != self.workspace.resolve():
-            raise ValueError("path outside workspace")
-        try:
-            sha = file_sha256(path)
-        except OSError:
-            sha = None
-        cached = self.cache.get(file_id)
-        if cached is None or sha is None or getattr(cached, "_sha256", None) != sha:
-            loaded = load_pipeline(path, self.config)
-            loaded._sha256 = sha  # type: ignore[attr-defined]
-            self.cache[file_id] = loaded
-            cached = loaded
+        cached = self._cached_pipeline(file_id)
         if cached.error:
             raise RuntimeError(cached.error)
         if cached.app is None:
@@ -4343,32 +4613,44 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/run/stream":
                 loaded = self._get_loaded(payload["file"])
+                resume = bool(payload.get("resume"))
+                previous = None
                 run_id = self._normalize_run_id(payload.get("run_id")) or uuid4().hex
+                if resume:
+                    previous = load_run(self.workspace, run_id)
+                    if previous is None:
+                        self._json(404, {"error": "run not found"})
+                        return
+                    if not previous.get("paused"):
+                        raise ValueError("run is not paused")
+                    thread = previous.get("thread_id") or previous.get("id")
+                    if not thread:
+                        raise RuntimeError("paused run has no thread_id")
+                    run_id = str(thread)
                 cancel = self._begin_run(run_id)
                 started = False
                 try:
                     self._sse_begin()
                     started = True
+                    use_command = resume and "resume_value" in payload
                     for event in iter_run_events(
                         loaded.app,
-                        payload.get("input") or {},
+                        previous.get("input") if previous else (payload.get("input") or {}),
                         thread_id=run_id,
                         has_checkpointer=loaded.has_checkpointer,
                         cancel=cancel,
+                        resume=resume,
+                        interrupt_before=self._name_list(payload.get("interrupt_before")),
+                        interrupt_after=self._name_list(payload.get("interrupt_after")),
+                        pause=True,
+                        resume_value=payload.get("resume_value") if use_command else None,
+                        use_command=use_command,
                     ):
-                        if event.get("type") == "done":
+                        kind = event.get("type")
+                        if kind in {"done", "paused"}:
                             run = event.get("run") or {}
-                            saved = save_run(
-                                self.workspace,
-                                loaded.stem,
-                                attach_graph_meta(
-                                    run,
-                                    loaded.graph,
-                                    loaded.graph_hash,
-                                    loaded.file_sha256,
-                                ),
-                            )
-                            event = {"type": "done", "run": self._with_render(saved)}
+                            saved = self._save_live_run(loaded, run, previous)
+                            event = {"type": kind, "run": self._with_render(saved)}
                         self._sse_data(event)
                 except (BrokenPipeError, ConnectionResetError):
                     self._cancel_run(run_id)

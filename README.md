@@ -115,9 +115,11 @@ New or edited `*_pipeline.py` files refresh the sidebar on their own. You do not
 2. Edit the JSON input (the first `EXAMPLES` item is prefilled).
 3. Click **Run**.
 4. Single-click a node to select it. Double-click to open **Node view**. Node cards show `file:line`; click to open in the editor. Failed nodes include a traceback.
-5. Filter the run list by status (all / success / failed), node name, or input text.
-6. **Export** downloads the open run as JSON. **Import** or drop a JSON file on the run list.
-7. **Delete run** removes the open run. Hover a JSON box and use **Copy** to copy it.
+5. Click the gutter dot on a topology card to break before that node. Breakpoints persist per pipeline. **Continue** resumes with those breakpoints; **Step** runs the next node and pauses again.
+6. Human-in-the-loop graphs (`interrupt(...)`) pause with **Resume**. Send JSON such as `true` to keep a draft, or `"edit this"` to replace it. Continue after a process restart fails — checkpoints are in-memory.
+7. Filter the run list by status (all / success / paused / failed), node name, or input text.
+8. **Export** downloads the open run as JSON. **Import** or drop a JSON file on the run list.
+9. **Delete run** removes the open run. Hover a JSON box and use **Copy** to copy it.
 
 **Replay step** runs only the selected node again. **Replay from** continues the compiled graph from that checkpoint (reducers and routing included). GraphVIAgent attaches an in-process checkpointer when the pipeline did not. Approximate replay is only when that is impossible, or the original thread is gone after a restart. Side effects will fire.
 
@@ -197,3 +199,4 @@ graphviagent serve examples
 - `examples/grade_pipeline.py` — score / max; `{maximum: 0}` raises
 - `examples/convert_pipeline.py` — `{value: 0, unit: "per_unit"}` or `{unit: "kelvin"}` raises
 - `examples/traceback_pipeline.py` — nested helpers; `{hits: 3, tries: 0}` raises with a clickable traceback
+- `examples/hitl_pipeline.py` — draft then `interrupt`; Resume from the UI with `true` or `"edit this"`

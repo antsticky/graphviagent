@@ -53,7 +53,15 @@ def list_runs(
             "parent_id": data.get("parent_id"),
             "step_count": len(data.get("steps") or []),
             "elapsed_ms": data.get("elapsed_ms"),
-            "status": "error" if data.get("error") else "ok",
+            "status": (
+                "error"
+                if data.get("error")
+                else "paused"
+                if data.get("paused")
+                else "ok"
+            ),
+            "paused": bool(data.get("paused")),
+            "next": data.get("next") or [],
             "graph_hash": data.get("graph_hash"),
             "file_sha256": data.get("file_sha256"),
         }
@@ -146,3 +154,38 @@ def import_run(workspace: Path, run: dict, *, fallback_stem: str, known_stems: l
         raise ValueError("run needs a pipeline name")
     clean["pipeline"] = stem
     return save_run(workspace, stem, clean)
+
+
+def merge_resume_run(previous: dict, current: dict) -> dict:
+    merged = dict(current)
+    merged["id"] = previous.get("id") or current.get("id")
+    merged["input"] = previous.get("input") if previous.get("input") is not None else current.get("input")
+    merged["created_at"] = previous.get("created_at") or current.get("created_at")
+    merged["pipeline"] = previous.get("pipeline") or current.get("pipeline")
+    merged["parent_id"] = previous.get("parent_id") or current.get("parent_id")
+    merged["mode"] = previous.get("mode") or current.get("mode")
+    merged["from_step"] = previous.get("from_step") or current.get("from_step")
+    merged["thread_id"] = (
+        current.get("thread_id") or previous.get("thread_id") or merged.get("id")
+    )
+    prev_steps = [
+        dict(step) for step in (previous.get("steps") or []) if isinstance(step, dict)
+    ]
+    new_steps = [dict(step) for step in (current.get("steps") or []) if isinstance(step, dict)]
+    steps = prev_steps + new_steps
+    for index, step in enumerate(steps):
+        step["index"] = index
+    merged["steps"] = steps
+    merged["logs"] = list(previous.get("logs") or []) + list(current.get("logs") or [])
+    try:
+        merged["elapsed_ms"] = round(
+            float(previous.get("elapsed_ms") or 0) + float(current.get("elapsed_ms") or 0),
+            2,
+        )
+    except (TypeError, ValueError):
+        merged["elapsed_ms"] = current.get("elapsed_ms")
+    merged["started_at"] = previous.get("started_at") or current.get("started_at")
+    merged["graph"] = current.get("graph") or previous.get("graph")
+    merged["graph_hash"] = current.get("graph_hash") or previous.get("graph_hash")
+    merged["file_sha256"] = current.get("file_sha256") or previous.get("file_sha256")
+    return merged

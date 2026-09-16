@@ -1312,6 +1312,98 @@ def _build_step(
     return step, graph_out
 
 
+def _command_resume(value: Any) -> Any:
+    try:
+        from langgraph.types import Command
+    except ImportError as exc:
+        raise RuntimeError("HITL resume requires langgraph.types.Command") from exc
+    return Command(resume=value)
+
+
+def _interrupt_value(item: Any) -> Any:
+    if item is None:
+        return None
+    name = type(item).__name__
+    if name in {"Interrupt", "GraphInterrupt", "NodeInterrupt"}:
+        return getattr(item, "value", None)
+    if isinstance(item, dict):
+        keys = set(item)
+        if "value" in item and keys <= {"value", "id", "ns", "when", "interrupt_id"}:
+            return item.get("value")
+        return item
+    if isinstance(item, (list, tuple)):
+        if item and type(item[0]).__name__ in {"Interrupt", "GraphInterrupt", "NodeInterrupt"}:
+            values = [_interrupt_value(part) for part in item]
+            values = [part for part in values if part is not None]
+            if not values:
+                return None
+            return values[0] if len(values) == 1 else values
+        return list(item)
+    return item
+
+
+def _collect_interrupts(snapshot: Any, streamed: list[Any]) -> list[Any]:
+    found: list[Any] = [_interrupt_value(item) for item in streamed if item is not None]
+    if snapshot is None:
+        return found
+    raw = getattr(snapshot, "interrupts", None)
+    if raw:
+        try:
+            items = list(raw)
+        except TypeError:
+            items = [raw]
+        for item in items:
+            found.append(_interrupt_value(item))
+    for task in getattr(snapshot, "tasks", None) or ():
+        for item in getattr(task, "interrupts", None) or ():
+            found.append(_interrupt_value(item))
+    cleaned: list[Any] = []
+    seen: set[str] = set()
+    for item in found:
+        if item is None:
+            continue
+        try:
+            key = json.dumps(jsonable(item), sort_keys=True, default=str)
+        except TypeError:
+            key = str(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(item)
+    return cleaned
+
+
+def _pause_info(
+    app: Any,
+    config: dict[str, Any],
+    streamed: list[Any],
+) -> dict[str, Any] | None:
+    snapshot = None
+    nxt: list[str] = []
+    try:
+        snapshot = app.get_state(config)
+    except Exception:
+        snapshot = None
+    if snapshot is not None:
+        nxt = [
+            str(name)
+            for name in (getattr(snapshot, "next", None) or ())
+            if name and str(name) not in _SKIP_NODES
+        ]
+        values = getattr(snapshot, "values", None)
+        if isinstance(values, dict):
+            extra = values.get("__interrupt__")
+            if extra:
+                if isinstance(extra, list):
+                    streamed = list(streamed) + extra
+                else:
+                    streamed = list(streamed) + [extra]
+    interrupts = _collect_interrupts(snapshot, streamed)
+    if not nxt and not interrupts:
+        return None
+    return {"next": nxt, "interrupts": jsonable(interrupts)}
+
+
 def _build_run(
     *,
     run_id: str,
@@ -1324,12 +1416,15 @@ def _build_run(
     run_error: str | None,
     logs: list[dict],
     edges: list[tuple[str, str]],
+    paused: bool = False,
+    nxt: list[str] | None = None,
+    interrupts: list[Any] | None = None,
 ) -> dict:
     for index, step in enumerate(steps):
         step["index"] = index
     _apply_unused(steps, edges)
     span = _run_span(steps, _elapsed_ms(clock0))
-    return {
+    built = {
         "id": run_id,
         "input": jsonable(user_input),
         "steps": steps,
@@ -1341,7 +1436,11 @@ def _build_run(
         "elapsed_ms": span,
         "error": run_error,
         "logs": list(logs),
+        "paused": bool(paused) and not run_error,
+        "next": list(nxt or []) if paused and not run_error else [],
+        "interrupts": list(interrupts or []) if paused and not run_error else [],
     }
+    return built
 
 
 def _execute_run(
@@ -1355,7 +1454,11 @@ def _execute_run(
     emit: Any,
     resume: bool = False,
     interrupt_after: list[str] | None = None,
+    interrupt_before: list[str] | None = None,
     run_config: dict[str, Any] | None = None,
+    pause: bool = False,
+    resume_value: Any = None,
+    use_command: bool = False,
 ) -> None:
     run_id = thread_id or uuid4().hex
     usage = _UsageHandler()
@@ -1413,6 +1516,7 @@ def _execute_run(
     pending_updates: dict[str, Any] | None = None
     superstep = 0
     source_map = _source_map(app)
+    streamed_interrupts: list[Any] = []
 
     def consume_updates(payload: dict, live_out: dict | None) -> None:
         nonlocal state
@@ -1480,8 +1584,13 @@ def _execute_run(
     try:
         stream_kwargs: dict[str, Any] = {"stream_mode": ["updates", "values"]}
         if interrupt_after:
-            stream_kwargs["interrupt_after"] = interrupt_after
-        incoming: Any = None if resume else (user_input or {})
+            stream_kwargs["interrupt_after"] = [str(name) for name in interrupt_after if name]
+        if interrupt_before:
+            stream_kwargs["interrupt_before"] = [str(name) for name in interrupt_before if name]
+        if resume:
+            incoming: Any = _command_resume(resume_value) if use_command else None
+        else:
+            incoming = user_input or {}
         try:
             stream = app.stream(incoming, config, **stream_kwargs)
         except TypeError:
@@ -1493,6 +1602,12 @@ def _execute_run(
             mode, payload = _stream_item(event)
             if mode == "updates":
                 if isinstance(payload, dict) and payload:
+                    extra = payload.get("__interrupt__")
+                    if extra:
+                        if isinstance(extra, list):
+                            streamed_interrupts.extend(extra)
+                        else:
+                            streamed_interrupts.append(extra)
                     cleaned = {
                         key: value
                         for key, value in payload.items()
@@ -1523,6 +1638,11 @@ def _execute_run(
             run_error = "cancelled"
         else:
             run_error = _format_error(exc)
+            if resume and (
+                type(exc).__name__ == "EmptyInputError"
+                or "no input for __start__" in str(exc)
+            ):
+                run_error = "checkpoint not found (process restart or missing thread)"
             failed = _guess_failed_node(raw_events, edges)
             if failed:
                 update = _error_update(exc)
@@ -1556,8 +1676,20 @@ def _execute_run(
         _capture_tls.clock0 = None
         _capture_tls.usage = None
 
+    paused = False
+    nxt: list[str] = []
+    interrupts: list[Any] = []
+    if not run_error and pause:
+        info = _pause_info(app, config, streamed_interrupts)
+        if info:
+            paused = True
+            nxt = list(info.get("next") or [])
+            interrupts = list(info.get("interrupts") or [])
     if run_error:
         push({"type": "log", "t": _elapsed_ms(clock0), "src": "run", "text": run_error, "level": "error"})
+    elif paused:
+        waiting = ", ".join(nxt) if nxt else "resume"
+        push({"type": "log", "t": _elapsed_ms(clock0), "src": "run", "text": f"run paused ({waiting})", "level": "info"})
     else:
         push({"type": "log", "t": _elapsed_ms(clock0), "src": "run", "text": "run finished", "level": "info"})
     built = _build_run(
@@ -1571,8 +1703,11 @@ def _execute_run(
         run_error=run_error,
         logs=logs,
         edges=edges,
+        paused=paused,
+        nxt=nxt,
+        interrupts=interrupts,
     )
-    emit({"type": "done", "run": built})
+    emit({"type": "paused" if paused else "done", "run": built})
 
 
 def iter_run_events(
@@ -1585,7 +1720,11 @@ def iter_run_events(
     max_concurrency: int = MAX_RUN_THREADS,
     resume: bool = False,
     interrupt_after: list[str] | None = None,
+    interrupt_before: list[str] | None = None,
     run_config: dict[str, Any] | None = None,
+    pause: bool = False,
+    resume_value: Any = None,
+    use_command: bool = False,
 ) -> Iterator[dict]:
     pending: queue.Queue[dict | None] = queue.Queue()
 
@@ -1604,7 +1743,11 @@ def iter_run_events(
                 emit=emit,
                 resume=resume,
                 interrupt_after=interrupt_after,
+                interrupt_before=interrupt_before,
                 run_config=run_config,
+                pause=pause,
+                resume_value=resume_value,
+                use_command=use_command,
             )
         except Exception as exc:
             pending.put({"type": "error", "error": _format_error(exc)})
@@ -1631,7 +1774,11 @@ def record_run(
     max_concurrency: int = MAX_RUN_THREADS,
     resume: bool = False,
     interrupt_after: list[str] | None = None,
+    interrupt_before: list[str] | None = None,
     run_config: dict[str, Any] | None = None,
+    pause: bool = False,
+    resume_value: Any = None,
+    use_command: bool = False,
 ) -> dict:
     run = None
     error = None
@@ -1644,9 +1791,13 @@ def record_run(
         max_concurrency=max_concurrency,
         resume=resume,
         interrupt_after=interrupt_after,
+        interrupt_before=interrupt_before,
         run_config=run_config,
+        pause=pause,
+        resume_value=resume_value,
+        use_command=use_command,
     ):
-        if event.get("type") == "done":
+        if event.get("type") in {"done", "paused"}:
             run = event.get("run")
         elif event.get("type") == "error":
             error = event.get("error")

@@ -10,6 +10,11 @@
 - Live control: topology gutter breakpoints (`interrupt_before`), **Step** / **Continue**, and HITL **Resume** via `Command(resume=…)`
 - `examples/hitl_pipeline.py` — draft node calls `interrupt`; Resume from the UI with `true` or `"edit this"`
 
+### Fixed
+- `load_run` returns `None` for truncated or invalid JSON instead of raising (open/compare 404, not 500)
+- Failed pipeline imports are not kept in the serve cache, so a fixed dependency reloads without a file-hash change
+- Cancel after Resume matches both the run id and the LangGraph `thread_id`
+
 ### Changed
 - Rename the Pipelines page to **Runs** (`#/runs`; `#/pipelines` still opens it)
 - Require Python 3.11+ (`tomllib`)

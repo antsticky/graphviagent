@@ -4491,21 +4491,42 @@ class GraphVIHandler(BaseHTTPRequestHandler):
             tagged = merge_resume_run(previous, tagged)
         return save_run(self.workspace, loaded.stem, tagged)
 
-    def _begin_run(self, run_id: str) -> threading.Event:
+    def _run_key(self, value: object) -> str | None:
+        if value is None:
+            return None
+        text = str(value).replace("-", "").strip().lower()
+        return text or None
+
+    def _begin_run(self, run_id: str, *aliases: object) -> threading.Event:
+        keys: list[str] = []
+        for value in (run_id, *aliases):
+            key = self._run_key(value)
+            if key and key not in keys:
+                keys.append(key)
+        if not keys:
+            raise ValueError("run_id is required")
         with self.run_lock:
-            if len(self.active_runs) >= MAX_RUN_THREADS:
+            if len({id(event) for event in self.active_runs.values()}) >= MAX_RUN_THREADS:
                 raise RuntimeError("at most 3 runs can execute at once")
             cancel = threading.Event()
-            self.active_runs[run_id] = cancel
+            for key in keys:
+                self.active_runs[key] = cancel
             return cancel
 
     def _end_run(self, run_id: str) -> None:
+        key = self._run_key(run_id)
         with self.run_lock:
-            self.active_runs.pop(run_id, None)
+            cancel = self.active_runs.get(key) if key else None
+            if cancel is None:
+                return
+            for alias, event in list(self.active_runs.items()):
+                if event is cancel:
+                    self.active_runs.pop(alias, None)
 
     def _cancel_run(self, run_id: str) -> bool:
+        key = self._run_key(run_id)
         with self.run_lock:
-            cancel = self.active_runs.get(run_id)
+            cancel = self.active_runs.get(key) if key else None
         if cancel is None:
             return False
         cancel.set()
@@ -4605,13 +4626,19 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         except OSError:
             sha = None
         cached = self.cache.get(file_id)
-        if cached is not None and (
-            sha is None or getattr(cached, "_sha256", None) == sha
+        if (
+            cached is not None
+            and not cached.error
+            and sha is not None
+            and getattr(cached, "_sha256", None) == sha
         ):
             return cached
         loaded = load_pipeline(path, self.config)
         loaded._sha256 = sha  # type: ignore[attr-defined]
-        self.cache[file_id] = loaded
+        if loaded.error:
+            self.cache.pop(file_id, None)
+        else:
+            self.cache[file_id] = loaded
         return loaded
 
     def _load_listed(self, file_id: str) -> LoadedPipeline:
@@ -4718,7 +4745,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
             if parsed.path == "/api/run/cancel":
-                run_id = self._normalize_run_id(payload.get("run_id"))
+                run_id = self._run_key(payload.get("run_id"))
                 if not run_id:
                     raise ValueError("run_id is required")
                 self._json(200, {"ok": self._cancel_run(run_id)})
@@ -4727,9 +4754,10 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                 loaded = self._get_loaded(payload["file"])
                 resume = bool(payload.get("resume"))
                 previous = None
-                run_id = self._normalize_run_id(payload.get("run_id")) or uuid4().hex
+                client_run_id = self._normalize_run_id(payload.get("run_id")) or uuid4().hex
+                thread_id = client_run_id
                 if resume:
-                    previous = load_run(self.workspace, run_id)
+                    previous = load_run(self.workspace, client_run_id)
                     if previous is None:
                         self._json(404, {"error": "run not found"})
                         return
@@ -4738,8 +4766,8 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                     thread = previous.get("thread_id") or previous.get("id")
                     if not thread:
                         raise RuntimeError("paused run has no thread_id")
-                    run_id = str(thread)
-                cancel = self._begin_run(run_id)
+                    thread_id = str(thread)
+                cancel = self._begin_run(client_run_id, thread_id)
                 started = False
                 try:
                     self._sse_begin()
@@ -4748,7 +4776,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                     for event in iter_run_events(
                         loaded.app,
                         previous.get("input") if previous else (payload.get("input") or {}),
-                        thread_id=run_id,
+                        thread_id=thread_id,
                         has_checkpointer=loaded.has_checkpointer,
                         cancel=cancel,
                         resume=resume,
@@ -4765,7 +4793,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                             event = {"type": kind, "run": self._with_render(saved)}
                         self._sse_data(event)
                 except (BrokenPipeError, ConnectionResetError):
-                    self._cancel_run(run_id)
+                    self._cancel_run(client_run_id)
                 except Exception as exc:
                     if started:
                         try:
@@ -4775,7 +4803,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                     else:
                         raise
                 finally:
-                    self._end_run(run_id)
+                    self._end_run(client_run_id)
                 return
             if parsed.path == "/api/run":
                 loaded = self._get_loaded(payload["file"])

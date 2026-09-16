@@ -41,7 +41,9 @@ def list_runs(
     for path in folder.glob("*.json"):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
             continue
         item = {
             "id": data.get("id") or path.stem,
@@ -85,10 +87,15 @@ def list_runs(
 
 def load_run(workspace: Path, run_id: str) -> dict | None:
     root = store_root(workspace)
-    if not root.is_dir():
+    if not root.is_dir() or not run_id:
         return None
     for path in root.glob(f"*/{run_id}.json"):
-        return json.loads(path.read_text(encoding="utf-8"))
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict):
+            return data
     return None
 
 

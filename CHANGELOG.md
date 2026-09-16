@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.2-dev
+## 1.1.3-dev
 
 ### Added
 - `graphviagent.toml` for project `root`, `pythonpath`, `env_file`, `context`, and explicit `[pipeline.*]` entries

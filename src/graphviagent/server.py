@@ -1138,18 +1138,22 @@ PAGE = r"""<!DOCTYPE html>
         return {
           ms: null, mb: null, peak: null, tokens: null,
           prompt: null, completion: null, toolTokens: null, tool: null,
+          tokenUnavailable: false,
         };
       }
       const tokens = step.tokens;
+      const unavailable = !!(tokens && tokens.unavailable);
+      const hasUsage = !!(tokens && !unavailable);
       return {
         ms: step.elapsed_ms != null ? Number(step.elapsed_ms) : null,
         mb: step.memory_mb != null ? Number(step.memory_mb) : null,
         peak: step.memory_peak_mb != null ? Number(step.memory_peak_mb) : null,
-        tokens: tokens ? Number(tokens.total || 0) : null,
-        prompt: tokens ? Number(tokens.prompt || 0) : null,
-        completion: tokens ? Number(tokens.completion || 0) : null,
-        toolTokens: tokens && tokens.tool != null ? Number(tokens.tool) : null,
+        tokens: hasUsage ? Number(tokens.total || 0) : null,
+        prompt: hasUsage ? Number(tokens.prompt || 0) : null,
+        completion: hasUsage ? Number(tokens.completion || 0) : null,
+        toolTokens: hasUsage && tokens.tool != null ? Number(tokens.tool) : null,
         tool: step.tool_latency_ms != null ? Number(step.tool_latency_ms) : null,
+        tokenUnavailable: unavailable,
       };
     }
 
@@ -1168,6 +1172,7 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function formatTokens(metrics) {
+      if (metrics && metrics.tokenUnavailable) return "n/a";
       if (!metrics || metrics.tokens == null) return "—";
       return (metrics.prompt || 0) + " in + " + (metrics.completion || 0) + " out";
     }

@@ -9,8 +9,15 @@ import threading
 import time
 import tracemalloc
 from datetime import datetime, timezone
+from contextlib import contextmanager
 from typing import Any, Iterator
 from uuid import uuid4
+
+try:
+    from langchain_core.callbacks import BaseCallbackHandler
+except ImportError:  # pragma: no cover
+    class BaseCallbackHandler:  # type: ignore[no-redef]
+        pass
 
 _SKIP_NODES = {"__start__", "START", "__end__", "END"}
 MAX_RUN_THREADS = 3
@@ -115,7 +122,26 @@ def _tokens_from_mapping(obj: Any) -> tuple[int, int]:
 
 
 def _usage_from_obj(obj: Any) -> tuple[int, int]:
+    if obj is None:
+        return 0, 0
     if not isinstance(obj, dict):
+        usage_meta = getattr(obj, "usage_metadata", None)
+        if isinstance(usage_meta, dict):
+            prompt, completion = _tokens_from_mapping(usage_meta)
+            if prompt or completion:
+                return prompt, completion
+        meta = getattr(obj, "response_metadata", None)
+        if isinstance(meta, dict):
+            prompt, completion = _tokens_from_mapping(
+                meta.get("token_usage") or meta.get("usage") or {}
+            )
+            if prompt or completion:
+                return prompt, completion
+        llm_output = getattr(obj, "llm_output", None)
+        if isinstance(llm_output, dict):
+            return _tokens_from_mapping(
+                llm_output.get("token_usage") or llm_output.get("usage") or {}
+            )
         return 0, 0
     sources: list[dict] = []
     usage_meta = obj.get("usage_metadata")
@@ -129,12 +155,120 @@ def _usage_from_obj(obj: Any) -> tuple[int, int]:
     usage = obj.get("usage")
     if isinstance(usage, dict):
         sources.append(usage)
+    llm_output = obj.get("llm_output")
+    if isinstance(llm_output, dict):
+        token_usage = llm_output.get("token_usage") or llm_output.get("usage")
+        if isinstance(token_usage, dict):
+            sources.append(token_usage)
     if not sources:
         return 0, 0
     return _tokens_from_mapping(sources[0])
 
 
-def extract_tokens(update: Any) -> dict[str, int]:
+def _usage_from_llm_response(response: Any) -> tuple[int, int]:
+    llm_output = getattr(response, "llm_output", None)
+    if isinstance(llm_output, dict):
+        prompt, completion = _tokens_from_mapping(
+            llm_output.get("token_usage") or llm_output.get("usage") or {}
+        )
+        if prompt or completion:
+            return prompt, completion
+    prompt = 0
+    completion = 0
+    generations = getattr(response, "generations", None) or []
+    for row in generations:
+        gens = row if isinstance(row, (list, tuple)) else [row]
+        for gen in gens:
+            extra_prompt, extra_completion = _usage_from_obj(getattr(gen, "message", None))
+            prompt += extra_prompt
+            completion += extra_completion
+            info = getattr(gen, "generation_info", None)
+            if isinstance(info, dict) and not extra_prompt and not extra_completion:
+                extra_prompt, extra_completion = _tokens_from_mapping(
+                    info.get("token_usage") or info.get("usage") or info
+                )
+                prompt += extra_prompt
+                completion += extra_completion
+    if prompt or completion:
+        return prompt, completion
+    return _usage_from_obj(response)
+
+
+class _UsageHandler(BaseCallbackHandler):
+    """Collect billed LLM tokens; attribute them to the probed node via TLS."""
+
+    raise_error = False
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+        self._by_node: dict[str, dict[str, int]] = {}
+
+    def _add(self, prompt: int, completion: int) -> None:
+        node = getattr(_capture_tls, "node", None) or "run"
+        with self._lock:
+            bucket = self._by_node.setdefault(
+                node, {"prompt": 0, "completion": 0, "calls": 0}
+            )
+            bucket["prompt"] += prompt
+            bucket["completion"] += completion
+            bucket["calls"] += 1
+
+    def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+        prompt, completion = _usage_from_llm_response(response)
+        self._add(prompt, completion)
+
+    def on_chat_model_end(self, response: Any, **kwargs: Any) -> None:
+        prompt, completion = _usage_from_llm_response(response)
+        self._add(prompt, completion)
+
+    def take(self, node: str) -> dict[str, int]:
+        with self._lock:
+            return self._by_node.pop(
+                node, {"prompt": 0, "completion": 0, "calls": 0}
+            )
+
+
+def _callback_config(
+    handler: _UsageHandler | None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    config: dict[str, Any] = dict(extra or {})
+    if handler is not None:
+        callbacks = list(config.get("callbacks") or [])
+        if handler not in callbacks:
+            callbacks.append(handler)
+        config["callbacks"] = callbacks
+    return config
+
+
+@contextmanager
+def _usage_scope(node: str | None, handler: _UsageHandler | None):
+    previous_node = getattr(_capture_tls, "node", None)
+    previous_usage = getattr(_capture_tls, "usage", None)
+    if node is not None:
+        _capture_tls.node = node
+    if handler is not None:
+        _capture_tls.usage = handler
+    try:
+        yield
+    finally:
+        _capture_tls.node = previous_node
+        _capture_tls.usage = previous_usage
+
+
+def _take_usage(node: str) -> dict[str, int]:
+    handler = getattr(_capture_tls, "usage", None)
+    take = getattr(handler, "take", None)
+    if not callable(take):
+        return {"prompt": 0, "completion": 0, "calls": 0}
+    bucket = take(node)
+    if not isinstance(bucket, dict):
+        return {"prompt": 0, "completion": 0, "calls": 0}
+    return bucket
+
+
+def extract_tokens(update: Any, extra: dict[str, int] | None = None) -> dict[str, Any]:
     prompt = 0
     completion = 0
     tool = 0
@@ -147,9 +281,9 @@ def extract_tokens(update: Any) -> dict[str, int]:
 
     if isinstance(update, dict):
         add(update)
-        extra = update.get("additional_kwargs")
-        if isinstance(extra, dict):
-            add(extra)
+        nested = update.get("additional_kwargs")
+        if isinstance(nested, dict):
+            add(nested)
         for message in extract_messages(update):
             add(message)
             kwargs = message.get("additional_kwargs")
@@ -161,12 +295,21 @@ def extract_tokens(update: Any) -> dict[str, int]:
                 if isinstance(kwargs, dict):
                     extra_prompt, extra_completion = _usage_from_obj(kwargs)
                 tool += tool_prompt + tool_completion + extra_prompt + extra_completion
-    return {
+    scraped_prompt, scraped_completion = prompt, completion
+    extra = extra or {}
+    extra_prompt = _as_int(extra.get("prompt"))
+    extra_completion = _as_int(extra.get("completion"))
+    prompt += extra_prompt
+    completion += extra_completion
+    tokens: dict[str, Any] = {
         "prompt": prompt,
         "completion": completion,
         "total": prompt + completion,
         "tool": tool,
     }
+    if scraped_prompt == 0 and scraped_completion == 0 and extra_prompt == 0 and extra_completion == 0:
+        tokens["unavailable"] = True
+    return tokens
 
 
 def _tool_call_name(call: dict) -> str:
@@ -289,8 +432,11 @@ def _attach_metrics(
     update: Any,
     memory_mb: float,
     memory_peak_mb: float = 0.0,
+    extra: dict[str, int] | None = None,
 ) -> dict:
-    tokens = extract_tokens(update)
+    if extra is None:
+        extra = _take_usage(str(step.get("node") or "run"))
+    tokens = extract_tokens(update, extra)
     tools, tool_latency_ms = extract_tool_metrics(update, step.get("elapsed_ms"))
     step["memory_mb"] = round(float(memory_mb or 0), 4)
     step["memory_peak_mb"] = round(float(memory_peak_mb or 0), 4)
@@ -795,14 +941,28 @@ def unused_targets(node: str, next_node: str | None, edges: list[tuple[str, str]
     return unused
 
 
-def invoke_node(app: Any, node_name: str, state: dict) -> dict:
+def invoke_node(
+    app: Any,
+    node_name: str,
+    state: dict,
+    config: dict[str, Any] | None = None,
+) -> dict:
     node = app.nodes[node_name]
+
+    def _call(target: Any) -> Any:
+        if config is None:
+            return target.invoke(state)
+        try:
+            return target.invoke(state, config)
+        except TypeError:
+            return target.invoke(state)
+
     if hasattr(node, "invoke"):
-        result = node.invoke(state)
+        result = _call(node)
         return result if isinstance(result, dict) else {"result": result}
     bound = getattr(node, "bound", None) or getattr(node, "runnable", None)
     if bound is not None and hasattr(bound, "invoke"):
-        result = bound.invoke(state)
+        result = _call(bound)
         return result if isinstance(result, dict) else {"result": result}
     raise RuntimeError(f"cannot invoke node {node_name!r}")
 
@@ -900,7 +1060,10 @@ def _execute_run(
     emit: Any,
 ) -> None:
     run_id = thread_id or uuid4().hex
-    config: dict[str, Any] = {"max_concurrency": max_concurrency}
+    usage = _UsageHandler()
+    config: dict[str, Any] = _callback_config(
+        usage, {"max_concurrency": max_concurrency}
+    )
     if has_checkpointer:
         config["configurable"] = {"thread_id": run_id}
     state = copy.deepcopy(user_input)
@@ -938,6 +1101,7 @@ def _execute_run(
     _capture_tls.clock0 = clock0
     _capture_tls.on_stdio = on_stdio
     _capture_tls.node = None
+    _capture_tls.usage = usage
     emit({"type": "start", "run_id": run_id, "input": jsonable(user_input), "started_at": _iso_from_wall(wall0, 0)})
     push({"type": "log", "t": 0, "src": "run", "text": "run started", "level": "info"})
     probes, restore_probes, probe_lock = _install_node_probes(
@@ -1011,6 +1175,7 @@ def _execute_run(
         _capture_tls.on_stdio = None
         _capture_tls.node = None
         _capture_tls.clock0 = None
+        _capture_tls.usage = None
 
     if run_error:
         push({"type": "log", "t": _elapsed_ms(clock0), "src": "run", "text": run_error, "level": "error"})
@@ -1125,8 +1290,12 @@ def replay_step(
     clock0 = time.perf_counter()
     wall0 = time.time()
     memory = _MemoryTrace()
+    usage = _UsageHandler()
     try:
-        update = invoke_node(app, step["node"], state_in)
+        with _usage_scope(step["node"], usage):
+            update = invoke_node(
+                app, step["node"], state_in, config=_callback_config(usage)
+            )
         if not isinstance(update, dict):
             update = {"value": update}
         run_error = None
@@ -1136,6 +1305,7 @@ def replay_step(
     finally:
         memory_mb, memory_peak_mb = memory.snapshot()
         memory.close()
+    extra = usage.take(step["node"])
     ended_ms = _elapsed_ms(clock0)
     state_out = copy.deepcopy(state_in) if run_error else merge_state(state_in, update)
     new_step = {
@@ -1150,7 +1320,7 @@ def replay_step(
         "unused": [],
     }
     _attach_timing(new_step, started_ms=0, ended_ms=ended_ms, wall_start=wall0)
-    _attach_metrics(new_step, update, memory_mb, memory_peak_mb)
+    _attach_metrics(new_step, update, memory_mb, memory_peak_mb, extra=extra)
     if run_error:
         new_step["error"] = run_error
     return {
@@ -1191,33 +1361,62 @@ def resume_from_step(
         except Exception:
             pass
 
-    raw: list[tuple[str, dict, dict, float, float, float]] = []
+    raw: list[tuple[str, dict, dict, float, float, float, dict[str, int]]] = []
     current = state
     run_error: str | None = None
     clock0 = time.perf_counter()
     wall0 = time.time()
+    usage = _UsageHandler()
     for recorded in remaining:
         incoming = _with_recorded_payload(current, recorded)
         memory = _MemoryTrace()
         try:
-            update = invoke_node(app, recorded["node"], incoming)
+            with _usage_scope(recorded["node"], usage):
+                update = invoke_node(
+                    app,
+                    recorded["node"],
+                    incoming,
+                    config=_callback_config(usage),
+                )
             if not isinstance(update, dict):
                 update = {"value": update}
         except Exception as exc:
             run_error = _format_error(exc)
             update = {"error": run_error}
             memory_mb, memory_peak_mb = memory.snapshot()
-            raw.append((recorded["node"], incoming, update, _elapsed_ms(clock0), memory_mb, memory_peak_mb))
+            extra = usage.take(recorded["node"])
+            raw.append(
+                (
+                    recorded["node"],
+                    incoming,
+                    update,
+                    _elapsed_ms(clock0),
+                    memory_mb,
+                    memory_peak_mb,
+                    extra,
+                )
+            )
             memory.close()
             break
         memory_mb, memory_peak_mb = memory.snapshot()
-        raw.append((recorded["node"], incoming, update, _elapsed_ms(clock0), memory_mb, memory_peak_mb))
+        extra = usage.take(recorded["node"])
+        raw.append(
+            (
+                recorded["node"],
+                incoming,
+                update,
+                _elapsed_ms(clock0),
+                memory_mb,
+                memory_peak_mb,
+                extra,
+            )
+        )
         memory.close()
         current = merge_state(current, update)
 
     current = copy.deepcopy(state)
     prev_end = 0.0
-    for index, (node, incoming, update, ended_ms, memory_mb, memory_peak_mb) in enumerate(raw):
+    for index, (node, incoming, update, ended_ms, memory_mb, memory_peak_mb, extra) in enumerate(raw):
         visits[node] = visits.get(node, 0) + 1
         next_node = raw[index + 1][0] if index + 1 < len(raw) else None
         state_in = copy.deepcopy(incoming)
@@ -1236,7 +1435,7 @@ def resume_from_step(
             "unused": unused_targets(node, next_node, edges),
         }
         _attach_timing(step, started_ms=started_ms, ended_ms=ended_ms, wall_start=wall0)
-        _attach_metrics(step, update, memory_mb, memory_peak_mb)
+        _attach_metrics(step, update, memory_mb, memory_peak_mb, extra=extra)
         if failed:
             step["error"] = str(update.get("error"))
         steps.append(step)
@@ -1261,8 +1460,10 @@ def resume_from_step(
 
 
 def _resume_with_checkpointer(app: Any, run: dict, step: dict, state_in: dict) -> dict:
-    config = {"configurable": {"thread_id": run["thread_id"]}}
-    update = invoke_node(app, step["node"], state_in)
+    usage = _UsageHandler()
+    config = _callback_config(usage, {"configurable": {"thread_id": run["thread_id"]}})
+    with _usage_scope(step["node"], usage):
+        update = invoke_node(app, step["node"], state_in, config=config)
     if not isinstance(update, dict):
         update = {"value": update}
     app.update_state(config, update, as_node=step["node"])

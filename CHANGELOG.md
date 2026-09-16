@@ -4,12 +4,14 @@
 
 ### Added
 - `graphviagent.toml` for project `root`, `pythonpath`, `env_file`, `context`, and explicit `[pipeline.*]` entries
+- LLM usage callbacks (`on_llm_end` / `on_chat_model_end`) so token counts follow billed `usage_metadata`, including replay and `with_structured_output`
 
 ### Changed
 - Require Python 3.11+ (`tomllib`)
 - Load `*_pipeline.py` with the file's directory (and toml `pythonpath`) on `sys.path`, independent of process cwd
 - Graph extract order is `build_graph()` / `get_graph()` / `create_graph()` / `__graph__`, then `GRAPH`, then a compiled `app` (`stream` + `invoke` only)
 - Failed or empty modules are not cached as a loaded pipeline
+- Steps with no observed token usage set `tokens.unavailable` instead of a silent 0
 
 ## 1.1.0-dev
 

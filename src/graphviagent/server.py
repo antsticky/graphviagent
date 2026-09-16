@@ -16,6 +16,7 @@ from graphviagent.load import LoadedPipeline, load_pipeline
 from graphviagent.record import MAX_RUN_THREADS, iter_run_events, record_run, replay_step, resume_from_step
 from graphviagent.render import ascii_tree, unrolled_mermaid
 from graphviagent.store import (
+    collect_stats,
     delete_run,
     delete_runs,
     import_run,
@@ -158,6 +159,8 @@ PAGE = r"""<!DOCTYPE html>
       --accent: #7c5cff;
       --accent-dim: rgba(124, 92, 255, 0.16);
       --danger: #f07178;
+      --tok-in: #86efac;
+      --tok-out: #047857;
     }
     * { box-sizing: border-box; }
     html, body { height: 100%; }
@@ -599,7 +602,7 @@ PAGE = r"""<!DOCTYPE html>
       position: absolute; top: -7px; right: -7px;
       min-width: 18px; height: 18px; padding: 0 5px; border-radius: 99px;
       background: #4f46e5; color: #fff; font-size: 10px; font-weight: 600;
-      display: grid; place-items: center;
+      display: grid; place-items: center; white-space: nowrap;
     }
     .g-card.idle { opacity: 0.55; }
     .g-card.taken { border-color: #3f3f68; }
@@ -745,10 +748,10 @@ PAGE = r"""<!DOCTYPE html>
       background: #6366f1; cursor: help;
     }
     .spark i.mb { background: #06b6d4; }
-    .spark i.peak { background: #38bdf8; }
-    .spark i.prompt { background: #86efac; }
-    .spark i.completion { background: #34d399; }
-    .spark i.tokens { background: #86efac; }
+    .spark i.peak { background: #c084fc; }
+    .spark i.prompt { background: var(--tok-in); }
+    .spark i.completion { background: var(--tok-out); }
+    .spark i.tokens { background: var(--tok-in); }
     .spark i.tool { background: #f59e0b; }
     .spark i.zero { opacity: 0.22; }
     .gantt-tip .tip-spark { width: 96px; height: 28px; margin-top: 8px; }
@@ -773,10 +776,10 @@ PAGE = r"""<!DOCTYPE html>
       background: #6366f1;
     }
     .spark-legend i.mb { background: #06b6d4; }
-    .spark-legend i.peak { background: #38bdf8; }
-    .spark-legend i.prompt { background: #86efac; }
-    .spark-legend i.completion { background: #34d399; }
-    .spark-legend i.tokens { background: #86efac; }
+    .spark-legend i.peak { background: #c084fc; }
+    .spark-legend i.prompt { background: var(--tok-in); }
+    .spark-legend i.completion { background: var(--tok-out); }
+    .spark-legend i.tokens { background: var(--tok-in); }
     .spark-legend i.tool { background: #f59e0b; }
     .pane-title { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
     pre, .json {
@@ -922,6 +925,241 @@ PAGE = r"""<!DOCTYPE html>
       flex: 1; min-width: 0; height: 34px; border-radius: 8px; border: 1px solid var(--line);
       background: var(--panel); color: var(--ink); font: 12px Inter, sans-serif; padding: 0 8px;
     }
+    .st-toolbar {
+      display: flex; align-items: flex-end; justify-content: space-between;
+      gap: 16px; flex-wrap: wrap; margin: 0 0 20px;
+    }
+    .st-toolbar .cmp-filter { margin: 0; max-width: 280px; }
+    .st-kpis {
+      display: grid; grid-template-columns: 1.6fr 1fr 1fr 1fr;
+      gap: 10px; margin: 0 0 16px;
+    }
+    .st-kpi {
+      background: #17171c; border: 1px solid var(--line); border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .st-kpi.hero { padding: 16px 18px 18px; }
+    .st-kpi b, .st-hero-value {
+      display: block; font-size: 22px; font-weight: 600; letter-spacing: -0.04em;
+      font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+    }
+    .st-kpi span, .st-kicker {
+      display: block; color: var(--muted); font-size: 11px;
+      text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600;
+    }
+    .st-kpi span { margin-top: 6px; }
+    .st-kicker { margin-bottom: 6px; }
+    .st-hero-split {
+      height: 8px; border-radius: 99px; overflow: hidden; display: flex;
+      background: #26262e; margin: 12px 0 8px;
+    }
+    .st-hero-split i { display: block; height: 100%; flex: 0 0 auto; min-width: 0; }
+    .st-hero-split i.in, .st-fill i.in { background: var(--tok-in); }
+    .st-hero-split i.out, .st-fill i.out { background: var(--tok-out); }
+    .st-hero-legend {
+      display: flex; gap: 14px; color: var(--muted); font-size: 12px;
+    }
+    .st-hero-legend em {
+      font-style: normal; font-family: "IBM Plex Mono", ui-monospace, monospace;
+      color: var(--ink); font-weight: 500;
+    }
+    .st-swatch {
+      display: inline-block; width: 8px; height: 8px; border-radius: 99px;
+      margin-right: 6px; vertical-align: middle;
+    }
+    .st-swatch.in { background: var(--tok-in); }
+    .st-swatch.out { background: var(--tok-out); }
+    .st-grid {
+      display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 14px; margin: 0 0 14px;
+    }
+    .st-card {
+      background: #17171c; border: 1px solid var(--line); border-radius: 10px;
+      padding: 16px 18px 18px; margin: 0 0 14px; min-width: 0;
+    }
+    .st-grid .st-card { margin: 0; }
+    .st-card-head {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      gap: 16px; margin: 0 0 14px;
+    }
+    .st-card h2 {
+      margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.02em;
+    }
+    .st-head-stat { text-align: right; flex: 0 0 auto; }
+    .st-head-stat b {
+      display: block; font-size: 20px; font-weight: 600; letter-spacing: -0.03em;
+      color: #c4b5fd;
+    }
+    .st-head-stat span {
+      color: var(--muted); font-size: 11px; text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .st-split {
+      height: 18px; border-radius: 7px; overflow: hidden; display: flex;
+      background: #26262e; margin: 0 0 12px; gap: 2px;
+    }
+    .st-split button {
+      border: 0; padding: 0; height: 100%; cursor: pointer; min-width: 6px;
+      background: var(--accent);
+    }
+    .st-split button.s0 { background: #7c5cff; }
+    .st-split button.s1 { background: #a78bfa; }
+    .st-split button.s2 { background: #6366f1; }
+    .st-split button.s3 { background: #818cf8; }
+    .st-split button.s4 { background: #c4b5fd; }
+    .st-split button.dim { opacity: 0.28; }
+    .st-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+    .st-chip {
+      border: 1px solid var(--line); background: #121216; color: var(--ink);
+      border-radius: 8px; padding: 6px 10px; cursor: pointer;
+      font: 500 12px Inter, sans-serif; display: flex; align-items: center; gap: 8px;
+    }
+    .st-chip:hover, .st-chip.active { border-color: #4a4a58; background: #1c1c24; }
+    .st-chip i {
+      width: 8px; height: 8px; border-radius: 99px; flex: 0 0 8px;
+    }
+    .st-chip i.s0 { background: #7c5cff; }
+    .st-chip i.s1 { background: #a78bfa; }
+    .st-chip i.s2 { background: #6366f1; }
+    .st-chip i.s3 { background: #818cf8; }
+    .st-chip i.s4 { background: #c4b5fd; }
+    .st-chip b {
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-weight: 500; font-size: 11px; color: var(--muted);
+    }
+    .st-why { display: grid; gap: 12px; }
+    .st-why-group { display: grid; gap: 4px; }
+    .st-why-row {
+      display: grid; grid-template-columns: minmax(0, 1fr) 40px;
+      gap: 8px; align-items: center;
+    }
+    .st-why-row.choice { grid-template-columns: minmax(0, 1fr) 42px 40px; }
+    .st-why-row.choice .st-why-text {
+      color: var(--ink); font-weight: 600; font-size: 13px;
+    }
+    .st-why-text {
+      min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-size: 12px; color: var(--muted);
+    }
+    .st-why-pct {
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 11px; color: var(--muted); text-align: right;
+    }
+    .st-why-n {
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 11px; color: var(--ink); text-align: right;
+    }
+    .st-why-bar {
+      grid-column: 1 / -1; height: 3px; background: #26262e; border-radius: 99px;
+      overflow: hidden;
+    }
+    .st-why-bar i { display: block; height: 100%; background: var(--accent); opacity: 0.7; }
+    .st-why-sub {
+      display: grid; gap: 4px;
+      margin: 2px 0 0 6px;
+      padding: 4px 0 0 10px;
+      border-left: 1px solid var(--line);
+    }
+    .st-why-eg {
+      font-size: 11px; color: #6b6b78;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .st-rank { display: grid; gap: 10px; }
+    .st-rank-row { display: grid; gap: 6px; min-width: 0; }
+    .st-rank-top {
+      display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+    }
+    .st-label {
+      min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-size: 12px; color: var(--ink); font-weight: 500;
+    }
+    .st-meta {
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 11px; color: var(--muted); white-space: nowrap;
+    }
+    .st-track {
+      height: 8px; background: #26262e; border-radius: 99px; overflow: hidden;
+      display: flex; min-width: 0;
+    }
+    .st-fill { height: 100%; display: flex; min-width: 2px; }
+    .st-fill i { display: block; height: 100%; }
+    .st-table-wrap { overflow: auto; }
+    .st-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .st-table th {
+      text-align: left; font-size: 11px; font-weight: 600; letter-spacing: 0.05em;
+      text-transform: uppercase; color: var(--muted); padding: 0 10px 10px;
+      border-bottom: 1px solid var(--line);
+    }
+    .st-table td { padding: 10px; border-bottom: 1px solid #222228; vertical-align: middle; }
+    .st-table tr.run { cursor: pointer; }
+    .st-table tr.run:hover td { background: #1c1c22; }
+    .st-table .num {
+      font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px; text-align: right;
+    }
+    .st-mini { width: 120px; }
+    .st-empty {
+      padding: 48px 24px; text-align: center; color: var(--muted);
+      background: #17171c; border: 1px dashed var(--line); border-radius: 10px;
+    }
+    .st-empty strong { display: block; color: var(--ink); font-size: 15px; margin-bottom: 6px; }
+    .st-map { margin: 0 0 18px; }
+    .st-map-title {
+      margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--muted);
+      letter-spacing: 0.04em; text-transform: uppercase;
+    }
+    .st-sum, .st-cost-sum {
+      display: grid;
+      grid-template-columns: max-content max-content minmax(0, 1fr);
+      align-items: end;
+      gap: 8px 28px;
+      margin: 0 0 10px;
+      padding: 12px 14px;
+      min-height: 64px;
+      box-sizing: border-box;
+      background: #17171c; border: 1px solid var(--line); border-radius: 10px;
+    }
+    .st-sum .fig b, .st-cost-sum .fig b {
+      display: block; font-size: 20px; font-weight: 600; letter-spacing: -0.04em;
+      line-height: 1.1;
+    }
+    .st-sum .fig span, .st-cost-sum .fig span {
+      display: block; margin-top: 2px; color: var(--muted);
+      font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600;
+    }
+    .st-sum .split, .st-cost-sum .split { min-width: 0; }
+    .st-sum .split .st-hero-split, .st-cost-sum .split .st-hero-split {
+      margin: 0 0 8px; width: 100%;
+    }
+    .st-hero-split i.ok { background: #4ade80; }
+    .st-hero-split i.fail { background: var(--danger); }
+    .st-sum .meta, .st-cost-sum .meta {
+      font-size: 12px; color: var(--muted);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .st-graph {
+      position: relative;
+      min-height: 360px;
+      background: #121216;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: auto;
+      scrollbar-gutter: stable;
+    }
+    .st-graph .gzoom {
+      display: flex;
+      justify-content: center;
+      padding: 8px 12px 28px;
+    }
+    .st-why-panel {
+      margin-top: 12px; padding: 12px 14px;
+      background: #17171c; border: 1px solid var(--line); border-radius: 10px;
+    }
+    .st-why-panel h3 {
+      margin: 0 0 8px; font-size: 13px; font-weight: 600;
+    }
+    @media (max-width: 900px) {
+      .st-kpis, .st-grid { grid-template-columns: 1fr; }
+    }
     .cmp-pickers {
       display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
       gap: 16px; margin-bottom: 22px; max-width: 100%;
@@ -1052,9 +1290,27 @@ PAGE = r"""<!DOCTYPE html>
         <button class="nav-link active" id="navTrace" type="button">Trace</button>
         <button class="nav-link" id="navPipelines" type="button">Runs</button>
         <button class="nav-link" id="navCompare" type="button">Compare</button>
+        <button class="nav-link" id="navStats" type="button">Statistics</button>
       </nav>
     </div>
   </header>
+  <section id="statsView" class="page" hidden>
+    <div class="page-inner">
+      <div class="st-toolbar">
+        <div class="cmp-filter">
+          <label for="statsPipe">Pipeline</label>
+          <select id="statsPipe">
+            <option value="">Select a pipeline</option>
+          </select>
+        </div>
+        <span class="view-switch">
+          <button type="button" class="ghost active" id="statsTabRouting">Routing</button>
+          <button type="button" class="ghost" id="statsTabCost">Cost</button>
+        </span>
+      </div>
+      <div id="statsBoard"></div>
+    </div>
+  </section>
   <section id="compareView" class="page" hidden>
     <div class="page-inner">
       <div class="cmp-filter">
@@ -1258,6 +1514,10 @@ PAGE = r"""<!DOCTYPE html>
     let changeSeq = 0;
     let fileChangeEvents = [];
     let compareRuns = [];
+    let statsData = { pipelines: [], runs: [], nodes: [], decisions: [], edges: [] };
+    let topoMarkerSeq = 0;
+    let statsTab = "routing";
+    let statsChoice = null;
     let graphZoom = 1;
     let graphPanX = 0;
     let graphPanY = 0;
@@ -1905,20 +2165,25 @@ PAGE = r"""<!DOCTYPE html>
     function viewFromHash() {
       if (location.hash === "#/runs" || location.hash === "#/pipelines") return "runs";
       if (location.hash === "#/compare") return "compare";
+      if (location.hash === "#/statistics" || location.hash === "#/stats") return "statistics";
       return "trace";
     }
 
     function showView(name) {
       if (name === "pipelines") name = "runs";
-      currentView = name === "runs" || name === "compare" ? name : "trace";
+      if (name === "stats") name = "statistics";
+      currentView = name === "runs" || name === "compare" || name === "statistics" ? name : "trace";
       $("traceView").hidden = currentView !== "trace";
       $("pipelinesView").hidden = currentView !== "runs";
       $("compareView").hidden = currentView !== "compare";
+      $("statsView").hidden = currentView !== "statistics";
       $("navTrace").classList.toggle("active", currentView === "trace");
       $("navPipelines").classList.toggle("active", currentView === "runs");
       $("navCompare").classList.toggle("active", currentView === "compare");
+      $("navStats").classList.toggle("active", currentView === "statistics");
       if (currentView === "runs") renderPipeBoard();
       if (currentView === "compare") loadCompare().catch((e) => alert(e.message));
+      if (currentView === "statistics") loadStats().catch((e) => alert(e.message));
       const hash = "#/" + currentView;
       if (location.hash !== hash) location.hash = hash;
     }
@@ -2829,7 +3094,7 @@ PAGE = r"""<!DOCTYPE html>
       return '.g-card[data-node="' + safe + '"]';
     }
 
-    function topologyModel(spec, run) {
+    function topologyModel(spec, run, overlay) {
       const rawNodes = ((spec && spec.nodes) || []).map(topoName).filter((name) => name && name !== "START" && name !== "END");
       const rawEdges = ((spec && spec.edges) || []).map((pair) => [topoName(pair[0]), topoName(pair[1])]).filter((pair) => pair[0] && pair[1] && pair[0] !== pair[1]);
       const seenEdge = {};
@@ -2848,18 +3113,30 @@ PAGE = r"""<!DOCTYPE html>
       });
       const adj = {};
       const backKey = {};
+      const parent = {};
       edges.forEach((pair) => { (adj[pair[0]] || (adj[pair[0]] = [])).push(pair[1]); });
       const depth = { START: 0 };
       const queue = ["START"];
       const visited = { START: 1 };
+      function topoAncestor(anc, node) {
+        let cur = node;
+        const seen = {};
+        while (cur && !seen[cur]) {
+          if (cur === anc) return true;
+          seen[cur] = 1;
+          cur = parent[cur];
+        }
+        return false;
+      }
       while (queue.length) {
         const from = queue.shift();
         (adj[from] || []).forEach((to) => {
           if (visited[to]) {
-            backKey[from + "->" + to] = 1;
+            if (topoAncestor(to, from)) backKey[from + "->" + to] = 1;
             return;
           }
           visited[to] = 1;
+          parent[to] = from;
           depth[to] = (depth[from] || 0) + 1;
           queue.push(to);
         });
@@ -2892,43 +3169,77 @@ PAGE = r"""<!DOCTYPE html>
       const visits = {};
       const lastStep = {};
       const errored = {};
-      steps.forEach((step) => {
-        if (!step || step.pending) return;
-        const name = topoName(step.node);
-        visits[name] = (visits[name] || 0) + 1;
-        lastStep[name] = step;
-        if (step.error) errored[name] = step;
-      });
       const pairCount = {};
-      const completed = steps.filter((step) => step && !step.pending);
-      for (let i = 0; i < completed.length - 1; i += 1) {
-        const key = topoName(completed[i].node) + "->" + topoName(completed[i + 1].node);
-        pairCount[key] = (pairCount[key] || 0) + 1;
-      }
-      if (completed.length) {
-        pairCount["START->" + topoName(completed[0].node)] = 1;
-        const last = topoName(completed[completed.length - 1].node);
-        const unusedLast = (completed[completed.length - 1].unused || []).map(topoName);
-        if (unusedLast.indexOf("END") < 0) pairCount[last + "->END"] = (pairCount[last + "->END"] || 0) + 1;
-      }
       const unusedFrom = {};
-      completed.forEach((step) => {
-        (step.unused || []).forEach((target) => {
-          unusedFrom[topoName(step.node) + "->" + topoName(target)] = 1;
+      if (overlay) {
+        Object.keys(overlay.nodeVisits || {}).forEach((name) => {
+          visits[topoName(name)] = overlay.nodeVisits[name] || 0;
         });
+        Object.keys(overlay.edgeCount || {}).forEach((key) => {
+          pairCount[key] = overlay.edgeCount[key] || 0;
+        });
+        edges.forEach((pair) => {
+          if (pair[0] === "START" && visits[pair[1]] && !pairCount["START->" + pair[1]]) {
+            pairCount["START->" + pair[1]] = visits[pair[1]];
+          }
+        });
+      } else {
+        steps.forEach((step) => {
+          if (!step || step.pending) return;
+          const name = topoName(step.node);
+          visits[name] = (visits[name] || 0) + 1;
+          lastStep[name] = step;
+          if (step.error) errored[name] = step;
+        });
+        const completed = steps.filter((step) => step && !step.pending);
+        for (let i = 0; i < completed.length - 1; i += 1) {
+          const key = topoName(completed[i].node) + "->" + topoName(completed[i + 1].node);
+          pairCount[key] = (pairCount[key] || 0) + 1;
+        }
+        if (completed.length) {
+          pairCount["START->" + topoName(completed[0].node)] = 1;
+          const last = topoName(completed[completed.length - 1].node);
+          const unusedLast = (completed[completed.length - 1].unused || []).map(topoName);
+          if (unusedLast.indexOf("END") < 0) pairCount[last + "->END"] = (pairCount[last + "->END"] || 0) + 1;
+        }
+        completed.forEach((step) => {
+          (step.unused || []).forEach((target) => {
+            unusedFrom[topoName(step.node) + "->" + topoName(target)] = 1;
+          });
+        });
+      }
+      const live = overlay
+        ? Object.keys(visits).some((name) => visits[name]) || Object.keys(pairCount).some((key) => pairCount[key])
+        : !!(run && steps.filter((step) => step && !step.pending).length);
+      const outTotal = {};
+      edges.forEach((pair) => {
+        outTotal[pair[0]] = (outTotal[pair[0]] || 0) + (pairCount[pair[0] + "->" + pair[1]] || 0);
       });
-      const live = !!(run && completed.length);
       const marked = edges.map((pair) => {
         const key = pair[0] + "->" + pair[1];
         const count = pairCount[key] || 0;
         const back = (depth[pair[1]] || 0) <= (depth[pair[0]] || 0);
         let kind = "idle";
-        if (live && count) kind = count > 1 ? "parallel" : (back ? "back" : "taken");
-        else if (live && (visits[pair[0]] || pair[0] === "START") && (unusedFrom[key] || !visits[pair[1]])) {
+        let statLabel = "";
+        if (overlay) {
+          const fromSeen = visits[pair[0]] || pair[0] === "START";
+          if (count) {
+            const siblings = edges.filter((item) => item[0] === pair[0]);
+            const maxOut = Math.max.apply(null, siblings.map((item) => pairCount[item[0] + "->" + item[1]] || 0).concat([0]));
+            kind = back ? "back" : (count === maxOut ? "taken" : "parallel");
+            if (overlay.mode === "routing" && outTotal[pair[0]]) {
+              statLabel = Math.round((count / outTotal[pair[0]]) * 100) + "%";
+            }
+          } else if (fromSeen) {
+            kind = "skipped";
+          }
+        } else if (live && count) {
+          kind = count > 1 ? "parallel" : (back ? "back" : "taken");
+        } else if (live && (visits[pair[0]] || pair[0] === "START") && (unusedFrom[key] || !visits[pair[1]])) {
           if (pair[1] === "END" && count) kind = "taken";
           else if (pair[1] !== "END" || unusedFrom[key]) kind = "skipped";
         }
-        return { from: pair[0], to: pair[1], kind: kind, visits: count, back: back };
+        return { from: pair[0], to: pair[1], kind: kind, visits: count, back: back, statLabel: statLabel };
       });
       const nodes = names.map((name) => {
         let status = "idle";
@@ -2940,6 +3251,7 @@ PAGE = r"""<!DOCTYPE html>
           visits: visits[name] || 0,
           lastStep: lastStep[name] || null,
           error: !!(errored[name]),
+          detail: overlay && overlay.nodeDetail ? (overlay.nodeDetail[name] || "") : "",
         };
       });
       return { layers: layers, edges: marked, nodes: nodes, live: live };
@@ -2999,15 +3311,16 @@ PAGE = r"""<!DOCTYPE html>
         flow.insertBefore(svg, flow.firstChild);
       }
       svg.innerHTML = "";
-      const width = Math.max(flow.scrollWidth, flow.clientWidth);
-      const height = Math.max(flow.scrollHeight, flow.clientHeight);
+      const width = Math.max(1, flow.clientWidth || flow.scrollWidth);
+      const height = Math.max(1, flow.clientHeight || flow.scrollHeight);
       svg.setAttribute("width", String(width));
       svg.setAttribute("height", String(height));
       svg.setAttribute("viewBox", "0 0 " + width + " " + height);
       const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+      const markerUid = "t" + (topoMarkerSeq += 1);
       ["taken", "parallel", "skipped", "back", "idle"].forEach((kind) => {
         const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
-        marker.setAttribute("id", "topo-arrow-" + kind);
+        marker.setAttribute("id", "topo-arrow-" + kind + "-" + markerUid);
         marker.setAttribute("markerWidth", "8");
         marker.setAttribute("markerHeight", "8");
         marker.setAttribute("refX", "7");
@@ -3045,7 +3358,7 @@ PAGE = r"""<!DOCTYPE html>
         const kind = back ? "back" : edge.kind;
         const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
         path.setAttribute("class", "topo-edge " + kind);
-        path.setAttribute("marker-end", "url(#topo-arrow-" + kind + ")");
+        path.setAttribute("marker-end", "url(#topo-arrow-" + kind + "-" + markerUid + ")");
         let lx;
         let ly;
         if (back) {
@@ -3080,7 +3393,8 @@ PAGE = r"""<!DOCTYPE html>
         }
         svg.appendChild(path);
         let label = "";
-        if (edge.kind === "parallel" && edge.visits > 1) label = "×" + edge.visits;
+        if (edge.statLabel) label = edge.statLabel;
+        else if (edge.kind === "parallel" && edge.visits > 1) label = "×" + edge.visits;
         else if (edge.kind === "skipped") label = "not taken";
         else if (back && edge.visits > 1) label = "loop ×" + edge.visits;
         else if (back) label = "loop";
@@ -4056,6 +4370,413 @@ PAGE = r"""<!DOCTYPE html>
       return compareRuns.filter((run) => run.pipeline === pipe);
     }
 
+    function fileIdForStem(stem) {
+      const found = (pipelines || []).find((p) => p.stem === stem);
+      return found ? found.id : stem;
+    }
+
+    function formatTok(value) {
+      const n = Number(value) || 0;
+      if (!Number.isFinite(n)) return "0";
+      const abs = Math.abs(n);
+      if (abs >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, "") + "M";
+      if (abs >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
+      if (abs >= 100 || Number.isInteger(n)) return String(Math.round(n));
+      return n.toFixed(1).replace(/\.0$/, "");
+    }
+
+    function avgTok(total, count) {
+      const n = Number(count) || 0;
+      if (!n) return 0;
+      return (Number(total) || 0) / n;
+    }
+
+    function statsPipeFilter() {
+      return ($("statsPipe") && $("statsPipe").value) || "";
+    }
+
+    function statsMatchesPipe(row) {
+      const pipe = statsPipeFilter();
+      return !!pipe && row.pipeline === pipe;
+    }
+
+    function fillStatsPipeFilter() {
+      const sel = $("statsPipe");
+      const keep = sel.value || "";
+      const stems = Array.from(new Set([
+        ...(pipelines || []).map((p) => p.stem),
+        ...(statsData.pipelines || []).map((row) => row.pipeline),
+        ...(statsData.runs || []).map((row) => row.pipeline),
+      ].filter(Boolean))).sort();
+      sel.innerHTML = '<option value="">Select a pipeline</option>';
+      stems.forEach((stem) => {
+        const opt = document.createElement("option");
+        opt.value = stem;
+        opt.textContent = stem;
+        sel.appendChild(opt);
+      });
+      sel.value = stems.indexOf(keep) >= 0 ? keep : "";
+    }
+
+    function setStatsTab(name) {
+      statsTab = name === "cost" ? "cost" : "routing";
+      $("statsTabRouting").classList.toggle("active", statsTab === "routing");
+      $("statsTabCost").classList.toggle("active", statsTab === "cost");
+      renderStats();
+    }
+
+    function pipelineGraph(stem) {
+      const found = (pipelines || []).find((item) => item.stem === stem);
+      return found && found.graph && (found.graph.nodes || []).length ? found.graph : null;
+    }
+
+    function statsChoiceTarget(from, choice, spec) {
+      let to = topoName(choice);
+      if (to === "done" || to === "end") to = "END";
+      const edges = ((spec && spec.edges) || []).map((pair) => [topoName(pair[0]), topoName(pair[1])]);
+      if (edges.some((pair) => pair[0] === from && pair[1] === to)) return to;
+      const lower = String(choice || "").toLowerCase();
+      const match = edges.find((pair) => pair[0] === from && topoName(pair[1]).toLowerCase() === lower);
+      return match ? match[1] : to;
+    }
+
+    function inferStatsEdges(spec, visits, edgeCount, hasPath) {
+      const edges = ((spec && spec.edges) || []).map((pair) => [topoName(pair[0]), topoName(pair[1])]);
+      const outgoing = {};
+      edges.forEach((pair) => {
+        (outgoing[pair[0]] || (outgoing[pair[0]] = [])).push(pair[1]);
+      });
+      if (hasPath) {
+        (outgoing.START || []).forEach((to) => {
+          if (!edgeCount["START->" + to] && visits[to]) edgeCount["START->" + to] = visits[to];
+        });
+        return;
+      }
+      Object.keys(outgoing).forEach((from) => {
+        const outs = outgoing[from];
+        const fromVisits = from === "START" ? 0 : (visits[from] || 0);
+        if (from !== "START" && !fromVisits) return;
+        const missing = outs.filter((to) => !edgeCount[from + "->" + to]);
+        if (!missing.length) return;
+        if (outs.length === 1) {
+          const to = outs[0];
+          if (from === "START") {
+            if (visits[to]) edgeCount[from + "->" + to] = visits[to];
+            return;
+          }
+          if (to === "END") {
+            edgeCount[from + "->" + to] = fromVisits;
+            return;
+          }
+          if (visits[to]) edgeCount[from + "->" + to] = Math.min(fromVisits, visits[to]);
+          return;
+        }
+        if (outs.some((to) => edgeCount[from + "->" + to])) return;
+        missing.forEach((to) => {
+          const destVisits = to === "END" ? fromVisits : (visits[to] || 0);
+          if (destVisits) edgeCount[from + "->" + to] = destVisits;
+        });
+      });
+    }
+
+    function statsOverlayFor(stem, mode) {
+      const spec = pipelineGraph(stem);
+      const edgeCount = {};
+      const nodeVisits = {};
+      const nodeDetail = {};
+      (statsData.nodes || []).filter((row) => row.pipeline === stem).forEach((row) => {
+        const name = topoName(row.node);
+        nodeVisits[name] = row.visits || 0;
+        if (mode === "cost") {
+          const billed = Math.max(0, (Number(row.visits) || 0) - (Number(row.unavailable) || 0));
+          if (row.unavailable && !row.total) nodeDetail[name] = "no usage";
+          else if (billed) {
+            nodeDetail[name] = "avg " + formatTok(avgTok(row.prompt, billed)) +
+              " in · " + formatTok(avgTok(row.completion, billed)) + " out";
+          } else {
+            nodeDetail[name] = formatTok(row.prompt) + " in · " + formatTok(row.completion) + " out";
+          }
+        }
+      });
+      const byNode = {};
+      const decisionVisits = {};
+      (statsData.decisions || []).filter((row) => row.pipeline === stem).forEach((row) => {
+        const from = topoName(row.node);
+        (byNode[from] || (byNode[from] = [])).push(row);
+        decisionVisits[from] = (decisionVisits[from] || 0) + (Number(row.count) || 0);
+      });
+      Object.keys(decisionVisits).forEach((name) => {
+        if (!nodeVisits[name]) nodeVisits[name] = decisionVisits[name];
+      });
+      const pathEdges = (statsData.edges || []).filter((row) => row.pipeline === stem);
+      if (pathEdges.length) {
+        pathEdges.forEach((row) => {
+          const from = topoName(row.from || row.src);
+          const to = topoName(row.to || row.dst);
+          if (!from || !to) return;
+          const key = from + "->" + to;
+          edgeCount[key] = (edgeCount[key] || 0) + (Number(row.count) || 0);
+        });
+      } else {
+        (statsData.decisions || []).filter((row) => row.pipeline === stem).forEach((row) => {
+          const from = topoName(row.node);
+          const to = statsChoiceTarget(from, row.choice, spec);
+          const key = from + "->" + to;
+          edgeCount[key] = (edgeCount[key] || 0) + (Number(row.count) || 0);
+        });
+      }
+      inferStatsEdges(spec, nodeVisits, edgeCount, pathEdges.length > 0);
+      if (mode === "routing") {
+        Object.keys(byNode).forEach((name) => {
+          const rows = byNode[name];
+          const total = rows.reduce((sum, row) => sum + (Number(row.count) || 0), 0);
+          if (!total) return;
+          rows.sort((a, b) => (b.count || 0) - (a.count || 0));
+          const top = rows[0];
+          nodeDetail[name] = Math.round((top.count / total) * 100) + "% " + top.choice;
+        });
+      }
+      return { mode: mode, spec: spec, edgeCount: edgeCount, nodeVisits: nodeVisits, nodeDetail: nodeDetail };
+    }
+
+    function renderStatsTopo(target, spec, overlay, stem) {
+      const model = topologyModel(spec, null, overlay);
+      if (!model.layers.length) {
+        target.innerHTML = '<p class="empty">No graph for this pipeline.</p>';
+        return;
+      }
+      const byName = {};
+      model.nodes.forEach((node) => { byName[node.name] = node; });
+      const flow = document.createElement("div");
+      flow.className = "gflow topo";
+      flow._topoEdges = model.edges;
+      model.layers.forEach((layer) => {
+        const row = document.createElement("div");
+        row.className = "topo-layer";
+        layer.forEach((name) => {
+          if (name === "START" || name === "END") {
+            const cap = graphCap(name === "START" ? "Start" : "End");
+            cap.dataset.node = name;
+            row.appendChild(cap);
+            return;
+          }
+          const info = byName[name] || { name: name, status: "idle", visits: 0, detail: "" };
+          const skipped = info.status === "skipped";
+          const card = graphCard({
+            node: name,
+            reason: info.detail || (skipped ? "not taken" : ""),
+            step_id: "",
+          }, skipped);
+          card.dataset.node = name;
+          if (info.status === "idle") card.classList.add("idle");
+          if (info.status === "taken") card.classList.add("taken");
+          if (statsChoice && statsChoice.node === name && statsChoice.pipeline === stem) {
+            card.classList.add("selected");
+          }
+          card.onclick = () => {
+            const next = { node: name, choice: "", pipeline: stem };
+            if (statsChoice && statsChoice.node === name && statsChoice.pipeline === stem) statsChoice = null;
+            else statsChoice = next;
+            renderStats();
+          };
+          const wrap = document.createElement("div");
+          wrap.className = "topo-node";
+          wrap.appendChild(card);
+          if (overlay.mode === "cost" && info.visits) {
+            const tok = (statsData.nodes || []).find((row) => row.pipeline === stem && topoName(row.node) === name);
+            if (tok && tok.total) {
+              const badge = document.createElement("span");
+              badge.className = "g-badge";
+              badge.title = "node total";
+              badge.textContent = "Σ " + formatTok(tok.total);
+              wrap.appendChild(badge);
+            }
+          } else if (info.visits > 1) {
+            const badge = document.createElement("span");
+            badge.className = "g-badge";
+            badge.textContent = "×" + info.visits;
+            wrap.appendChild(badge);
+          }
+          row.appendChild(wrap);
+        });
+        flow.appendChild(row);
+      });
+      target.innerHTML = "";
+      const wrap = document.createElement("div");
+      wrap.className = "gzoom";
+      wrap.appendChild(flow);
+      target.appendChild(wrap);
+      requestAnimationFrame(() => drawTopoEdges(flow));
+    }
+
+    function statsReasonGroups(row) {
+      if (row.groups && row.groups.length) return row.groups;
+      return (row.reasons || []).map((item) => ({
+        text: item.text,
+        count: item.count,
+        unique: 1,
+        examples: [item.text],
+      }));
+    }
+
+    function statsReasonPanel(stem, node) {
+      const rows = (statsData.decisions || []).filter((row) =>
+        row.pipeline === stem && topoName(row.node) === node
+      );
+      if (!rows.length) return "";
+      rows.sort((a, b) => (b.count || 0) - (a.count || 0));
+      const total = rows.reduce((sum, row) => sum + (Number(row.count) || 0), 0) || 1;
+      const max = Math.max.apply(null, rows.map((row) => Number(row.count) || 0).concat([1]));
+      const body = rows.map((row) => {
+        const count = Number(row.count) || 0;
+        const pct = Math.round((count / total) * 100);
+        const groups = statsReasonGroups(row);
+        const skipSub = groups.length === 1 && (groups[0].unique || 1) === 1 &&
+          (!groups[0].text || groups[0].text === row.choice);
+        const nested = skipSub ? "" : groups.map((item) => {
+          const unique = Number(item.unique) || 1;
+          const samples = (item.examples || []).slice(0, 2);
+          const eg = unique > 1
+            ? '<div class="st-why-eg">' + escapeHtml(samples.join(" · ")) +
+              (unique > samples.length ? " · +" + (unique - samples.length) + " more" : "") +
+              "</div>"
+            : "";
+          return '<div class="st-why-row sub"><div class="st-why-text" title="' +
+            escapeHtml(item.text) + '">' + escapeHtml(item.text) +
+            '</div><div class="st-why-n">' + (item.count || 0) + "</div></div>" + eg;
+        }).join("");
+        return '<div class="st-why-group"><div class="st-why-row choice">' +
+          '<div class="st-why-text">' + escapeHtml(row.choice) + "</div>" +
+          '<div class="st-why-pct">' + pct + "%</div>" +
+          '<div class="st-why-n">' + count + "</div>" +
+          '<div class="st-why-bar"><i style="width:' +
+          Math.max(4, Math.round((count / max) * 100)) + '%"></i></div></div>' +
+          (nested ? '<div class="st-why-sub">' + nested + "</div>" : "") +
+          "</div>";
+      }).join("");
+      return '<div class="st-why-panel"><h3>' + escapeHtml(node) +
+        " · " + total + " decisions</h3><div class=\"st-why\">" +
+        body + "</div></div>";
+    }
+
+    function statsPipeRow(stem) {
+      return (statsData.pipelines || []).find((row) => row.pipeline === stem) || {
+        pipeline: stem,
+        runs: 0,
+        prompt: 0,
+        completion: 0,
+        total: 0,
+        usage_runs: 0,
+        unavailable_runs: 0,
+      };
+    }
+
+    function statsRunOutcomes(stem) {
+      const rows = (statsData.runs || []).filter((row) => row.pipeline === stem);
+      const out = { ok: 0, fail: 0, paused: 0, total: rows.length };
+      rows.forEach((row) => {
+        if (row.status === "error") out.fail += 1;
+        else if (row.status === "paused") out.paused += 1;
+        else out.ok += 1;
+      });
+      return out;
+    }
+
+    function statsRoutingSummary(stem) {
+      const row = statsPipeRow(stem);
+      const runs = Number(row.runs) || 0;
+      const visits = (statsData.nodes || [])
+        .filter((item) => item.pipeline === stem)
+        .reduce((sum, item) => sum + (Number(item.visits) || 0), 0);
+      const out = statsRunOutcomes(stem);
+      const decided = out.ok + out.fail;
+      const okPct = decided ? Math.round((out.ok / decided) * 100) : 0;
+      const failPct = decided ? (100 - okPct) : 0;
+      let meta = out.ok + " ok · " + out.fail + " failed";
+      if (out.paused) meta += " · " + out.paused + " paused";
+      const el = document.createElement("div");
+      el.className = "st-sum";
+      el.innerHTML =
+        '<div class="fig"><b>' + escapeHtml(String(runs)) + "</b><span>grand total</span></div>" +
+        '<div class="fig"><b>' + escapeHtml(formatTok(avgTok(visits, runs))) + "</b><span>avg node count</span></div>" +
+        '<div class="split"><div class="st-hero-split"><i class="ok" style="width:' + okPct +
+        '%"></i><i class="fail" style="width:' + failPct +
+        '%"></i></div><div class="meta">' + escapeHtml(meta) + "</div></div>";
+      return el;
+    }
+
+    function statsCostSummary(stem) {
+      const row = statsPipeRow(stem);
+      const runs = Number(row.runs) || 0;
+      const usage = Number(row.usage_runs) || 0;
+      const denom = usage || runs;
+      const prompt = Number(row.prompt) || 0;
+      const completion = Number(row.completion) || 0;
+      const total = Number(row.total) || 0;
+      const missing = Number(row.unavailable_runs) || 0;
+      const sum = prompt + completion;
+      const inPct = sum ? Math.round((prompt / sum) * 100) : 0;
+      const outPct = sum ? (100 - inPct) : 0;
+      let meta = formatTok(prompt) + " in · " + formatTok(completion) + " out · " +
+        runs + " run" + (runs === 1 ? "" : "s");
+      if (usage && usage !== runs) meta += " · " + usage + " with usage";
+      else if (missing && !usage) meta += " · no usage recorded";
+      const el = document.createElement("div");
+      el.className = "st-sum";
+      el.innerHTML =
+        '<div class="fig"><b>' + escapeHtml(formatTok(total)) + "</b><span>grand total</span></div>" +
+        '<div class="fig"><b>' + escapeHtml(formatTok(avgTok(total, denom))) + "</b><span>avg / run</span></div>" +
+        '<div class="split"><div class="st-hero-split"><i class="in" style="width:' + inPct +
+        '%"></i><i class="out" style="width:' + outPct +
+        '%"></i></div><div class="meta">' + escapeHtml(meta) + "</div></div>";
+      return el;
+    }
+
+    function renderStatsMaps(mode) {
+      const board = $("statsBoard");
+      const pipe = statsPipeFilter();
+      if (!pipe || !pipelineGraph(pipe)) {
+        board.innerHTML = "";
+        return;
+      }
+      board.innerHTML = "";
+      const spec = pipelineGraph(pipe);
+      const overlay = statsOverlayFor(pipe, mode);
+      const map = document.createElement("div");
+      map.className = "st-map";
+      if (mode === "cost") map.appendChild(statsCostSummary(pipe));
+      else map.appendChild(statsRoutingSummary(pipe));
+      const graph = document.createElement("div");
+      graph.className = "st-graph";
+      map.appendChild(graph);
+      if (mode === "routing" && statsChoice && statsChoice.pipeline === pipe && statsChoice.node) {
+        const extra = document.createElement("div");
+        extra.innerHTML = statsReasonPanel(pipe, statsChoice.node);
+        if (extra.firstChild) map.appendChild(extra.firstChild);
+      }
+      board.appendChild(map);
+      renderStatsTopo(graph, spec, overlay, pipe);
+    }
+
+    function renderStatsRouting() {
+      renderStatsMaps("routing");
+    }
+
+    function renderStatsCost() {
+      renderStatsMaps("cost");
+    }
+
+    function renderStats() {
+      if (statsTab === "cost") renderStatsCost();
+      else renderStatsRouting();
+    }
+
+    async function loadStats() {
+      statsData = await api("/api/stats");
+      fillStatsPipeFilter();
+      renderStats();
+    }
+
     function fillComparePipeFilter() {
       const sel = $("cmpPipe");
       const keep = sel.value || "all";
@@ -4299,6 +5020,7 @@ PAGE = r"""<!DOCTYPE html>
       renderRun(currentRun);
       if (currentView === "runs") renderPipeBoard();
       if (currentView === "compare") renderCompare().catch(() => {});
+      if (currentView === "statistics") loadStats().catch(() => {});
     }
 
     async function pollScan() {
@@ -4469,6 +5191,13 @@ PAGE = r"""<!DOCTYPE html>
     $("navTrace").onclick = () => showView("trace");
     $("navPipelines").onclick = () => showView("runs");
     $("navCompare").onclick = () => showView("compare");
+    $("navStats").onclick = () => showView("statistics");
+    $("statsPipe").onchange = () => {
+      statsChoice = null;
+      renderStats();
+    };
+    $("statsTabRouting").onclick = () => setStatsTab("routing");
+    $("statsTabCost").onclick = () => setStatsTab("cost");
     document.addEventListener("click", async (event) => {
       const src = event.target.closest && event.target.closest(".src-link");
       if (src) {
@@ -4864,6 +5593,12 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                 self._json(404, {"error": "run not found"})
                 return
             self._json(200, self._with_render(run))
+            return
+        if parsed.path == "/api/stats":
+            query = parse_qs(parsed.query)
+            file_id = (query.get("file") or [""])[0]
+            stem = self._stem_for_file_id(file_id) if file_id else None
+            self._json(200, collect_stats(self.workspace, stem or None))
             return
         self._json(404, {"error": "not found"})
 

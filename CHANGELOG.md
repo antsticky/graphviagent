@@ -5,6 +5,8 @@
 ### Added
 - Origin / `Host` check on the local UI so other websites cannot trigger runs; `--host 0.0.0.0` requires `--expose` and prints a warning
 - `schema_version` (currently `1`) and `gva_version` on saved runs; older files still load, newer schemas are refused
+- Statistics page (`#/statistics`): Routing histogram of `choice` / `decisions`, and Cost view of in/out tokens per node, run, and pipeline
+- `examples/tokens_pipeline.py` — dummy random token usage on each node so Cost has numbers without an LLM
 
 ### Fixed
 - `load_run` returns `None` for truncated or invalid JSON instead of raising (open/compare 404, not 500)

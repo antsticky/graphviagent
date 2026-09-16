@@ -145,6 +145,10 @@ Failed nodes stay in history and show as red.
 
 Open **Compare**. Filter by pipeline (default **all**). When a pipeline is selected, Run A and Run B only list that pipeline’s runs. Diff input, path, per-node output, and timing. If a node ran more than once (loop or branch), each visit is aligned separately. Hover a cell and use **Copy**.
 
+### Statistics
+
+Open **Statistics**. Choose a pipeline — there is no **all** view. **Routing** and **Cost** draw the same topology as Trace. Routing shows run count, average node visits per run, and a success/failed split; Cost writes average in/out tokens on each node, a total badge, and a pipeline grand total / average per run. Click a node on Routing to see branches grouped together, with similar `reason` text collapsed into a pattern.
+
 ## Where runs are stored
 
 Runs are written under the folder you served or ran from:
@@ -200,6 +204,7 @@ graphviagent serve examples
 ```
 
 - `examples/dummy_pipeline.py` — name-length branch and a polish loop
+- `examples/tokens_pipeline.py` — dummy random `usage` prompt/completion on each node (Cost view)
 - `examples/echo_pipeline.py` — reverse a `text` field
 - `examples/math_pipeline.py` — add or divide; `{a: 12, b: 0, op: "div"}` raises
 - `examples/ratio_pipeline.py` — part / total; `{total: 0}` raises

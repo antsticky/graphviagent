@@ -336,73 +336,124 @@
       color: #fdba74; background: rgba(249, 115, 22, 0.16);
       border: 1px solid #9a3412; border-radius: 999px; padding: 2px 8px;
     }
+    #manual .sell {
+      font-size: 30px; font-weight: 600; letter-spacing: -0.035em;
+      line-height: 1.18; max-width: 22em; margin: 0 0 10px;
+    }
+    #manual .sell-sub {
+      color: var(--muted); font-size: 14px; margin: 0 0 20px; max-width: 46em;
+    }
     .tour-chips {
-      display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 22px;
+      display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 28px;
       scroll-margin-top: 56px;
     }
     .tour-chip {
-      height: 32px; padding: 0 14px; border-radius: 8px;
+      height: 36px; padding: 0 14px 0 8px; border-radius: 10px;
       font: 600 12px Inter, sans-serif; text-decoration: none;
       display: inline-flex; align-items: center; gap: 8px;
       border: 1px solid; transition: filter 0.15s ease, transform 0.15s ease;
     }
-    .tour-chip:hover { filter: brightness(1.12); transform: translateY(-1px); }
-    .tour-chip.trace:hover { color: #fdba74; }
-    .tour-chip.runs:hover { color: #a5f3fc; }
-    .tour-chip.stats:hover { color: #e9d5ff; }
-    .tour-chip.compare:hover { color: #ddd6fe; }
-    .tour-chip i {
-      width: 7px; height: 7px; border-radius: 99px; display: inline-block;
+    .tour-chip:hover { filter: brightness(1.12); transform: translateY(-1px); color: inherit; }
+    .tour-chip .n {
+      width: 22px; height: 22px; border-radius: 7px;
+      display: grid; place-items: center;
+      font: 600 10px "IBM Plex Mono", ui-monospace, monospace;
+      background: rgba(0, 0, 0, 0.32);
     }
     .tour-chip.trace { background: rgba(249, 115, 22, 0.16); border-color: #9a3412; color: #fdba74; }
-    .tour-chip.trace i { background: #f97316; }
+    .tour-chip.replay { background: rgba(251, 191, 36, 0.14); border-color: #854d0e; color: #fde68a; }
     .tour-chip.runs { background: rgba(6, 182, 212, 0.16); border-color: #155e75; color: #a5f3fc; }
-    .tour-chip.runs i { background: #22d3ee; }
     .tour-chip.stats { background: rgba(192, 132, 252, 0.16); border-color: #6b21a8; color: #e9d5ff; }
-    .tour-chip.stats i { background: #c084fc; }
     .tour-chip.compare { background: rgba(124, 92, 255, 0.16); border-color: #4c3d86; color: #ddd6fe; }
-    .tour-chip.compare i { background: #a78bfa; }
     .tour-card {
-      display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 28px;
-      align-items: center;
-      background: linear-gradient(180deg, #1c1c26, #15151a);
+      display: grid; grid-template-columns: 1.12fr 0.88fr; gap: 22px;
+      align-items: stretch;
       border: 1px solid var(--line);
-      border-radius: 16px; padding: 24px 26px;
-      margin: 0 0 14px; overflow: hidden; position: relative;
+      border-radius: 18px; padding: 20px;
+      margin: 0 0 16px; overflow: hidden; position: relative;
       scroll-margin-top: 104px;
       transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
-    }
-    .tour-card:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
     }
     .tour-card::before {
       content: "";
       position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
     }
-    .tour-card.trace { border-color: #3a2418; }
+    .tour-card::after {
+      content: "";
+      position: absolute; inset: 0; pointer-events: none;
+      background: radial-gradient(560px 260px at 100% -8%, var(--tour-glow), transparent 68%);
+    }
+    .tour-card.flip { grid-template-columns: 0.88fr 1.12fr; }
+    .tour-card.flip::after {
+      background: radial-gradient(560px 260px at 0% -8%, var(--tour-glow), transparent 68%);
+    }
+    .tour-copy, .tour-viz { position: relative; z-index: 1; }
+    .tour-card.flip .tour-copy { order: 2; }
+    .tour-card.flip .tour-viz { order: 1; }
+    .tour-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 22px 56px rgba(0, 0, 0, 0.38);
+    }
+    .tour-card.trace {
+      --tour-glow: rgba(249, 115, 22, 0.22);
+      border-color: #3a2418; background: linear-gradient(180deg, #1d1814, #141418);
+    }
     .tour-card.trace::before { background: #f97316; }
     .tour-card.trace:hover { border-color: #9a3412; }
-    .tour-card.runs { border-color: #16323a; }
+    .tour-card.replay {
+      --tour-glow: rgba(251, 191, 36, 0.18);
+      border-color: #3a2e12; background: linear-gradient(180deg, #1d1a12, #141418);
+    }
+    .tour-card.replay::before { background: #fbbf24; }
+    .tour-card.replay:hover { border-color: #854d0e; }
+    .tour-card.runs {
+      --tour-glow: rgba(34, 211, 238, 0.16);
+      border-color: #16323a; background: linear-gradient(180deg, #121a1e, #141418);
+    }
     .tour-card.runs::before { background: #22d3ee; }
     .tour-card.runs:hover { border-color: #155e75; }
-    .tour-card.stats { border-color: #2e1a44; }
+    .tour-card.stats {
+      --tour-glow: rgba(192, 132, 252, 0.16);
+      border-color: #2e1a44; background: linear-gradient(180deg, #1a1424, #141418);
+    }
     .tour-card.stats::before { background: #c084fc; }
     .tour-card.stats:hover { border-color: #6b21a8; }
-    .tour-card.compare { border-color: #2a2450; }
+    .tour-card.compare {
+      --tour-glow: rgba(167, 139, 250, 0.16);
+      border-color: #2a2450; background: linear-gradient(180deg, #161426, #141418);
+    }
     .tour-card.compare::before { background: #a78bfa; }
     .tour-card.compare:hover { border-color: #4c3d86; }
     .tour-kicker {
       font-size: 10px; font-weight: 600; letter-spacing: 0.12em;
       text-transform: uppercase; margin: 0 0 8px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .tour-step {
+      width: 24px; height: 24px; border-radius: 7px;
+      display: grid; place-items: center;
+      font: 600 10px "IBM Plex Mono", ui-monospace, monospace;
+      letter-spacing: 0; background: rgba(0, 0, 0, 0.35); color: inherit;
     }
     .tour-card.trace .tour-kicker { color: #fdba74; }
+    .tour-card.replay .tour-kicker { color: #fde68a; }
     .tour-card.runs .tour-kicker { color: #67e8f9; }
     .tour-card.stats .tour-kicker { color: #e9d5ff; }
     .tour-card.compare .tour-kicker { color: #ddd6fe; }
-    .tour-card h3 { font-size: 22px; letter-spacing: -0.03em; margin: 0 0 8px; }
-    .tour-lead { color: var(--ink); font-size: 14px; margin: 0 0 12px; }
-    .tour-card ul { margin: 0; }
+    .tour-card h3 { font-size: 28px; letter-spacing: -0.04em; margin: 0 0 8px; }
+    .tour-lead { color: var(--ink); font-size: 14px; margin: 0 0 14px; }
+    .tour-facts {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0 0 12px;
+    }
+    .tour-fact {
+      background: rgba(0, 0, 0, 0.28);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 10px; padding: 8px 10px;
+    }
+    .tour-fact b {
+      display: block; color: var(--ink); font-size: 12px; font-weight: 600; margin: 0 0 2px;
+    }
+    .tour-fact span { color: var(--muted); font-size: 11px; line-height: 1.4; }
     .tour-hash {
       display: inline-block; margin-top: 12px;
       font: 500 11px "IBM Plex Mono", ui-monospace, monospace;
@@ -410,8 +461,33 @@
       border: 1px solid #2a2a32; border-radius: 7px; padding: 4px 8px;
     }
     .tour-viz {
-      background: #101014; border: 1px solid #2a2a32; border-radius: 12px;
-      padding: 14px 14px 12px; min-height: 148px;
+      background: #0c0c10; border: 1px solid #2a2a32; border-radius: 14px;
+      padding: 0; min-height: 228px; overflow: hidden;
+      display: flex; flex-direction: column;
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+    .tour-viz .live { margin-left: auto; }
+    .tour-viz-body { padding: 14px 14px 16px; flex: 1; }
+    .replay-btns { display: grid; gap: 8px; margin-top: 12px; }
+    .replay-btn {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      padding: 10px 12px; border-radius: 9px;
+      border: 1px solid #3a2e12; background: rgba(251, 191, 36, 0.1);
+      font-size: 12px; font-weight: 600; color: #fde68a;
+    }
+    .replay-btn em { font-style: normal; font-weight: 500; color: var(--muted); font-size: 10px; }
+    .replay-btn.alt {
+      background: rgba(124, 92, 255, 0.12); border-color: #4c3d86; color: #ddd6fe;
+    }
+    .replay-fork {
+      display: flex; gap: 6px; margin-top: 12px; font-size: 10px; font-weight: 600;
+    }
+    .replay-fork span {
+      flex: 1; text-align: center; border-radius: 6px; padding: 5px 6px;
+      background: rgba(249, 115, 22, 0.16); color: #fdba74;
+    }
+    .replay-fork span.other {
+      background: rgba(251, 191, 36, 0.12); color: #fde68a; border: 1px dashed #854d0e;
     }
     .viz-title {
       font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
@@ -424,8 +500,16 @@
       background: #17171c; border: 1px solid #3f3f68; font-size: 12px;
     }
     .viz-node .dot { width: 7px; height: 7px; border-radius: 99px; background: #f97316; flex: 0 0 7px; }
-    .viz-node.live { border-color: #f97316; box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.16); }
-    .viz-node.live .dot { background: #22c55e; }
+    .tour-viz-body .viz-node { max-width: none; }
+    .viz-node.live {
+      border-color: #f97316;
+      animation: viz-pulse 1.2s ease-in-out infinite;
+    }
+    .viz-node.live .dot { background: #22c55e; animation: live-dot 1.4s ease-out infinite; }
+    @keyframes viz-pulse {
+      0%, 100% { box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.18); }
+      50% { box-shadow: 0 0 0 7px rgba(249, 115, 22, 0.06); }
+    }
     .viz-stem { width: 2px; height: 12px; background: #818cf8; opacity: 0.8; }
     .viz-modes { display: flex; gap: 6px; margin-top: 10px; }
     .viz-mode {
@@ -480,7 +564,10 @@
     .viz-row.same em { color: #4ade80; }
     .af-mark.stats { background: #c084fc; }
     @media (max-width: 860px) {
-      .hero, .grid, .topics, .tour-card { grid-template-columns: 1fr; }
+      .hero, .grid, .topics, .tour-card, .tour-card.flip, .tour-facts { grid-template-columns: 1fr; }
+      .tour-copy { order: 2; }
+      .tour-viz { order: 1; }
+      #manual .sell { font-size: 24px; }
       h1 { font-size: 36px; }
       .nav { display: none; }
     }
@@ -703,126 +790,181 @@ graphviagent serve . --host 0.0.0.0 --expose</pre>
 
     <section id="manual">
       <h2>Manual</h2>
-      <p class="sell">Four rooms, one pipeline. Jump Trace, Runs, Statistics, and Compare without losing the graph.</p>
+      <p class="sell">How Trace, replay, the board, and Compare work once you are in the UI.</p>
+      <p class="sell-sub">Four rooms, one pipeline. Jump Trace, Runs, Statistics, and Compare without losing the graph.</p>
       <div class="tour-chips">
-        <a class="tour-chip trace" href="#tour-trace"><i></i> Trace</a>
-        <a class="tour-chip runs" href="#tour-runs"><i></i> Runs</a>
-        <a class="tour-chip stats" href="#tour-stats"><i></i> Statistics</a>
-        <a class="tour-chip compare" href="#tour-compare"><i></i> Compare</a>
+        <a class="tour-chip trace" href="#tour-trace"><span class="n">01</span> Trace</a>
+        <a class="tour-chip replay" href="#tour-replay"><span class="n">02</span> Replay</a>
+        <a class="tour-chip runs" href="#tour-runs"><span class="n">03</span> Runs</a>
+        <a class="tour-chip stats" href="#tour-stats"><span class="n">04</span> Statistics</a>
+        <a class="tour-chip compare" href="#tour-compare"><span class="n">05</span> Compare</a>
       </div>
 
       <article class="tour-card trace" id="tour-trace">
-        <div>
-          <p class="tour-kicker">Live inspector</p>
+        <div class="tour-copy">
+          <p class="tour-kicker"><span class="tour-step">01</span> Live inspector</p>
           <h3>Trace</h3>
           <p class="tour-lead">The graph is a map, not an unrolled column. Cards pulse while a node runs. Taken, skipped, loops, and parallel <code>Send</code> stay on one picture.</p>
-          <ul>
-            <li><strong>Graph / Gantt / Agents</strong> — topology, wall-clock bars, or a speaker chain when a node returns <code>messages</code>.</li>
-            <li><strong>Steps</strong> — visit order with duration and spark metrics. Final state, Log, Memory, and Text tree fold under it.</li>
-            <li>Gutter dots are breakpoints. <strong>Continue</strong> / <strong>Step</strong> pause again. HITL graphs (<code>interrupt(...)</code>) pause with a resume-value box; <strong>Continue</strong> sends it.</li>
-            <li><strong>Replay step</strong> re-runs one node. <strong>Replay from</strong> continues from that checkpoint so routing can take the other branch. Side effects fire. Outdated graph hashes ask first.</li>
-            <li>Export, import (or drop JSON), then <strong>Runs</strong> / <strong>Statistics</strong> jump to this pipeline. <strong>Delete run</strong> is red, same size as the others.</li>
-          </ul>
+          <div class="tour-facts">
+            <div class="tour-fact"><b>Graph / Gantt / Agents</b><span>Topology, wall-clock bars, or a speaker chain when a node returns <code>messages</code>.</span></div>
+            <div class="tour-fact"><b>Steps</b><span>Visit order, duration, spark metrics. Final state, Log, Memory, and Text tree fold under it.</span></div>
+            <div class="tour-fact"><b>Break &amp; HITL</b><span>Gutter dots pause. <strong>Continue</strong> / <strong>Step</strong>. <code>interrupt(...)</code> gets a resume-value box.</span></div>
+            <div class="tour-fact"><b>Keep the run</b><span>Export, import, or drop JSON. Jump to <strong>Runs</strong> / <strong>Statistics</strong>. <strong>Delete run</strong> is red.</span></div>
+          </div>
         </div>
         <div class="tour-viz" aria-hidden="true">
-          <p class="viz-title">dummy_pipeline</p>
-          <div class="viz-flow">
-            <div class="viz-node"><span class="dot"></span> greet · Hello, Ada!</div>
-            <div class="viz-stem"></div>
-            <div class="viz-node live"><span class="dot"></span> shout · running</div>
+          <div class="mock-chrome">
+            <span class="traffic r"></span><span class="traffic y"></span><span class="traffic g"></span>
+            <span class="mock-chrome-title">Trace · dummy_pipeline</span>
+            <span class="live"><i></i> Running</span>
           </div>
-          <div class="viz-modes">
-            <span class="viz-mode on">Graph</span>
-            <span class="viz-mode">Gantt</span>
-            <span class="viz-mode">Agents</span>
+          <div class="tour-viz-body">
+            <div class="viz-flow">
+              <div class="viz-node"><span class="dot"></span> greet · Hello, Ada!</div>
+              <div class="viz-stem"></div>
+              <div class="viz-node live"><span class="dot"></span> shout · running</div>
+            </div>
+            <div class="viz-modes">
+              <span class="viz-mode on">Graph</span>
+              <span class="viz-mode">Gantt</span>
+              <span class="viz-mode">Agents</span>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article class="tour-card replay flip" id="tour-replay">
+        <div class="tour-copy">
+          <p class="tour-kicker"><span class="tour-step">02</span> Same node, other branch</p>
+          <h3>Replay</h3>
+          <p class="tour-lead"><strong>Replay step</strong> runs only the selected node. <strong>Replay from</strong> continues from that checkpoint so routing can take the other branch.</p>
+          <div class="tour-facts">
+            <div class="tour-fact"><b>Real functions</b><span>Both invoke the node you wrote. Side effects fire.</span></div>
+            <div class="tour-fact"><b>Outdated runs</b><span>If the graph hash changed, replay asks before continuing.</span></div>
+            <div class="tour-fact"><b>Node view</b><span>Input, output, <code>state_in</code> vs <code>state_out</code>, tools, traceback. <strong>Call node</strong> is Replay step.</span></div>
+            <div class="tour-fact"><b>Checkpointer</b><span>Attached in-process when the pipeline did not. Approximate only if the thread is gone.</span></div>
+          </div>
+        </div>
+        <div class="tour-viz" aria-hidden="true">
+          <div class="mock-chrome">
+            <span class="traffic r"></span><span class="traffic y"></span><span class="traffic g"></span>
+            <span class="mock-chrome-title">Node · shout</span>
+          </div>
+          <div class="tour-viz-body">
+            <div class="viz-node live"><span class="dot"></span> shout · selected</div>
+            <div class="replay-btns">
+              <span class="replay-btn">Replay step <em>this node</em></span>
+              <span class="replay-btn alt">Replay from <em>checkpoint →</em></span>
+            </div>
+            <div class="replay-fork">
+              <span>taken · shout</span>
+              <span class="other">other · skip</span>
+            </div>
           </div>
         </div>
       </article>
 
       <article class="tour-card runs" id="tour-runs">
-        <div>
-          <p class="tour-kicker">The board</p>
+        <div class="tour-copy">
+          <p class="tour-kicker"><span class="tour-step">03</span> The board</p>
           <h3>Runs</h3>
           <p class="tour-lead">Airflow-style cards: duration bars, then task × run (<code>✓</code> / <code>✕</code> / <code>○</code>). Failed nodes stay in history and show as red.</p>
-          <ul>
-            <li>Click the name to open Trace. Click a bar, cell, or play control to open that run.</li>
-            <li><strong>Trace</strong> and <strong>Statistics</strong> jump to this pipeline. <strong>Clear</strong> deletes every run for it.</li>
-            <li>The URL is <code>#/runs/&lt;pipeline&gt;</code> so refresh lands on the same card.</li>
-          </ul>
+          <div class="tour-facts">
+            <div class="tour-fact"><b>Open a run</b><span>Click the name for Trace. Click a bar, cell, or play control for that run.</span></div>
+            <div class="tour-fact"><b>Stay on this graph</b><span><strong>Trace</strong> and <strong>Statistics</strong> jump here. <strong>Clear</strong> deletes every run for the pipeline.</span></div>
+          </div>
           <span class="tour-hash">#/runs/echo_pipeline</span>
         </div>
         <div class="tour-viz" aria-hidden="true">
-          <p class="viz-title">Duration × run</p>
-          <div class="viz-bars">
-            <span class="viz-bar" style="height:42%"></span>
-            <span class="viz-bar" style="height:88%"></span>
-            <span class="viz-bar" style="height:28%"></span>
-            <span class="viz-bar" style="height:64%"></span>
-            <span class="viz-bar" style="height:50%"></span>
-            <span class="viz-bar" style="height:74%"></span>
-            <span class="viz-bar" style="height:36%"></span>
+          <div class="mock-chrome">
+            <span class="traffic r"></span><span class="traffic y"></span><span class="traffic g"></span>
+            <span class="mock-chrome-title">Runs · echo_pipeline</span>
           </div>
-          <div class="viz-grid">
-            <span class="viz-cell">✓</span><span class="viz-cell">✓</span><span class="viz-cell">✓</span>
-            <span class="viz-cell">✓</span><span class="viz-cell bad">✕</span><span class="viz-cell">✓</span>
-            <span class="viz-cell off">○</span>
+          <div class="tour-viz-body">
+            <p class="viz-title">Duration × run</p>
+            <div class="viz-bars">
+              <span class="viz-bar" style="height:42%"></span>
+              <span class="viz-bar" style="height:88%"></span>
+              <span class="viz-bar" style="height:28%"></span>
+              <span class="viz-bar" style="height:64%"></span>
+              <span class="viz-bar" style="height:50%"></span>
+              <span class="viz-bar" style="height:74%"></span>
+              <span class="viz-bar" style="height:36%"></span>
+            </div>
+            <div class="viz-grid">
+              <span class="viz-cell">✓</span><span class="viz-cell">✓</span><span class="viz-cell">✓</span>
+              <span class="viz-cell">✓</span><span class="viz-cell bad">✕</span><span class="viz-cell">✓</span>
+              <span class="viz-cell off">○</span>
+            </div>
           </div>
         </div>
       </article>
 
-      <article class="tour-card stats" id="tour-stats">
-        <div>
-          <p class="tour-kicker">Across every visit</p>
+      <article class="tour-card stats flip" id="tour-stats">
+        <div class="tour-copy">
+          <p class="tour-kicker"><span class="tour-step">04</span> Across every visit</p>
           <h3>Statistics</h3>
-          <p class="tour-lead">Same topology as Trace. Pick a pipeline — there is no <strong>all</strong> view. Colored jump buttons (not the header menu) keep you on that graph.</p>
-          <ul>
-            <li><strong>Routing</strong> — run count, average node visits, success / failed / canceled split. Click a node for grouped branch <code>reason</code>s.</li>
-            <li><strong>Runtime</strong> — wall-clock grand total, average per run, violet average vs orange longest run. Click a node for min / avg / max.</li>
-            <li><strong>Cost</strong> — average in/out tokens per node, a pipeline grand total, and average per run. Tokens, not dollars.</li>
-            <li>Hover a color strip for a legend of color dots and labels, one per line.</li>
-            <li><strong>Trace</strong> and <strong>Runs</strong> sit before Routing / Cost / Runtime.</li>
-          </ul>
+          <p class="tour-lead">Same topology as Trace. Pick a pipeline — there is no <strong>all</strong> view. Colored jump buttons keep you on that graph.</p>
+          <div class="tour-facts">
+            <div class="tour-fact"><b>Routing</b><span>Run count, average visits, success / failed / canceled. Click a node for grouped <code>reason</code>s.</span></div>
+            <div class="tour-fact"><b>Runtime</b><span>Grand total, average per run, violet average vs orange longest. Click a node for min / avg / max.</span></div>
+            <div class="tour-fact"><b>Cost</b><span>Average in/out tokens per node, pipeline totals. Tokens, not dollars.</span></div>
+            <div class="tour-fact"><b>Legend</b><span>Hover a color strip for one label per color. <strong>Trace</strong> and <strong>Runs</strong> sit before the modes.</span></div>
+          </div>
           <span class="tour-hash">#/statistics/tokens_pipeline</span>
         </div>
         <div class="tour-viz" aria-hidden="true">
-          <p class="viz-title">Routing · outcomes</p>
-          <div class="viz-cost-meta viz-route"><span>grand total</span><b>8</b></div>
-          <div class="viz-cost viz-route"><span></span><span></span></div>
-          <div class="viz-split">
-            <span class="viz-ok">4 ok</span>
-            <span class="viz-fail">0 failed</span>
-            <span class="viz-canceled">4 canceled</span>
+          <div class="mock-chrome">
+            <span class="traffic r"></span><span class="traffic y"></span><span class="traffic g"></span>
+            <span class="mock-chrome-title">Statistics · tokens_pipeline</span>
           </div>
-          <div class="viz-legend">
-            <span><i class="ok"></i> success</span>
-            <span><i class="fail"></i> failed</span>
-            <span><i class="canceled"></i> canceled</span>
+          <div class="tour-viz-body">
+            <p class="viz-title">Routing · outcomes</p>
+            <div class="viz-cost-meta viz-route"><span>grand total</span><b>8</b></div>
+            <div class="viz-cost viz-route"><span></span><span></span></div>
+            <div class="viz-split">
+              <span class="viz-ok">4 ok</span>
+              <span class="viz-fail">0 failed</span>
+              <span class="viz-canceled">4 canceled</span>
+            </div>
+            <div class="viz-legend">
+              <span><i class="ok"></i> success</span>
+              <span><i class="fail"></i> failed</span>
+              <span><i class="canceled"></i> canceled</span>
+            </div>
           </div>
         </div>
       </article>
 
       <article class="tour-card compare" id="tour-compare">
-        <div>
-          <p class="tour-kicker">Run A vs Run B</p>
+        <div class="tour-copy">
+          <p class="tour-kicker"><span class="tour-step">05</span> Run A vs Run B</p>
           <h3>Compare</h3>
           <p class="tour-lead">Filter by pipeline (default all). Diff input, path, per-node output, and timing. Hover a cell to copy.</p>
-          <ul>
-            <li>If a node ran more than once (loop or branch), each visit is aligned separately — not only the first.</li>
-            <li>Open Node view from Trace for input, output, a <code>state_in</code> vs <code>state_out</code> diff, tools, and traceback frames. <strong>Call node</strong> is Replay step.</li>
-          </ul>
+          <div class="tour-facts">
+            <div class="tour-fact"><b>Every visit</b><span>Loops and branches align each visit separately — not only the first.</span></div>
+            <div class="tour-fact"><b>Same graph</b><span>Pick a pipeline and Run A / Run B only list that pipeline’s runs.</span></div>
+          </div>
         </div>
         <div class="tour-viz" aria-hidden="true">
-          <p class="viz-title">Aligned visits</p>
-          <div class="viz-ab">
-            <div class="viz-side">
-              <h4>Run A</h4>
+          <div class="mock-chrome">
+            <span class="traffic r"></span><span class="traffic y"></span><span class="traffic g"></span>
+            <span class="mock-chrome-title">Compare · aligned visits</span>
+          </div>
+          <div class="tour-viz-body">
+            <div class="viz-ab">
+              <div class="viz-side">
+                <h4>Run A</h4>
               <div class="viz-row same">path <em>greet → shout</em></div>
               <div class="viz-row">out <em>"ADA!"</em></div>
+              <div class="viz-row">ms <em>12.4</em></div>
             </div>
             <div class="viz-side">
               <h4>Run B</h4>
               <div class="viz-row same">path <em>greet → shout</em></div>
               <div class="viz-row">out <em>"ada"</em></div>
+              <div class="viz-row">ms <em>9.1</em></div>
+              </div>
             </div>
           </div>
         </div>

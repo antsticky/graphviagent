@@ -4457,21 +4457,44 @@ class GraphVIHandler(BaseHTTPRequestHandler):
     def _pipeline_stem(self, path: Path) -> str:
         return self.config.stem_for(path)
 
-    def _stem_for_file_id(self, file_id: str) -> str:
+    def _inside_workspace(self, path: Path) -> bool:
+        workspace = self.workspace.resolve()
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return False
+        return resolved == workspace or workspace in resolved.parents
+
+    def _resolve_file_id(self, file_id: str) -> Path | None:
         if not file_id:
-            return ""
+            return None
         for path in self._pipelines():
-            if self._rel_id(path) == file_id:
-                return self._pipeline_stem(path)
+            resolved = path.resolve()
+            if self._rel_id(resolved) == file_id:
+                return resolved
+        spec = self.config.pipelines.get(file_id)
+        if spec is not None:
+            return spec.file.resolve()
+        raw = Path(file_id)
+        try:
+            path = raw.resolve() if raw.is_absolute() else (self.workspace / file_id).resolve()
+        except OSError:
+            return None
+        if self._inside_workspace(path):
+            return path
+        for known in self._pipelines():
+            if known.resolve() == path:
+                return path
+        return None
+
+    def _stem_for_file_id(self, file_id: str) -> str:
+        path = self._resolve_file_id(file_id)
+        if path is not None:
+            return self._pipeline_stem(path)
         spec = self.config.pipelines.get(file_id)
         if spec is not None:
             return spec.id
-        raw = Path(file_id)
-        path = raw if raw.is_absolute() else self.workspace / file_id
-        try:
-            return self._pipeline_stem(path.resolve())
-        except OSError:
-            return raw.stem
+        return Path(file_id).stem if file_id else ""
 
     def _known_stems(self) -> list[str]:
         return [self._pipeline_stem(path) for path in self._pipelines()]
@@ -4499,9 +4522,9 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         return items
 
     def _cached_pipeline(self, file_id: str) -> LoadedPipeline:
-        path = (self.workspace / file_id).resolve()
-        if self.workspace.resolve() not in path.parents and path != self.workspace.resolve():
-            loaded = LoadedPipeline(path=path, stem=self._pipeline_stem(path))
+        path = self._resolve_file_id(file_id)
+        if path is None:
+            loaded = LoadedPipeline(path=Path(file_id), stem=Path(file_id).stem)
             loaded.error = "path outside workspace"
             return loaded
         try:

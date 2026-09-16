@@ -102,26 +102,44 @@ class PipelineWatcher:
     def watches(self, path: Path) -> bool:
         if path.name == CONFIG_NAME:
             return True
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        config = self._config
+        if config is not None and any(
+            spec.file.resolve() == resolved for spec in config.pipelines.values()
+        ):
+            return True
         if _is_pipeline_name(path.name):
             return True
         try:
-            rel = path.resolve().relative_to(self.workspace).as_posix()
+            key = resolved.relative_to(self.workspace).as_posix()
         except ValueError:
-            return False
+            key = resolved.as_posix()
         with self._lock:
-            if rel in self._files:
-                return True
-        config = self._config
-        if config is not None:
-            resolved = path.resolve()
-            return any(spec.file.resolve() == resolved for spec in config.pipelines.values())
-        return False
+            return key in self._files
+
+    def _watch_folders(self) -> list[Path]:
+        folders = [self.workspace]
+        seen = {str(self.workspace)}
+        for path in discover_pipelines(self.workspace, self._config):
+            parent = path.resolve().parent
+            if parent == self.workspace or self.workspace in parent.parents:
+                continue
+            key = str(parent)
+            if key in seen:
+                continue
+            seen.add(key)
+            folders.append(parent)
+        return folders
 
     def start(self) -> None:
         self.refresh(emit=False)
         handler = _DebouncedHandler(self)
         observer = Observer()
-        observer.schedule(handler, str(self.workspace), recursive=True)
+        for folder in self._watch_folders():
+            observer.schedule(handler, str(folder), recursive=True)
         observer.start()
         self._observer = observer
 

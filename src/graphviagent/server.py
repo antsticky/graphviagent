@@ -859,7 +859,7 @@ PAGE = r"""<!DOCTYPE html>
     }
     .cmp-row { padding: 4px 0; }
     .cmp-side {
-      display: grid; grid-template-columns: 88px minmax(0, 1fr);
+      display: grid; grid-template-columns: minmax(108px, 0.38fr) minmax(0, 1fr);
       gap: 8px; min-width: 0; align-items: start;
     }
     .cmp-row.changed .cmp-a, .cmp-row.changed .cmp-b { color: #fbbf24; }
@@ -3997,12 +3997,82 @@ PAGE = r"""<!DOCTYPE html>
         "</section>";
     }
 
-    function firstByNode(run) {
-      const map = new Map();
-      (run.steps || []).forEach((step) => {
-        if (step.node && !map.has(step.node)) map.set(step.node, step);
+    function compareStepBranch(step) {
+      const inn = step && step.state_in && typeof step.state_in === "object" && !Array.isArray(step.state_in)
+        ? step.state_in : {};
+      if (inn.source != null && inn.source !== "" && (typeof inn.source === "string" || typeof inn.source === "number")) {
+        return String(inn.source);
+      }
+      const update = step && step.update && typeof step.update === "object" ? step.update : {};
+      const partials = update.partials;
+      if (Array.isArray(partials)) {
+        for (let i = 0; i < partials.length; i++) {
+          const item = partials[i];
+          if (item && item.source != null && item.source !== "") return String(item.source);
+        }
+      }
+      return "";
+    }
+
+    function stepsForNode(run, node) {
+      return (run.steps || []).filter((step) => step && step.node === node);
+    }
+
+    function compareNodeOrder(a, b) {
+      const names = [];
+      function add(run) {
+        (run.steps || []).forEach((step) => {
+          if (step && step.node && names.indexOf(step.node) < 0) names.push(step.node);
+        });
+      }
+      add(a);
+      add(b);
+      return names;
+    }
+
+    function alignVisits(lefts, rights) {
+      const slots = (rights || []).map((step) => ({ step: step, used: false }));
+      const pairs = [];
+      (lefts || []).forEach((step) => {
+        const branch = compareStepBranch(step);
+        const j = slots.findIndex((slot) => {
+          if (slot.used) return false;
+          const other = compareStepBranch(slot.step);
+          return branch ? other === branch : !other;
+        });
+        if (j >= 0) {
+          slots[j].used = true;
+          pairs.push({ a: step, b: slots[j].step });
+        } else {
+          pairs.push({ a: step, b: null });
+        }
       });
-      return map;
+      slots.forEach((slot) => {
+        if (!slot.used) pairs.push({ a: null, b: slot.step });
+      });
+      return pairs;
+    }
+
+    function compareVisitLabel(node, pair, index, pairs) {
+      const step = pair.a || pair.b || {};
+      const branch = compareStepBranch(step);
+      if (branch) {
+        const same = pairs.filter((item) => compareStepBranch(item.a || item.b) === branch);
+        if (same.length > 1) {
+          return node + " · " + branch + " #" + (same.indexOf(pair) + 1);
+        }
+        return node + " · " + branch;
+      }
+      if (pairs.length > 1) {
+        return (pair.a && pair.a.step_id) || (pair.b && pair.b.step_id) || (node + "#" + (index + 1));
+      }
+      return node;
+    }
+
+    function comparePairKind(left, right, equal) {
+      if (!left) return "only-b";
+      if (!right) return "only-a";
+      return equal ? "" : "changed";
     }
 
     function applyCompareFilter() {
@@ -4028,9 +4098,7 @@ PAGE = r"""<!DOCTYPE html>
       const [a, b] = await Promise.all([api("/api/runs/" + idA), api("/api/runs/" + idB)]);
       const pathA = (a.steps || []).map((step) => step.node);
       const pathB = (b.steps || []).map((step) => step.node);
-      const mapA = firstByNode(a);
-      const mapB = firstByNode(b);
-      const nodes = Array.from(new Set([...mapA.keys(), ...mapB.keys()]));
+      const nodes = compareNodeOrder(a, b);
       const inputRows = Array.from(new Set([
         ...Object.keys(a.input || {}),
         ...Object.keys(b.input || {}),
@@ -4051,25 +4119,31 @@ PAGE = r"""<!DOCTYPE html>
           kind: !pathA[i] ? "only-b" : !pathB[i] ? "only-a" : pathA[i] === pathB[i] ? "" : "changed",
         });
       }
-      const outRows = nodes.map((node) => {
-        const left = mapA.get(node);
-        const right = mapB.get(node);
-        return {
-          key: node,
-          a: left ? left.update : undefined,
-          b: right ? right.update : undefined,
-          kind: !left ? "only-b" : !right ? "only-a" : jsonEqual(left.update, right.update) ? "" : "changed",
-        };
-      });
-      const timeRows = nodes.map((node) => {
-        const left = mapA.get(node);
-        const right = mapB.get(node);
-        return {
-          key: node,
-          a: left ? formatElapsed(left.elapsed_ms) : "",
-          b: right ? formatElapsed(right.elapsed_ms) : "",
-          kind: !left ? "only-b" : !right ? "only-a" : Number(left.elapsed_ms) === Number(right.elapsed_ms) ? "" : "changed",
-        };
+      const outRows = [];
+      const timeRows = [];
+      nodes.forEach((node) => {
+        const pairs = alignVisits(stepsForNode(a, node), stepsForNode(b, node));
+        pairs.forEach((pair, index) => {
+          const key = compareVisitLabel(node, pair, index, pairs);
+          const left = pair.a;
+          const right = pair.b;
+          outRows.push({
+            key,
+            a: left ? left.update : undefined,
+            b: right ? right.update : undefined,
+            kind: comparePairKind(left, right, jsonEqual(left && left.update, right && right.update)),
+          });
+          timeRows.push({
+            key,
+            a: left ? formatElapsed(left.elapsed_ms) : "",
+            b: right ? formatElapsed(right.elapsed_ms) : "",
+            kind: comparePairKind(
+              left,
+              right,
+              Number(left && left.elapsed_ms) === Number(right && right.elapsed_ms),
+            ),
+          });
+        });
       });
       timeRows.push({
         key: "total",

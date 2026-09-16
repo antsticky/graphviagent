@@ -7,6 +7,7 @@ from uuid import uuid4
 
 
 STORE_DIRNAME = ".graphviagent"
+SCHEMA_VERSION = 1
 
 
 def store_root(workspace: Path) -> Path:
@@ -19,9 +20,45 @@ def pipeline_dir(workspace: Path, stem: str) -> Path:
     return path
 
 
+def _gva_version() -> str:
+    try:
+        from graphviagent import __version__
+
+        return str(__version__)
+    except Exception:
+        return "unknown"
+
+
+def run_schema_version(run: dict) -> int:
+    raw = run.get("schema_version")
+    if raw is None:
+        return 0
+    try:
+        return int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("run schema_version must be an integer") from exc
+
+
+def migrate_run(run: dict) -> dict:
+    if not isinstance(run, dict):
+        raise ValueError("run must be a JSON object")
+    version = run_schema_version(run)
+    if version > SCHEMA_VERSION:
+        raise ValueError(
+            f"run schema_version {version} is newer than this GraphVIAgent "
+            f"(supports {SCHEMA_VERSION})"
+        )
+    out = dict(run)
+    out["schema_version"] = SCHEMA_VERSION
+    if not out.get("gva_version"):
+        out["gva_version"] = _gva_version()
+    return out
+
+
 def save_run(workspace: Path, stem: str, run: dict) -> dict:
     now = datetime.now(timezone.utc).isoformat()
-    run = {**run, "pipeline": stem, "created_at": run.get("created_at") or now}
+    run = migrate_run({**run, "pipeline": stem, "created_at": run.get("created_at") or now})
+    run["gva_version"] = _gva_version()
     dest = pipeline_dir(workspace, stem) / f"{run['id']}.json"
     dest.write_text(json.dumps(run, indent=2), encoding="utf-8")
     return run
@@ -44,6 +81,10 @@ def list_runs(
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             continue
         if not isinstance(data, dict):
+            continue
+        try:
+            data = migrate_run(data)
+        except ValueError:
             continue
         item = {
             "id": data.get("id") or path.stem,
@@ -95,7 +136,7 @@ def load_run(workspace: Path, run_id: str) -> dict | None:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             continue
         if isinstance(data, dict):
-            return data
+            return migrate_run(data)
     return None
 
 
@@ -146,11 +187,13 @@ def import_run(workspace: Path, run: dict, *, fallback_stem: str, known_stems: l
         raise ValueError("run needs id")
     if not isinstance(run.get("steps"), list):
         raise ValueError("run needs steps")
-    clean = {
-        key: value
-        for key, value in run.items()
-        if key not in {"mermaid", "ascii"}
-    }
+    clean = migrate_run(
+        {
+            key: value
+            for key, value in run.items()
+            if key not in {"mermaid", "ascii"}
+        }
+    )
     if load_run(workspace, str(clean["id"])):
         clean["id"] = uuid4().hex
     stem = str(clean.get("pipeline") or fallback_stem or "").strip()

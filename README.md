@@ -107,6 +107,14 @@ graphviagent serve . --port 9000
 graphviagent serve . --host 127.0.0.1
 ```
 
+The UI only accepts requests from its own origin (a page on another site cannot click Run for you). Bind stays on localhost unless you pass `--expose`:
+
+```bash
+graphviagent serve . --host 0.0.0.0 --expose
+```
+
+`--expose` prints a warning. Anyone who can open that URL can run your pipelines and read stored runs.
+
 New or edited `*_pipeline.py` files refresh the sidebar on their own. You do not need to restart `serve`. A file-change panel (bottom right) shows when a pipeline appears, is modified, or its SHA256 hash changes.
 
 ### Trace
@@ -145,7 +153,7 @@ Runs are written under the folder you served or ran from:
 my_graphs/.graphviagent/runs/echo_pipeline/<id>.json
 ```
 
-Add `.graphviagent/` to `.gitignore`.
+Each file includes `schema_version` (currently `1`) and `gva_version`. Older files with no version still load. A run from a newer GraphVIAgent is refused. Add `.graphviagent/` to `.gitignore`.
 
 ## Pipeline contract
 

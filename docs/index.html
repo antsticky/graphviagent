@@ -601,7 +601,7 @@ file = "decision_pipeline.py"</pre>
           <h3>Privacy and storage</h3>
           <p>Everything stays on your machine. Runs are written under the folder you served or ran from:</p>
           <pre>my_graphs/.graphviagent/runs/echo_pipeline/&lt;id&gt;.json</pre>
-          <p>Add <code>.graphviagent/</code> to <code>.gitignore</code>.</p>
+          <p>Each run file has <code>schema_version</code> (currently <code>1</code>) and <code>gva_version</code>. Older files still load. Import of a newer schema is refused. Add <code>.graphviagent/</code> to <code>.gitignore</code>.</p>
         </article>
         <article class="topic">
           <h3>Limits</h3>
@@ -629,7 +629,7 @@ file = "decision_pipeline.py"</pre>
         </article>
         <article class="cli-card">
           <h3>graphviagent serve .<br/>graphviagent serve . --open</h3>
-          <p>Open the UI (default <code>127.0.0.1:8765</code>). <code>--open</code> launches a browser. <code>--host</code> and <code>--port</code> override the bind address.</p>
+          <p>Open the UI (default <code>127.0.0.1:8765</code>). <code>--open</code> launches a browser. <code>--host</code> and <code>--port</code> override the bind address. Binding beyond localhost requires <code>--expose</code> (and prints a warning): the server runs your pipeline Python, and only same-origin pages may call it.</p>
         </article>
       </div>
       <p style="margin-top:14px">With a clone of the repo you can also run <code>graphviagent serve examples</code> to browse the bundled pipelines (branch, loop, parallel <code>Send</code>, tools, agents, errors).</p>

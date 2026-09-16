@@ -114,6 +114,11 @@ def main(argv: list[str] | None = None) -> None:
     serve_p.add_argument("--host", default="127.0.0.1")
     serve_p.add_argument("--port", type=int, default=8765)
     serve_p.add_argument("--open", action="store_true", help="open the UI in a browser")
+    serve_p.add_argument(
+        "--expose",
+        action="store_true",
+        help="allow --host beyond localhost (reachable on the network)",
+    )
 
     run_p = sub.add_parser("run", help="record a run without the browser")
     run_p.add_argument("file", help="pipeline file, stem, or graphviagent.toml id")
@@ -126,13 +131,17 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "serve":
         config = _workspace(args.path)
-        serve(
-            config.root,
-            host=args.host,
-            port=args.port,
-            open_browser=args.open,
-            config=config,
-        )
+        try:
+            serve(
+                config.root,
+                host=args.host,
+                port=args.port,
+                open_browser=args.open,
+                config=config,
+                expose=args.expose,
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         return
     if args.command == "run":
         start = Path.cwd()

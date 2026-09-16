@@ -27,6 +27,106 @@ from graphviagent.store import (
 )
 from graphviagent.watch import PipelineWatcher, file_sha256
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1"}
+_WILDCARD_BINDS = {"0.0.0.0", "::", "::0", "*", ""}
+_MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def is_loopback_host(host: str) -> bool:
+    name = (host or "").strip().lower().strip("[]")
+    if name in _LOOPBACK_HOSTS or name.startswith("127."):
+        return True
+    return False
+
+
+def is_public_bind(host: str) -> bool:
+    name = (host or "").strip().lower().strip("[]")
+    if name in _WILDCARD_BINDS:
+        return True
+    return not is_loopback_host(name)
+
+
+def split_host_header(value: str) -> tuple[str, int | None]:
+    text = (value or "").strip()
+    if not text:
+        return "", None
+    if text.startswith("["):
+        end = text.find("]")
+        if end < 0:
+            return text.lower(), None
+        name = text[1:end].lower()
+        rest = text[end + 1 :]
+        if rest.startswith(":"):
+            try:
+                return name, int(rest[1:])
+            except ValueError:
+                return name, None
+        return name, None
+    if text.count(":") == 1:
+        name, _, port_text = text.partition(":")
+        try:
+            return name.lower(), int(port_text)
+        except ValueError:
+            return text.lower(), None
+    return text.lower(), None
+
+
+def request_allowed(
+    command: str,
+    headers: object,
+    *,
+    bind_port: int,
+    loopback_only: bool,
+) -> bool:
+    get = headers.get if hasattr(headers, "get") else lambda _key, _default=None: None
+    host_header = str(get("Host") or "")
+    host_name, host_port = split_host_header(host_header)
+    if not host_name:
+        return False
+    if host_port is not None and host_port != bind_port:
+        return False
+    if loopback_only and not is_loopback_host(host_name):
+        return False
+
+    site = str(get("Sec-Fetch-Site") or "").lower()
+    if site == "cross-site":
+        return False
+
+    origin = str(get("Origin") or "").strip()
+    if origin:
+        if origin.lower() == "null":
+            return False
+        return _origin_matches(origin, host_name=host_name, host_port=host_port, bind_port=bind_port)
+
+    mutating = command.upper() in _MUTATING
+    referer = str(get("Referer") or "").strip()
+    if mutating and referer:
+        return _origin_matches(referer, host_name=host_name, host_port=host_port, bind_port=bind_port)
+    return True
+
+
+def _origin_matches(
+    url: str,
+    *,
+    host_name: str,
+    host_port: int | None,
+    bind_port: int,
+) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme and parsed.scheme != "http":
+        return False
+    hostname = (parsed.hostname or "").lower()
+    if not hostname or hostname != host_name:
+        return False
+    origin_port = parsed.port
+    if origin_port is None and parsed.scheme == "http":
+        origin_port = 80
+    expected = host_port if host_port is not None else bind_port
+    if origin_port is not None and origin_port != expected:
+        return False
+    return True
+
+
 FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
   <defs>
     <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
@@ -4427,9 +4527,23 @@ class GraphVIHandler(BaseHTTPRequestHandler):
     watcher: PipelineWatcher | None = None
     active_runs: dict[str, threading.Event] = {}
     run_lock = threading.Lock()
+    bind_host: str = "127.0.0.1"
+    bind_port: int = 8765
+    loopback_only: bool = True
 
     def log_message(self, format: str, *args) -> None:
         print(f"[graphviagent] {args[0]}")
+
+    def _guard(self) -> bool:
+        if request_allowed(
+            self.command,
+            self.headers,
+            bind_port=self.bind_port,
+            loopback_only=self.loopback_only,
+        ):
+            return True
+        self._json(403, {"error": "blocked origin"})
+        return False
 
     def _send(self, code: int, body: bytes, content_type: str) -> None:
         self.send_response(code)
@@ -4659,6 +4773,8 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         return run
 
     def do_GET(self) -> None:
+        if not self._guard():
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self._send(200, PAGE.encode(), "text/html; charset=utf-8")
@@ -4715,7 +4831,11 @@ class GraphVIHandler(BaseHTTPRequestHandler):
             return
         if parsed.path.startswith("/api/runs/"):
             run_id = parsed.path.rsplit("/", 1)[-1]
-            run = load_run(self.workspace, run_id)
+            try:
+                run = load_run(self.workspace, run_id)
+            except ValueError as exc:
+                self._json(409, {"error": str(exc)})
+                return
             if run is None:
                 self._json(404, {"error": "run not found"})
                 return
@@ -4724,6 +4844,8 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         self._json(404, {"error": "not found"})
 
     def do_DELETE(self) -> None:
+        if not self._guard():
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/api/runs":
             file_id = (parse_qs(parsed.query).get("file") or [""])[0]
@@ -4741,6 +4863,8 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         self._json(404, {"error": "not found"})
 
     def do_POST(self) -> None:
+        if not self._guard():
+            return
         parsed = urlparse(self.path)
         try:
             payload = self._read_json()
@@ -4888,7 +5012,13 @@ def serve(
     port: int = 8765,
     open_browser: bool = False,
     config: GVAConfig | None = None,
+    expose: bool = False,
 ) -> None:
+    if is_public_bind(host) and not expose:
+        raise ValueError(
+            f"refusing to bind {host}: this exposes pipeline execution on the network. "
+            "Use 127.0.0.1 (default), or pass --expose if you intend this."
+        )
     if config is None:
         config = load_config(workspace)
         activate_config(config)
@@ -4897,6 +5027,9 @@ def serve(
     GraphVIHandler.workspace = workspace
     GraphVIHandler.config = config
     GraphVIHandler.cache = {}
+    GraphVIHandler.bind_host = host
+    GraphVIHandler.bind_port = port
+    GraphVIHandler.loopback_only = not is_public_bind(host)
 
     def invalidate(file_ids: list[str]) -> None:
         for file_id in file_ids:
@@ -4918,8 +5051,16 @@ def serve(
     server = ThreadingHTTPServer((host, port), handler)
     url = f"http://{host}:{port}"
     print(f"GraphVIAgent {url}  workspace={workspace}", flush=True)
+    if is_public_bind(host):
+        print(
+            "WARNING: reachable on the network. Anyone who can open this URL "
+            "can run your pipelines and read stored runs.",
+            flush=True,
+        )
     if open_browser:
-        threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+        browse_host = "127.0.0.1" if host.strip("[]") in _WILDCARD_BINDS else host
+        browse = f"http://{browse_host}:{port}"
+        threading.Timer(0.4, lambda: webbrowser.open(browse)).start()
     try:
         server.serve_forever()
     finally:

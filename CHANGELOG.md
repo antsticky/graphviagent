@@ -3,6 +3,8 @@
 ## 1.1.3-dev
 
 ### Added
+- Origin / `Host` check on the local UI so other websites cannot trigger runs; `--host 0.0.0.0` requires `--expose` and prints a warning
+- `schema_version` (currently `1`) and `gva_version` on saved runs; older files still load, newer schemas are refused
 - `graphviagent.toml` for project `root`, `pythonpath`, `env_file`, `context`, and explicit `[pipeline.*]` entries
 - LLM usage callbacks (`on_llm_end` / `on_chat_model_end`) so token counts follow billed `usage_metadata`, including replay and `with_structured_output`
 - Source mapping: node `file:line` from `inspect`, clickable `vscode://file` links, and traceback frames on failed steps

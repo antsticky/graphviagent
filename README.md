@@ -127,7 +127,7 @@ Each run stores a SHA256 of the graph (nodes, edges, state keys, tools). If that
 
 If a node returns `messages` or tool calls, they render as a thread above the JSON tree.
 
-### Pipelines
+### Runs
 
 Airflow-style grid: duration bars, then task × run (`✓` / `✕` / `○`). Click the name to open Trace. Click a bar, cell, or ▶ to open that run. **Clear** deletes every run for that pipeline.
 

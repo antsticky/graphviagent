@@ -11,6 +11,7 @@
 - `examples/hitl_pipeline.py` — draft node calls `interrupt`; Resume from the UI with `true` or `"edit this"`
 
 ### Changed
+- Rename the Pipelines page to **Runs** (`#/runs`; `#/pipelines` still opens it)
 - Require Python 3.11+ (`tomllib`)
 - Load `*_pipeline.py` with the file's directory (and toml `pythonpath`) on `sys.path`, independent of process cwd
 - Graph extract order is `build_graph()` / `get_graph()` / `create_graph()` / `__graph__`, then `GRAPH`, then a compiled `app` (`stream` + `invoke` only)

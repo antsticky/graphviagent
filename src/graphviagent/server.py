@@ -950,14 +950,13 @@ PAGE = r"""<!DOCTYPE html>
       <span class="mark">GVA</span> GraphVIAgent
       <nav class="nav">
         <button class="nav-link active" id="navTrace" type="button">Trace</button>
-        <button class="nav-link" id="navPipelines" type="button">Pipelines</button>
+        <button class="nav-link" id="navPipelines" type="button">Runs</button>
         <button class="nav-link" id="navCompare" type="button">Compare</button>
       </nav>
     </div>
   </header>
   <section id="compareView" class="page" hidden>
     <div class="page-inner">
-      <h1>Compare</h1>
       <div class="cmp-filter">
         <label for="cmpPipe">Pipeline</label>
         <select id="cmpPipe">
@@ -979,7 +978,6 @@ PAGE = r"""<!DOCTYPE html>
   </section>
   <section id="pipelinesView" class="page" hidden>
     <div class="page-inner">
-      <h1>Pipelines</h1>
       <div id="pipeBoard"></div>
     </div>
   </section>
@@ -1780,20 +1778,21 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function viewFromHash() {
-      if (location.hash === "#/pipelines") return "pipelines";
+      if (location.hash === "#/runs" || location.hash === "#/pipelines") return "runs";
       if (location.hash === "#/compare") return "compare";
       return "trace";
     }
 
     function showView(name) {
-      currentView = name === "pipelines" || name === "compare" ? name : "trace";
+      if (name === "pipelines") name = "runs";
+      currentView = name === "runs" || name === "compare" ? name : "trace";
       $("traceView").hidden = currentView !== "trace";
-      $("pipelinesView").hidden = currentView !== "pipelines";
+      $("pipelinesView").hidden = currentView !== "runs";
       $("compareView").hidden = currentView !== "compare";
       $("navTrace").classList.toggle("active", currentView === "trace");
-      $("navPipelines").classList.toggle("active", currentView === "pipelines");
+      $("navPipelines").classList.toggle("active", currentView === "runs");
       $("navCompare").classList.toggle("active", currentView === "compare");
-      if (currentView === "pipelines") renderPipeBoard();
+      if (currentView === "runs") renderPipeBoard();
       if (currentView === "compare") loadCompare().catch((e) => alert(e.message));
       const hash = "#/" + currentView;
       if (location.hash !== hash) location.hash = hash;
@@ -1824,7 +1823,7 @@ PAGE = r"""<!DOCTYPE html>
         btn.onclick = () => selectPipeline(p.id);
         box.appendChild(btn);
       });
-      if (currentView === "pipelines") renderPipeBoard();
+      if (currentView === "runs") renderPipeBoard();
       if (fileId) renderExampleChips();
       if (!fileId && pipelines.length) selectPipeline(pipelines[0].id);
     }
@@ -4100,7 +4099,7 @@ PAGE = r"""<!DOCTYPE html>
         renderHistory();
       }
       renderRun(currentRun);
-      if (currentView === "pipelines") renderPipeBoard();
+      if (currentView === "runs") renderPipeBoard();
       if (currentView === "compare") renderCompare().catch(() => {});
     }
 
@@ -4270,7 +4269,7 @@ PAGE = r"""<!DOCTYPE html>
       if (event.target === $("nodeView")) closeNodeView();
     };
     $("navTrace").onclick = () => showView("trace");
-    $("navPipelines").onclick = () => showView("pipelines");
+    $("navPipelines").onclick = () => showView("runs");
     $("navCompare").onclick = () => showView("compare");
     document.addEventListener("click", async (event) => {
       const src = event.target.closest && event.target.closest(".src-link");
@@ -4317,7 +4316,7 @@ PAGE = r"""<!DOCTYPE html>
     });
     let pipeResizeTimer = 0;
     window.addEventListener("resize", () => {
-      if (currentView !== "pipelines") return;
+      if (currentView !== "runs") return;
       clearTimeout(pipeResizeTimer);
       pipeResizeTimer = setTimeout(renderPipeBoard, 120);
     });

@@ -460,8 +460,8 @@
           <p><strong>Replay step</strong> runs only the selected node. <strong>Replay from</strong> continues from that checkpoint so routing can take the other branch. Both invoke the real function — side effects will fire. Outdated runs (graph hash changed) ask before replay.</p>
         </article>
         <article class="af-card">
-          <h3><span class="af-mark board"></span> Pipelines board and Compare</h3>
-          <p>Pipelines is an Airflow-style grid of duration and task × run. Compare diffs input, path, per-node output, and timing between two runs.</p>
+          <h3><span class="af-mark board"></span> Runs board and Compare</h3>
+          <p>Runs is an Airflow-style grid of duration and task × run. Compare diffs input, path, per-node output, and timing between two runs.</p>
         </article>
         <article class="af-card">
           <h3><span class="af-mark cancel"></span> Cancel, three at a time</h3>
@@ -590,7 +590,7 @@ file = "decision_pipeline.py"</pre>
           <p><strong>Replay step</strong> re-runs only the selected node. <strong>Replay from</strong> continues the compiled graph from that checkpoint, so reducers and routing match <code>get_state</code> — including taking the other branch after an edit. GraphVIAgent attaches an in-process checkpointer when the pipeline did not. Approximate replay is only when that is impossible, or the original thread is gone after a restart. Both hit your real functions. If the pipeline file or graph hash changed, the run is marked <strong>outdated</strong> and replay asks before continuing.</p>
         </article>
         <article class="topic">
-          <h3>Pipelines</h3>
+          <h3>Runs</h3>
           <p>Airflow-style cards: duration bars, then task × run (<code>✓</code> / <code>✕</code> / <code>○</code>). Click the name to open Trace. Click a bar, cell, or play control to open that run. <strong>Clear</strong> deletes every run for that pipeline.</p>
         </article>
         <article class="topic">

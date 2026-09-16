@@ -4457,6 +4457,22 @@ class GraphVIHandler(BaseHTTPRequestHandler):
     def _pipeline_stem(self, path: Path) -> str:
         return self.config.stem_for(path)
 
+    def _stem_for_file_id(self, file_id: str) -> str:
+        if not file_id:
+            return ""
+        for path in self._pipelines():
+            if self._rel_id(path) == file_id:
+                return self._pipeline_stem(path)
+        spec = self.config.pipelines.get(file_id)
+        if spec is not None:
+            return spec.id
+        raw = Path(file_id)
+        path = raw if raw.is_absolute() else self.workspace / file_id
+        try:
+            return self._pipeline_stem(path.resolve())
+        except OSError:
+            return raw.stem
+
     def _known_stems(self) -> list[str]:
         return [self._pipeline_stem(path) for path in self._pipelines()]
 
@@ -4571,7 +4587,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                 self._json(200, {"runs": list_all_runs(self.workspace, include_steps=True)})
                 return
             file_id = (query.get("file") or [""])[0]
-            stem = Path(file_id).stem
+            stem = self._stem_for_file_id(file_id)
             self._json(200, {"runs": list_runs(self.workspace, stem, include_steps=True)})
             return
         if parsed.path.startswith("/api/runs/"):
@@ -4591,7 +4607,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
             if not file_id:
                 self._json(400, {"error": "file is required"})
                 return
-            count = delete_runs(self.workspace, Path(file_id).stem)
+            count = delete_runs(self.workspace, self._stem_for_file_id(file_id))
             self._json(200, {"ok": True, "deleted": count})
             return
         if parsed.path.startswith("/api/runs/"):
@@ -4728,7 +4744,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                 self._json(200, self._with_render(saved))
                 return
             if parsed.path == "/api/import":
-                fallback = Path(payload.get("file") or "").stem
+                fallback = self._stem_for_file_id(str(payload.get("file") or ""))
                 saved = import_run(
                     self.workspace,
                     payload.get("run") or {},

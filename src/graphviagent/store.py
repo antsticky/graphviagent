@@ -526,9 +526,12 @@ def collect_stats(workspace: Path, stem: str | None = None) -> dict:
             if not choices and not step.get("pending"):
                 nxt = steps[index + 1].get("node") if index + 1 < len(steps) else None
                 reason = step.get("error") or step.get("reason")
+                last_step = index + 1 >= len(steps)
                 if nxt:
                     nxt_name = str(nxt)
                     choices = [(nxt_name, str(reason if reason not in (None, "") else nxt_name))]
+                elif step.get("canceled") or (run_is_canceled(data) and last_step):
+                    choices = [("canceled", str(reason if reason not in (None, "") else "canceled"))]
                 elif step.get("error"):
                     choices = [("failed", str(reason if reason not in (None, "") else "error"))]
                 else:

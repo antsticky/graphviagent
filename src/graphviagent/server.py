@@ -205,6 +205,7 @@ PAGE = r"""<!DOCTYPE html>
     .status-dot.ok { background: #22c55e; }
     .status-dot.error { background: #f07178; }
     .status-dot.canceled { background: #a8a29e; }
+    .status-dot.paused { background: #fbbf24; }
     .status-dot.gray { background: #5a5a64; }
     .status-dot.live {
       background: var(--accent);
@@ -258,6 +259,7 @@ PAGE = r"""<!DOCTYPE html>
     .af-bar.ok { background: #22c55e; }
     .af-bar.error { background: #ef4444; }
     .af-bar.canceled { background: #78716c; }
+    .af-bar.paused { background: #fbbf24; }
     .af-bar.running {
       background: var(--accent);
       animation: live-pulse 1.1s ease-in-out infinite;
@@ -299,6 +301,7 @@ PAGE = r"""<!DOCTYPE html>
     .af-mark.ok { background: #16a34a; }
     .af-mark.error { background: #dc2626; }
     .af-mark.canceled { background: #78716c; }
+    .af-mark.paused { background: #fbbf24; color: #1c1917; }
     .af-mark.running {
       background: var(--accent);
       animation: live-pulse 1.1s ease-in-out infinite;
@@ -1182,6 +1185,7 @@ PAGE = r"""<!DOCTYPE html>
     .st-hero-split i.ok, .st-split-tip i.ok { background: #4ade80; }
     .st-hero-split i.fail, .st-split-tip i.fail { background: var(--danger); }
     .st-hero-split i.canceled, .st-split-tip i.canceled { background: #a8a29e; }
+    .st-hero-split i.paused, .st-split-tip i.paused { background: #fbbf24; }
     .st-hero-split i.avg, .st-hero-split i.ms, .st-split-tip i.avg { background: #818cf8; }
     .st-hero-split i.max, .st-hero-split i.rest, .st-split-tip i.max { background: #f59e0b; }
     .st-split-tip i.in { background: var(--tok-in); }
@@ -2028,6 +2032,7 @@ PAGE = r"""<!DOCTYPE html>
       if (p && p.error) return "error";
       if (p && p.last_run && p.last_run.status === "error") return "error";
       if (p && p.last_run && p.last_run.status === "canceled") return "canceled";
+      if (p && p.last_run && p.last_run.status === "paused") return "paused";
       if (p && p.last_run) return "ok";
       return "gray";
     }
@@ -2035,6 +2040,7 @@ PAGE = r"""<!DOCTYPE html>
     function runDotClass(run) {
       if (run && (run.live || run.status === "running")) return "running";
       if (runIsCanceled(run) || (run && run.status === "canceled")) return "canceled";
+      if (run && (run.status === "paused" || run.paused)) return "paused";
       return run && run.status === "error" ? "error" : "ok";
     }
 
@@ -2054,7 +2060,14 @@ PAGE = r"""<!DOCTYPE html>
       const date = when && !Number.isNaN(when.getTime())
         ? formatClock(when) + "  " + formatDayEn(when)
         : (run.created_at || "");
-      return [date, run.mode || "run", formatElapsed(run.elapsed_ms)].filter(Boolean).join("  ·  ");
+      const kind = runIsCanceled(run)
+        ? "canceled"
+        : run.status === "error"
+          ? "failed"
+          : run.status === "paused"
+            ? "paused"
+            : (run.mode || "run");
+      return [date, kind, formatElapsed(run.elapsed_ms)].filter(Boolean).join("  ·  ");
     }
 
     function taskOrder(runsNewestFirst) {
@@ -2073,14 +2086,23 @@ PAGE = r"""<!DOCTYPE html>
 
     function cellStatus(run, node) {
       const hits = (run.steps || []).filter((step) => step.node === node);
-      if (!hits.length) return "skip";
+      if (!hits.length) {
+        const waiting = (run.next || []).some((name) => name === node);
+        if (waiting && (run.status === "paused" || run.paused) && !runIsCanceled(run)) {
+          return "paused";
+        }
+        return "skip";
+      }
       if (hits.some((step) => step.status === "error" || step.error)) return "error";
+      if (hits.some((step) => step.canceled || step.status === "canceled")) return "canceled";
       if (hits.some((step) => step.pending || step.status === "running")) return "running";
       return "ok";
     }
 
     function cellLabel(status) {
       if (status === "error") return "✕";
+      if (status === "canceled") return "–";
+      if (status === "paused") return "❚";
       if (status === "skip") return "○";
       if (status === "running") return "●";
       return "✓";
@@ -5063,9 +5085,9 @@ PAGE = r"""<!DOCTYPE html>
         .filter((item) => item.pipeline === stem)
         .reduce((sum, item) => sum + (Number(item.visits) || 0), 0);
       const out = statsRunOutcomes(stem);
-      const pcts = statsBarPercents([out.ok, out.fail, out.canceled]);
-      let meta = out.ok + " ok · " + out.fail + " failed · " + out.canceled + " canceled";
-      if (out.paused) meta += " · " + out.paused + " paused";
+      const pcts = statsBarPercents([out.ok, out.fail, out.canceled, out.paused]);
+      const meta = out.ok + " success · " + out.fail + " failed · " +
+        out.canceled + " canceled · " + out.paused + " paused";
       const el = document.createElement("div");
       el.className = "st-sum";
       el.innerHTML =
@@ -5075,10 +5097,12 @@ PAGE = r"""<!DOCTYPE html>
         '<i class="ok" style="width:' + pcts[0] + '%"></i>' +
         '<i class="fail" style="width:' + pcts[1] + '%"></i>' +
         '<i class="canceled" style="width:' + pcts[2] + '%"></i>' +
+        '<i class="paused" style="width:' + pcts[3] + '%"></i>' +
         "</div>" + statsColorTip([
           { kind: "ok", label: "success" },
           { kind: "fail", label: "failed" },
           { kind: "canceled", label: "canceled" },
+          { kind: "paused", label: "paused" },
         ]) +
         '<div class="meta">' + escapeHtml(meta) + "</div></div>";
       return el;
@@ -5119,23 +5143,22 @@ PAGE = r"""<!DOCTYPE html>
     function statsRuntimeSummary(stem) {
       const row = statsPipeRow(stem);
       const runs = Number(row.runs) || 0;
-      const timed = Number(row.elapsed_n) || 0;
-      const wall = Number(row.elapsed_ms) || 0;
       const times = (statsData.runs || [])
-        .filter((item) => item.pipeline === stem)
+        .filter((item) => item.pipeline === stem && item.status === "ok")
         .map((item) => Number(item.elapsed_ms))
         .filter((n) => Number.isFinite(n) && n > 0)
         .sort((a, b) => a - b);
-      const denom = timed || times.length;
-      const avg = avgTok(wall, denom);
+      const wall = times.reduce((sum, n) => sum + n, 0);
+      const avg = avgTok(wall, times.length);
       const maxMs = times.length ? times[times.length - 1] : 0;
-      const pcts = statsBarPercents([avg, Math.max(0, maxMs - avg)]);
+      const pcts = statsBarPercents([avg, maxMs]);
+      const others = Math.max(0, runs - times.length);
       let meta = "";
-      if (!wall && !maxMs) meta = "no timing recorded";
+      if (!times.length) meta = "no successful timing";
       else {
-        meta = formatElapsed(avg) + " avg · " + formatElapsed(maxMs) + " max";
-        if (timed && timed !== runs) meta += " · " + timed + " timed";
-        else meta += " · " + runs + " run" + (runs === 1 ? "" : "s");
+        meta = formatElapsed(avg) + " avg · " + formatElapsed(maxMs) + " max · " +
+          times.length + " successful";
+        if (others) meta += " · " + others + " other";
       }
       const el = document.createElement("div");
       el.className = "st-sum";

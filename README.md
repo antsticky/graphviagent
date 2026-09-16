@@ -6,14 +6,12 @@ Local Graph-View-Agent for LangGraph. Scan `*_pipeline.py` files, record runs un
 
 Pipeline files do not import GraphVIAgent. Only runs you start from the UI or CLI are stored.
 
-## What's new in 1.2.0
+## What's new in 1.2.1-dev
 
-- **Statistics** — Routing (success / failed / canceled, grouped branch reasons), Runtime (average vs longest run), and Cost (average tokens, pipeline totals) on the Trace topology. Hover a color strip for a dotted legend
-- **Cancel** is its own run status (`canceled`), not a failed run — including the history filter
-- Jump Trace ↔ Runs ↔ Statistics for the same pipeline (`#/runs/<name>`, `#/statistics/<name>`)
-- Local origin check, run `schema_version` / `gva_version`, Pipelines renamed to **Runs**
+- Routing strip counts paused with success / failed / canceled. Runtime average vs longest uses successful runs only
+- Cancel mid-node keeps that visit’s timing; Routing shows **canceled**, not END
 
-See [CHANGELOG.md](CHANGELOG.md).
+See [CHANGELOG.md](CHANGELOG.md) for 1.2.0.
 
 ## Requirements
 
@@ -146,7 +144,7 @@ If a node returns `messages` or tool calls, they render as a thread above the JS
 
 ### Runs
 
-Airflow-style grid: duration bars, then task × run (`✓` / `✕` / `○`). Click the name to open Trace. Click a bar, cell, or ▶ to open that run. **Trace** and **Statistics** jump to this pipeline (`#/runs/<name>`). **Clear** deletes every run for that pipeline.
+Airflow-style grid: duration bars, then task × run (`✓` / `✕` / `○` / paused amber). Click the name to open Trace. Click a bar, cell, or ▶ to open that run. **Trace** and **Statistics** jump to this pipeline (`#/runs/<name>`). **Clear** deletes every run for that pipeline.
 
 Failed nodes stay in history and show as red.
 
@@ -156,7 +154,7 @@ Open **Compare**. Filter by pipeline (default **all**). When a pipeline is selec
 
 ### Statistics
 
-Open **Statistics** (`#/statistics/<name>`). Choose a pipeline — there is no **all** view. **Trace** and **Runs** jump to that pipeline. **Routing**, **Runtime**, and **Cost** draw the same topology as Trace. Routing shows run count, average node visits per run, and a success / failed / canceled split. Runtime writes average duration on each node and a pipeline grand total / average per run (violet average vs orange longest run). Cost writes average in/out tokens on each node, a total badge, and a pipeline grand total / average per run. Hover a color strip for a legend of color dots and labels, one per line. Click a node on Routing to see branches grouped together, with similar `reason` text collapsed into a pattern. Click a node on Runtime for min / avg / max.
+Open **Statistics** (`#/statistics/<name>`). Choose a pipeline — there is no **all** view. **Trace** and **Runs** jump to that pipeline. **Routing**, **Runtime**, and **Cost** draw the same topology as Trace. Routing shows run count, average node visits per run, and a success / failed / canceled / paused split. Runtime writes average duration on each node and a pipeline grand total / average per successful run (violet average vs orange max on the same strip as Cost / Routing). Cost writes average in/out tokens on each node, a total badge, and a pipeline grand total / average per run. Hover a color strip for a legend of color dots and labels, one per line. Click a node on Routing to see branches grouped together, with similar `reason` text collapsed into a pattern. Click a node on Runtime for min / avg / max.
 
 ## Where runs are stored
 

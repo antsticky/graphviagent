@@ -743,6 +743,22 @@ def _install_node_probes(
     return probes, restore, lock
 
 
+def _unfinished_probe_node(
+    probes: list[dict],
+    lock: threading.Lock | None = None,
+) -> str | None:
+    if lock is not None:
+        lock.acquire()
+    try:
+        leftover = [probe for probe in probes if probe.get("node")]
+        if not leftover:
+            return None
+        return str(leftover[-1].get("node") or "") or None
+    finally:
+        if lock is not None:
+            lock.release()
+
+
 def _take_probe(
     probes: list[dict],
     node: str,
@@ -951,7 +967,7 @@ def _is_cancelled(exc: BaseException) -> bool:
     seen: set[int] = set()
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, RunCancelled) or str(current) == "cancelled":
+        if isinstance(current, RunCancelled):
             return True
         current = current.__cause__ or current.__context__
     return False
@@ -1723,6 +1739,38 @@ def _execute_run(
             sync_live_state()
         elif _is_cancelled(exc):
             run_canceled = True
+            flush_pending()
+            interrupted = _unfinished_probe_node(probes, probe_lock)
+            if interrupted:
+                ended_ms = _elapsed_ms(clock0)
+                step, state = _build_step(
+                    node=interrupted,
+                    update={},
+                    ended_ms=ended_ms,
+                    state=state,
+                    visits=visits,
+                    probes=probes,
+                    probe_lock=probe_lock,
+                    completed_end=completed_end,
+                    edges=edges,
+                    wall0=wall0,
+                    superstep=superstep,
+                    source_map=source_map,
+                )
+                step["canceled"] = True
+                step["reason"] = "canceled"
+                step["choice"] = "canceled"
+                step["index"] = len(steps)
+                steps.append(step)
+                push({
+                    "type": "log",
+                    "t": ended_ms,
+                    "src": interrupted,
+                    "text": "canceled",
+                    "level": "info",
+                })
+                emit({"type": "step", "step": step})
+                emit({"type": "state", "state": jsonable(state)})
         else:
             run_error = _format_error(exc)
             if resume and (

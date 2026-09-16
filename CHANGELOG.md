@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.1-dev
+
+### Fixed
+- Routing color strip includes paused (amber) so it matches the grand total; caption and legend say **success**, not ok
+- Runtime average / max / grand total use successful runs only (canceled, failed, and paused are listed as “other”)
+- Runtime strip is the same single line as Cost / Routing, with average vs max (not max − avg)
+- A canceled run no longer records the last visited node as `END`; Routing shows a **canceled** outcome instead
+- Cancel mid-node writes that node as a timed step (`canceled: true`), so Runtime node times include the interrupted visit
+- `_is_cancelled` matches `RunCancelled` only, not any exception whose message is `"cancelled"`
+- Runs-board bar hover names canceled / failed / paused instead of a generic `run`
+- Runs board duration bars (and waiting cells) show paused in amber
+
 ## 1.2.0
 
 ### Added

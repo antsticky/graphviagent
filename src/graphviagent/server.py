@@ -211,7 +211,7 @@ PAGE = r"""<!DOCTYPE html>
     .af-card {
       background: #17171c; border: 1px solid var(--line);
       border-radius: 10px; padding: 16px 18px 18px; margin: 0 0 16px;
-      overflow: auto;
+      overflow: auto; scroll-margin-top: 56px;
     }
     .af-card.active { border-color: #3d3d4a; }
     .af-head {
@@ -366,19 +366,38 @@ PAGE = r"""<!DOCTYPE html>
     }
     .copy-wrap:hover .resize-s::after { background: #5c5c66; }
     textarea:focus { border-color: var(--accent); }
-    button.primary, button.ghost {
+    button.primary, button.ghost, button.danger {
       height: 30px; padding: 0 12px; border-radius: 7px;
       font: 500 12px Inter, sans-serif; cursor: pointer;
+      box-sizing: border-box; line-height: 1;
+      display: inline-flex; align-items: center; justify-content: center;
     }
     button.primary { background: var(--accent); color: #fff; border: 0; }
     button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
     button.ghost:hover { background: #1f1f26; }
-    button.ghost:disabled, button.primary:disabled {
+    button.ghost:disabled, button.primary:disabled, button.danger:disabled {
       opacity: 0.4; cursor: not-allowed;
     }
     button.ghost:disabled:hover { background: transparent; }
     button.cancel { border-color: #7f1d1d; color: #fca5a5; }
     button.cancel:hover { background: #2a1518; }
+    button.ghost.danger, button.danger {
+      border: 1px solid #7f1d1d; color: #fca5a5; background: transparent;
+    }
+    button.ghost.danger:hover, button.danger:hover { background: #2a1518; }
+    button.ghost.danger:disabled:hover, button.danger:disabled:hover { background: transparent; }
+    button.jump-trace {
+      background: rgba(249, 115, 22, 0.16); border-color: #9a3412; color: #fdba74;
+    }
+    button.jump-trace:hover { background: rgba(249, 115, 22, 0.28); }
+    button.jump-runs {
+      background: rgba(6, 182, 212, 0.16); border-color: #155e75; color: #a5f3fc;
+    }
+    button.jump-runs:hover { background: rgba(6, 182, 212, 0.28); }
+    button.jump-stats {
+      background: rgba(192, 132, 252, 0.16); border-color: #6b21a8; color: #e9d5ff;
+    }
+    button.jump-stats:hover { background: rgba(192, 132, 252, 0.28); }
     .run-live {
       color: #c4b5fd; font-size: 12px; font-weight: 500;
       display: inline-flex; align-items: center; gap: 6px;
@@ -929,7 +948,10 @@ PAGE = r"""<!DOCTYPE html>
       display: flex; align-items: flex-end; justify-content: space-between;
       gap: 16px; flex-wrap: wrap; margin: 0 0 20px;
     }
-    .st-toolbar .cmp-filter { margin: 0; max-width: 280px; }
+    .st-toolbar .st-nav {
+      display: flex; align-items: center; gap: 8px;
+    }
+    .st-toolbar .st-nav .view-switch { margin-right: 0; }
     .st-kpis {
       display: grid; grid-template-columns: 1.6fr 1fr 1fr 1fr;
       gap: 10px; margin: 0 0 16px;
@@ -1303,9 +1325,15 @@ PAGE = r"""<!DOCTYPE html>
             <option value="">Select a pipeline</option>
           </select>
         </div>
-        <span class="view-switch">
-          <button type="button" class="ghost active" id="statsTabRouting">Routing</button>
-          <button type="button" class="ghost" id="statsTabCost">Cost</button>
+        <span class="st-nav">
+          <span class="view-switch">
+            <button type="button" class="ghost jump-trace" id="gotoTraceFromStats">Trace</button>
+            <button type="button" class="ghost jump-runs" id="gotoRunsFromStats">Runs</button>
+          </span>
+          <span class="view-switch">
+            <button type="button" class="ghost active" id="statsTabRouting">Routing</button>
+            <button type="button" class="ghost" id="statsTabCost">Cost</button>
+          </span>
         </span>
       </div>
       <div id="statsBoard"></div>
@@ -1373,7 +1401,9 @@ PAGE = r"""<!DOCTYPE html>
         <button class="ghost" id="replayFromBtn" disabled>Replay from</button>
         <button class="ghost" id="exportBtn" disabled>Export</button>
         <button class="ghost" id="importBtn">Import</button>
-        <button class="ghost" id="deleteBtn">Delete run</button>
+        <button class="ghost jump-runs" id="gotoRunsFromTrace">Runs</button>
+        <button class="ghost jump-stats" id="gotoStatsFromTrace">Statistics</button>
+        <button class="ghost danger" id="deleteBtn">Delete run</button>
       </div>
       <div id="pauseBanner" class="pause-banner" hidden></div>
       <div id="hitlPanel" class="hitl-panel" hidden>
@@ -1518,6 +1548,8 @@ PAGE = r"""<!DOCTYPE html>
     let topoMarkerSeq = 0;
     let statsTab = "routing";
     let statsChoice = null;
+    let statsPipePreferred = "";
+    let runsFocusStem = "";
     let graphZoom = 1;
     let graphPanX = 0;
     let graphPanY = 0;
@@ -2017,7 +2049,8 @@ PAGE = r"""<!DOCTYPE html>
       const slots = gridSlotCount();
       pipelines.forEach((p) => {
         const card = document.createElement("div");
-        card.className = "af-card" + (p.id === fileId ? " active" : "");
+        card.className = "af-card" + (p.id === fileId || p.stem === runsFocusStem ? " active" : "");
+        card.id = "pipe-" + p.stem;
         const newestFirst = p.recent || [];
         const columns = newestFirst.slice(0, slots).slice().reverse();
         const placeholders = Math.max(0, slots - columns.length);
@@ -2034,13 +2067,25 @@ PAGE = r"""<!DOCTYPE html>
         lastEl.textContent = last ? runHoverText(last) : "No runs";
         const actions = document.createElement("div");
         actions.className = "af-actions";
+        const toTrace = document.createElement("button");
+        toTrace.type = "button";
+        toTrace.className = "ghost jump-trace";
+        toTrace.textContent = "Trace";
+        toTrace.onclick = () => openPipeline(p.id).catch((e) => alert(e.message));
+        const toStats = document.createElement("button");
+        toStats.type = "button";
+        toStats.className = "ghost jump-stats";
+        toStats.textContent = "Statistics";
+        toStats.onclick = () => jumpToStatistics(p.stem);
         const clear = document.createElement("button");
         clear.type = "button";
-        clear.className = "ghost";
+        clear.className = "ghost danger";
         clear.textContent = "Clear";
         clear.disabled = !newestFirst.length;
         clear.onclick = () => clearPipelineRuns(p).catch((e) => alert(e.message));
         actions.appendChild(lastEl);
+        actions.appendChild(toTrace);
+        actions.appendChild(toStats);
         actions.appendChild(clear);
         head.appendChild(title);
         head.appendChild(actions);
@@ -2162,10 +2207,30 @@ PAGE = r"""<!DOCTYPE html>
       });
     }
 
+    function hashParts() {
+      const raw = String(location.hash || "").replace(/^#\/?/, "");
+      const segs = raw.split("/").filter(Boolean);
+      let rest = "";
+      try {
+        rest = segs.slice(1).map(decodeURIComponent).join("/");
+      } catch (err) {
+        rest = segs.slice(1).join("/");
+      }
+      return { view: segs[0] || "", rest: rest };
+    }
+
     function viewFromHash() {
-      if (location.hash === "#/runs" || location.hash === "#/pipelines") return "runs";
-      if (location.hash === "#/compare") return "compare";
-      if (location.hash === "#/statistics" || location.hash === "#/stats") return "statistics";
+      const parts = hashParts();
+      const view = parts.view;
+      if (view === "runs" || view === "pipelines") {
+        if (parts.rest) runsFocusStem = parts.rest;
+        return "runs";
+      }
+      if (view === "compare") return "compare";
+      if (view === "statistics" || view === "stats") {
+        if (parts.rest) statsPipePreferred = parts.rest;
+        return "statistics";
+      }
       return "trace";
     }
 
@@ -2184,8 +2249,15 @@ PAGE = r"""<!DOCTYPE html>
       if (currentView === "runs") renderPipeBoard();
       if (currentView === "compare") loadCompare().catch((e) => alert(e.message));
       if (currentView === "statistics") loadStats().catch((e) => alert(e.message));
-      const hash = "#/" + currentView;
+      let hash = "#/" + currentView;
+      if (currentView === "runs" && runsFocusStem) hash += "/" + encodeURIComponent(runsFocusStem);
       if (location.hash !== hash) location.hash = hash;
+      if (currentView === "runs" && runsFocusStem) {
+        requestAnimationFrame(() => {
+          const el = document.getElementById("pipe-" + runsFocusStem);
+          if (el && el.scrollIntoView) el.scrollIntoView({ block: "start", behavior: "smooth" });
+        });
+      }
     }
 
     async function openPipeline(pipelineId) {
@@ -4400,9 +4472,35 @@ PAGE = r"""<!DOCTYPE html>
       return !!pipe && row.pipeline === pipe;
     }
 
+    function jumpToRuns(stem) {
+      if (stem) runsFocusStem = stem;
+      else {
+        const pipe = currentPipeline();
+        runsFocusStem = (pipe && pipe.stem) || statsPipeFilter() || "";
+      }
+      showView("runs");
+    }
+
+    function jumpToStatistics(stem) {
+      if (stem) statsPipePreferred = stem;
+      else {
+        const pipe = currentPipeline();
+        if (pipe && pipe.stem) statsPipePreferred = pipe.stem;
+      }
+      showView("statistics");
+    }
+
+    async function jumpToTrace(pipelineId) {
+      if (pipelineId) {
+        await openPipeline(pipelineId);
+        return;
+      }
+      showView("trace");
+    }
+
     function fillStatsPipeFilter() {
       const sel = $("statsPipe");
-      const keep = sel.value || "";
+      const keep = statsPipePreferred || sel.value || "";
       const stems = Array.from(new Set([
         ...(pipelines || []).map((p) => p.stem),
         ...(statsData.pipelines || []).map((row) => row.pipeline),
@@ -4416,6 +4514,7 @@ PAGE = r"""<!DOCTYPE html>
         sel.appendChild(opt);
       });
       sel.value = stems.indexOf(keep) >= 0 ? keep : "";
+      statsPipePreferred = sel.value;
     }
 
     function setStatsTab(name) {
@@ -5189,11 +5288,23 @@ PAGE = r"""<!DOCTYPE html>
       if (event.target === $("nodeView")) closeNodeView();
     };
     $("navTrace").onclick = () => showView("trace");
-    $("navPipelines").onclick = () => showView("runs");
+    $("navPipelines").onclick = () => {
+      runsFocusStem = "";
+      showView("runs");
+    };
     $("navCompare").onclick = () => showView("compare");
     $("navStats").onclick = () => showView("statistics");
+    $("gotoRunsFromTrace").onclick = () => jumpToRuns();
+    $("gotoStatsFromTrace").onclick = () => jumpToStatistics();
+    $("gotoTraceFromStats").onclick = () => {
+      const stem = statsPipeFilter();
+      const id = stem ? fileIdForStem(stem) : fileId;
+      jumpToTrace((pipelines || []).some((item) => item.id === id) ? id : "").catch((e) => alert(e.message));
+    };
+    $("gotoRunsFromStats").onclick = () => jumpToRuns(statsPipeFilter());
     $("statsPipe").onchange = () => {
       statsChoice = null;
+      statsPipePreferred = statsPipeFilter();
       renderStats();
     };
     $("statsTabRouting").onclick = () => setStatsTab("routing");

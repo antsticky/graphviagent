@@ -115,7 +115,7 @@ graphviagent serve . --host 0.0.0.0 --expose
 
 `--expose` prints a warning. Anyone who can open that URL can run your pipelines and read stored runs.
 
-New or edited `*_pipeline.py` files refresh the sidebar on their own. You do not need to restart `serve`. A file-change panel (bottom right) shows when a pipeline appears, is modified, or its SHA256 hash changes.
+New or edited `*_pipeline.py` files (and toml-listed pipelines, including files outside the serve root) refresh the sidebar on their own. You do not need to restart `serve`. A file-change panel (bottom right) shows when a pipeline appears, is modified, or its SHA256 hash changes.
 
 ### Trace
 
@@ -143,7 +143,7 @@ Failed nodes stay in history and show as red.
 
 ### Compare
 
-Open **Compare**. Filter by pipeline (default **all**). When a pipeline is selected, Run A and Run B only list that pipeline’s runs. Diff input, path, per-node output, and timing. Hover a cell and use **Copy**.
+Open **Compare**. Filter by pipeline (default **all**). When a pipeline is selected, Run A and Run B only list that pipeline’s runs. Diff input, path, per-node output, and timing. If a node ran more than once (loop or branch), each visit is aligned separately. Hover a cell and use **Copy**.
 
 ## Where runs are stored
 
@@ -186,7 +186,7 @@ file = "decision_pipeline.py"
 - `root` and `pythonpath` are resolved relative to the toml file, not the process cwd
 - `pythonpath` is inserted on `sys.path` before the pipeline runs; the file's own directory is always added too
 - `env_file` loads `KEY=VALUE` lines without overwriting variables already in the environment
-- If any `[pipeline.*]` tables exist, those files are the pipelines (`file` may be any `.py`). Optional `factory = "build_graph"`
+- If any `[pipeline.*]` tables exist, those files are the pipelines (`file` may be any `.py`, including a path outside the serve root). Optional `factory = "build_graph"`
 - If there are no `[pipeline.*]` tables, GraphVIAgent still globs `*_pipeline.py`
 
 `graphviagent serve /path/to/proj` uses that project's toml even when cwd is elsewhere.

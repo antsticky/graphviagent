@@ -1,10 +1,26 @@
 # Changelog
 
-## 1.1.3-dev
+## 1.1.4-dev
 
 ### Added
 - Origin / `Host` check on the local UI so other websites cannot trigger runs; `--host 0.0.0.0` requires `--expose` and prints a warning
 - `schema_version` (currently `1`) and `gva_version` on saved runs; older files still load, newer schemas are refused
+
+### Fixed
+- `load_run` returns `None` for truncated or invalid JSON instead of raising (open/compare 404, not 500)
+- Failed pipeline imports are not kept in the serve cache, so a fixed dependency reloads without a file-hash change
+- Cancel after Resume matches both the run id and the LangGraph `thread_id`
+- Delete, list, and import resolve toml pipeline ids (including files outside the serve root) instead of `Path.stem`
+- File watch covers toml-listed pipelines whose files live outside the workspace
+- Compare aligns every visit of a node (loops and branches) instead of only the first
+
+### Changed
+- Rename the Pipelines page to **Runs** (`#/runs`; `#/pipelines` still opens it)
+- Duration and memory labels scale (µs/ms/s, B/KB/MB/GB); Gantt hover Start/End use clock time
+
+## 1.1.3-dev
+
+### Added
 - `graphviagent.toml` for project `root`, `pythonpath`, `env_file`, `context`, and explicit `[pipeline.*]` entries
 - LLM usage callbacks (`on_llm_end` / `on_chat_model_end`) so token counts follow billed `usage_metadata`, including replay and `with_structured_output`
 - Source mapping: node `file:line` from `inspect`, clickable `vscode://file` links, and traceback frames on failed steps
@@ -12,13 +28,7 @@
 - Live control: topology gutter breakpoints (`interrupt_before`), **Step** / **Continue**, and HITL **Resume** via `Command(resume=…)`
 - `examples/hitl_pipeline.py` — draft node calls `interrupt`; Resume from the UI with `true` or `"edit this"`
 
-### Fixed
-- `load_run` returns `None` for truncated or invalid JSON instead of raising (open/compare 404, not 500)
-- Failed pipeline imports are not kept in the serve cache, so a fixed dependency reloads without a file-hash change
-- Cancel after Resume matches both the run id and the LangGraph `thread_id`
-
 ### Changed
-- Rename the Pipelines page to **Runs** (`#/runs`; `#/pipelines` still opens it)
 - Require Python 3.11+ (`tomllib`)
 - Load `*_pipeline.py` with the file's directory (and toml `pythonpath`) on `sys.path`, independent of process cwd
 - Graph extract order is `build_graph()` / `get_graph()` / `create_graph()` / `__graph__`, then `GRAPH`, then a compiled `app` (`stream` + `invoke` only)

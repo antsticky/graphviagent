@@ -461,7 +461,7 @@
         </article>
         <article class="af-card">
           <h3><span class="af-mark board"></span> Runs board and Compare</h3>
-          <p>Runs is an Airflow-style grid of duration and task × run. Compare diffs input, path, per-node output, and timing between two runs.</p>
+          <p>Runs is an Airflow-style grid of duration and task × run. Compare diffs input, path, per-node output, and timing between two runs, including each visit when a node ran more than once.</p>
         </article>
         <article class="af-card">
           <h3><span class="af-mark cancel"></span> Cancel, three at a time</h3>
@@ -469,7 +469,7 @@
         </article>
         <article class="af-card">
           <h3><span class="af-mark hist"></span> Local history</h3>
-          <p>Each run is JSON under <code>.graphviagent/runs/&lt;pipeline&gt;/</code>. Export, import, or drop a file on the run list. Search input fields. Filter success or failed.</p>
+          <p>Each run is JSON under <code>.graphviagent/runs/&lt;pipeline&gt;/</code>. Export, import, or drop a file on the run list. Search input fields. Filter success, paused, or failed.</p>
         </article>
         <article class="af-card">
           <h3><span class="af-mark state"></span> State you can trust</h3>
@@ -528,9 +528,11 @@ def build_graph():
         <span class="step-n">3</span>
         <h3>Open the UI</h3>
         <pre>graphviagent serve . --open</pre>
-        <p>Or open <a href="http://127.0.0.1:8765">http://127.0.0.1:8765</a>. Leave the terminal running. New or edited <code>*_pipeline.py</code> files refresh the sidebar without a restart.</p>
+        <p>Or open <a href="http://127.0.0.1:8765">http://127.0.0.1:8765</a>. Leave the terminal running. The UI only accepts requests from its own origin. Bind stays on localhost unless you pass <code>--expose</code>:</p>
         <pre>graphviagent serve . --port 9000
-graphviagent serve . --host 127.0.0.1</pre>
+graphviagent serve . --host 127.0.0.1
+graphviagent serve . --host 0.0.0.0 --expose</pre>
+        <p><code>--expose</code> prints a warning. Anyone who can open that URL can run your pipelines and read stored runs. New or edited <code>*_pipeline.py</code> files (and toml-listed pipelines, including files outside the serve root) refresh the sidebar without a restart.</p>
       </article>
       <article class="step-card">
         <span class="step-n">4</span>
@@ -568,22 +570,23 @@ context = {}
 
 [pipeline.decision]
 file = "decision_pipeline.py"</pre>
-          <p>With <code>[pipeline.*]</code> tables, those files are the graphs (<code>file</code> may be any <code>.py</code>). Without them, GraphVIAgent globs <code>*_pipeline.py</code>.</p>
+          <p>With <code>[pipeline.*]</code> tables, those files are the graphs (<code>file</code> may be any <code>.py</code>, including a path outside the serve root). Those files are watched too. Without them, GraphVIAgent globs <code>*_pipeline.py</code>.</p>
         </article>
         <article class="topic">
           <h3>Trace</h3>
           <ul>
             <li><strong>Graph</strong> — static map of nodes and edges. Taken paths, skipped branches, loops, and parallel <code>Send</code> fan-out.</li>
-            <li><strong>Gantt</strong> — wall-clock bars per node. Hover for timing, memory, and tokens when present.</li>
+            <li><strong>Gantt</strong> — wall-clock bars per node. Hover for start/end clock time, duration, memory, and tokens when present.</li>
             <li><strong>Agents</strong> — speaker chain when a node returns <code>messages</code>.</li>
             <li><strong>Steps</strong> — visit order with duration and spark metrics.</li>
             <li><strong>Final state</strong>, <strong>Log</strong>, <strong>Memory</strong>, and <strong>Text tree</strong> fold under Steps.</li>
           </ul>
-          <p>History search matches input fields. Filter all / success / failed. <strong>Export</strong> downloads the open run as JSON. <strong>Import</strong> or drop a file on the run list. <strong>Delete run</strong> removes the open run.</p>
+          <p>Node cards show <code>file:line</code>; click to open in the editor. Failed nodes include a traceback. Click the gutter dot on a topology card to break before that node. <strong>Continue</strong> resumes with those breakpoints; <strong>Step</strong> runs the next node and pauses again. Human-in-the-loop graphs (<code>interrupt(...)</code>) pause with <strong>Resume</strong>.</p>
+          <p>History search matches input fields. Filter all / success / paused / failed. <strong>Export</strong> downloads the open run as JSON. <strong>Import</strong> or drop a file on the run list. <strong>Delete run</strong> removes the open run.</p>
         </article>
         <article class="topic">
           <h3>Node view</h3>
-          <p>Shows node input, output, a state diff (<code>state_in</code> vs <code>state_out</code>), and tools when the update has tool calls. <strong>Call node</strong> is the same as Replay step: it invokes the real node.</p>
+          <p>Shows node input, output, a state diff (<code>state_in</code> vs <code>state_out</code>), and tools when the update has tool calls. Failed steps include traceback frames. <strong>Call node</strong> is the same as Replay step: it invokes the real node.</p>
         </article>
         <article class="topic">
           <h3>Replay</h3>
@@ -595,7 +598,7 @@ file = "decision_pipeline.py"</pre>
         </article>
         <article class="topic">
           <h3>Compare</h3>
-          <p>Open Compare. Filter by pipeline (default all). Pick Run A and Run B. Diff input, path, per-node output, and timing. Hover a cell to copy.</p>
+          <p>Open Compare. Filter by pipeline (default all). Pick Run A and Run B. Diff input, path, per-node output, and timing. If a node ran more than once (loop or branch), each visit is aligned separately. Hover a cell to copy.</p>
         </article>
         <article class="topic">
           <h3>Privacy and storage</h3>

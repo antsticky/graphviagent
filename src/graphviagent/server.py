@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
+from graphviagent.config import GVAConfig, activate_config, load_config
 from graphviagent.discover import discover_pipelines
 from graphviagent.graph_hash import attach_graph_meta
 from graphviagent.load import LoadedPipeline, load_pipeline
@@ -3963,6 +3964,7 @@ PAGE = r"""<!DOCTYPE html>
 class GraphVIHandler(BaseHTTPRequestHandler):
     workspace: Path
     cache: dict[str, LoadedPipeline]
+    config: GVAConfig
     watcher: PipelineWatcher | None = None
     active_runs: dict[str, threading.Event] = {}
     run_lock = threading.Lock()
@@ -4030,26 +4032,38 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         return json.loads(raw.decode() or "{}")
 
     def _rel_id(self, path: Path) -> str:
-        return path.resolve().relative_to(self.workspace.resolve()).as_posix()
+        resolved = path.resolve()
+        workspace = self.workspace.resolve()
+        try:
+            return resolved.relative_to(workspace).as_posix()
+        except ValueError:
+            return resolved.as_posix()
+
+    def _pipelines(self) -> list[Path]:
+        return discover_pipelines(self.workspace, self.config)
+
+    def _pipeline_stem(self, path: Path) -> str:
+        return self.config.stem_for(path)
 
     def _known_stems(self) -> list[str]:
-        return [path.stem for path in discover_pipelines(self.workspace)]
+        return [self._pipeline_stem(path) for path in self._pipelines()]
 
     def _scan_files(self) -> list[dict]:
         if self.watcher is not None:
             self.watcher.refresh(emit=True)
             return self.watcher.files()
         items = []
-        for path in discover_pipelines(self.workspace):
+        for path in self._pipelines():
             try:
-                sha = file_sha256(path)
-                mtime = path.stat().st_mtime
+                resolved = path.resolve()
+                sha = file_sha256(resolved)
+                mtime = resolved.stat().st_mtime
             except OSError:
                 continue
             items.append(
                 {
-                    "id": self._rel_id(path),
-                    "stem": path.stem,
+                    "id": self._rel_id(resolved),
+                    "stem": self._pipeline_stem(resolved),
                     "mtime": mtime,
                     "sha256": sha,
                 }
@@ -4059,14 +4073,14 @@ class GraphVIHandler(BaseHTTPRequestHandler):
     def _load_listed(self, file_id: str) -> LoadedPipeline:
         path = (self.workspace / file_id).resolve()
         if self.workspace.resolve() not in path.parents and path != self.workspace.resolve():
-            loaded = LoadedPipeline(path=path, stem=path.stem)
+            loaded = LoadedPipeline(path=path, stem=self._pipeline_stem(path))
             loaded.error = "path outside workspace"
             return loaded
         try:
             sha = file_sha256(path)
         except OSError:
             sha = None
-        loaded = load_pipeline(path)
+        loaded = load_pipeline(path, self.config)
         loaded._sha256 = sha  # type: ignore[attr-defined]
         self.cache[file_id] = loaded
         return loaded
@@ -4081,7 +4095,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
             sha = None
         cached = self.cache.get(file_id)
         if cached is None or sha is None or getattr(cached, "_sha256", None) != sha:
-            loaded = load_pipeline(path)
+            loaded = load_pipeline(path, self.config)
             loaded._sha256 = sha  # type: ignore[attr-defined]
             self.cache[file_id] = loaded
             cached = loaded
@@ -4123,14 +4137,15 @@ class GraphVIHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/pipelines":
             items = []
-            for path in discover_pipelines(self.workspace):
+            for path in self._pipelines():
                 file_id = self._rel_id(path)
                 loaded = self._load_listed(file_id)
-                runs = list_runs(self.workspace, path.stem, include_steps=True, limit=30)
+                stem = self._pipeline_stem(path)
+                runs = list_runs(self.workspace, stem, include_steps=True, limit=30)
                 items.append(
                     {
                         "id": file_id,
-                        "stem": path.stem,
+                        "stem": stem,
                         "examples": loaded.examples,
                         "error": loaded.error,
                             "graph": loaded.graph,
@@ -4258,8 +4273,8 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                     return
                 matches = [
                     path
-                    for path in discover_pipelines(self.workspace)
-                    if path.stem == run["pipeline"]
+                    for path in self._pipelines()
+                    if self._pipeline_stem(path) == run["pipeline"]
                 ]
                 if not matches:
                     raise RuntimeError(f"pipeline {run['pipeline']} not found")
@@ -4312,16 +4327,32 @@ def serve(
     host: str = "127.0.0.1",
     port: int = 8765,
     open_browser: bool = False,
+    config: GVAConfig | None = None,
 ) -> None:
+    if config is None:
+        config = load_config(workspace)
+        activate_config(config)
+    workspace = config.root
     handler = partial(GraphVIHandler)
-    GraphVIHandler.workspace = workspace.resolve()
+    GraphVIHandler.workspace = workspace
+    GraphVIHandler.config = config
     GraphVIHandler.cache = {}
 
     def invalidate(file_ids: list[str]) -> None:
         for file_id in file_ids:
             GraphVIHandler.cache.pop(file_id, None)
 
-    watcher = PipelineWatcher(GraphVIHandler.workspace, on_change=invalidate)
+    def on_config(updated: GVAConfig) -> None:
+        GraphVIHandler.config = updated
+        GraphVIHandler.workspace = updated.root
+        GraphVIHandler.cache.clear()
+
+    watcher = PipelineWatcher(
+        GraphVIHandler.workspace,
+        on_change=invalidate,
+        config=config,
+        on_config=on_config,
+    )
     watcher.start()
     GraphVIHandler.watcher = watcher
     server = ThreadingHTTPServer((host, port), handler)

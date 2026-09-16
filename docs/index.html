@@ -374,7 +374,7 @@
         </div>
         <div class="pills">
           <span class="pill">uninstrumented pipelines</span>
-          <span class="pill">Python 3.10+</span>
+          <span class="pill">Python 3.11+</span>
         </div>
       </div>
       <div class="mock" aria-hidden="true">
@@ -484,7 +484,7 @@
       <article class="step-card">
         <span class="step-n">1</span>
         <h3>Install</h3>
-        <p>Python 3.10 or newer. Use a virtualenv.</p>
+        <p>Python 3.11 or newer. Use a virtualenv.</p>
         <pre>python3 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
@@ -550,13 +550,25 @@ graphviagent serve . --host 127.0.0.1</pre>
       <div class="topics">
         <article class="topic">
           <h3>Pipeline contract</h3>
-          <p>A file is viewable if it is named <code>*_pipeline.py</code> and exposes one of:</p>
+          <p>A file is viewable if it is named <code>*_pipeline.py</code> (or listed in <code>graphviagent.toml</code>) and exposes, in this order:</p>
           <ul>
-            <li><code>build_graph()</code> / <code>get_graph()</code> / <code>create_graph()</code></li>
-            <li>compiled <code>GRAPH</code> or <code>app</code></li>
-            <li><code>__graph__ = "factory_name"</code></li>
+            <li><code>build_graph()</code> / <code>get_graph()</code> / <code>create_graph()</code> / <code>__graph__</code></li>
+            <li>compiled or <code>StateGraph</code> <code>GRAPH</code></li>
+            <li>compiled <code>app</code> (<code>stream</code> and <code>invoke</code> only)</li>
           </ul>
           <p>Do not import GraphVIAgent in the pipeline. The viewer loads the file and records runs you start from the UI or CLI.</p>
+        </article>
+        <article class="topic">
+          <h3>graphviagent.toml</h3>
+          <p>Optional project file. <code>root</code> and <code>pythonpath</code> are resolved relative to the toml, so <code>from app.graph import build_graph</code> works no matter where you launch <code>serve</code>.</p>
+          <pre>root = "."
+pythonpath = ["."]
+env_file = ".env"
+context = {}
+
+[pipeline.decision]
+file = "decision_pipeline.py"</pre>
+          <p>With <code>[pipeline.*]</code> tables, those files are the graphs (<code>file</code> may be any <code>.py</code>). Without them, GraphVIAgent globs <code>*_pipeline.py</code>.</p>
         </article>
         <article class="topic">
           <h3>Trace</h3>

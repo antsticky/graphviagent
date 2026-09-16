@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import threading
-from pathlib import Path
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
+from graphviagent.config import CONFIG_NAME, GVAConfig, activate_config, load_config
 from graphviagent.discover import SKIP_DIRS, discover_pipelines
 
 _DEBOUNCE_S = 0.2
@@ -29,19 +30,27 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def snapshot_files(workspace: Path) -> dict[str, dict[str, Any]]:
+def snapshot_files(
+    workspace: Path,
+    config: GVAConfig | None = None,
+) -> dict[str, dict[str, Any]]:
     workspace = workspace.resolve()
     items: dict[str, dict[str, Any]] = {}
-    for path in discover_pipelines(workspace):
+    for path in discover_pipelines(workspace, config):
         try:
-            stat = path.stat()
-            sha = file_sha256(path)
+            resolved = path.resolve()
+            stat = resolved.stat()
+            sha = file_sha256(resolved)
         except OSError:
             continue
-        rel = path.resolve().relative_to(workspace).as_posix()
+        try:
+            rel = resolved.relative_to(workspace).as_posix()
+        except ValueError:
+            rel = resolved.as_posix()
+        stem = config.stem_for(resolved) if config is not None else resolved.stem
         items[rel] = {
             "id": rel,
-            "stem": path.stem,
+            "stem": stem,
             "mtime": stat.st_mtime,
             "sha256": sha,
         }
@@ -61,7 +70,7 @@ class _DebouncedHandler(FileSystemEventHandler):
             if any(not _skipped(path) for path in paths):
                 self.watcher.schedule_refresh()
             return
-        if any(not _skipped(path) and _is_pipeline_name(path.name) for path in paths):
+        if any(not _skipped(path) and self.watcher.watches(path) for path in paths):
             self.watcher.schedule_refresh()
 
 
@@ -70,15 +79,43 @@ class PipelineWatcher:
         self,
         workspace: Path,
         on_change: Callable[[list[str]], None] | None = None,
+        config: GVAConfig | None = None,
+        on_config: Callable[[GVAConfig], None] | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self._on_change = on_change
+        self._on_config = on_config
+        self._config = config
+        self._toml_mtime: float | None = None
+        if config is not None and config.path is not None:
+            try:
+                self._toml_mtime = config.path.stat().st_mtime
+            except OSError:
+                self._toml_mtime = None
         self._lock = threading.Lock()
         self._seq = 0
         self._files: dict[str, dict[str, Any]] = {}
         self._events: list[dict[str, Any]] = []
         self._timer: threading.Timer | None = None
         self._observer: Observer | None = None
+
+    def watches(self, path: Path) -> bool:
+        if path.name == CONFIG_NAME:
+            return True
+        if _is_pipeline_name(path.name):
+            return True
+        try:
+            rel = path.resolve().relative_to(self.workspace).as_posix()
+        except ValueError:
+            return False
+        with self._lock:
+            if rel in self._files:
+                return True
+        config = self._config
+        if config is not None:
+            resolved = path.resolve()
+            return any(spec.file.resolve() == resolved for spec in config.pipelines.values())
+        return False
 
     def start(self) -> None:
         self.refresh(emit=False)
@@ -116,7 +153,8 @@ class PipelineWatcher:
             self._timer.start()
 
     def refresh(self, emit: bool = True) -> None:
-        nxt = snapshot_files(self.workspace)
+        reloaded = self._reload_config()
+        nxt = snapshot_files(self.workspace, self._config)
         changed: list[str] = []
         with self._lock:
             prev = self._files
@@ -131,8 +169,35 @@ class PipelineWatcher:
                     changed.append(file_id)
             self._files = nxt
             self._timer = None
+        if reloaded:
+            changed.append(CONFIG_NAME)
         if changed and self._on_change is not None:
             self._on_change(changed)
+
+    def _reload_config(self) -> bool:
+        toml_path = None
+        if self._config is not None and self._config.path is not None:
+            toml_path = self._config.path
+        else:
+            candidate = self.workspace / CONFIG_NAME
+            if candidate.is_file():
+                toml_path = candidate
+        if toml_path is None:
+            return False
+        try:
+            mtime = toml_path.stat().st_mtime
+        except OSError:
+            return False
+        if self._toml_mtime is not None and mtime == self._toml_mtime:
+            return False
+        config = load_config(self.workspace)
+        activate_config(config)
+        self._config = config
+        self._toml_mtime = mtime
+        self.workspace = config.root
+        if self._on_config is not None:
+            self._on_config(config)
+        return True
 
     def _emit(self, prev: dict[str, dict[str, Any]], nxt: dict[str, dict[str, Any]]) -> None:
         for file_id, item in nxt.items():

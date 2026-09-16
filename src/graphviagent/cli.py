@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from graphviagent.config import GVAConfig, activate_config, load_config
 from graphviagent.discover import discover_pipelines
 from graphviagent.graph_hash import attach_graph_meta
 from graphviagent.load import load_pipeline
@@ -13,46 +14,66 @@ from graphviagent.server import serve
 from graphviagent.store import save_run
 
 
-def _list_pipelines(root: Path) -> int:
-    found = discover_pipelines(root)
+def _workspace(path_arg: str) -> GVAConfig:
+    start = Path(path_arg).resolve()
+    if not start.exists():
+        raise SystemExit(f"path not found: {start}")
+    config = load_config(start)
+    activate_config(config)
+    return config
+
+
+def _list_pipelines(config: GVAConfig) -> int:
+    root = config.root
+    found = discover_pipelines(root, config)
     if not found:
-        print(f"no *_pipeline.py under {root}")
+        print(f"no pipelines under {root}")
         return 0
     for path in found:
-        loaded = load_pipeline(path)
-        rel = path.relative_to(root)
+        loaded = load_pipeline(path, config)
+        try:
+            rel = path.resolve().relative_to(root)
+            label = str(rel)
+        except ValueError:
+            label = loaded.stem
         if loaded.error:
-            print(f"{rel}  ERROR  {loaded.error}")
+            print(f"{label}  ERROR  {loaded.error}")
         else:
-            print(f"{rel}  ok  examples={len(loaded.examples)}")
+            print(f"{label}  ok  examples={len(loaded.examples)}")
     return 0
 
 
-def _resolve_pipeline(file: str, cwd: Path) -> Path:
+def _resolve_pipeline(file: str, config: GVAConfig) -> Path:
+    if file in config.pipelines:
+        return config.pipelines[file].file
+    for spec in config.pipelines.values():
+        if spec.file.name == file or spec.file.stem == file:
+            return spec.file
+    workspace = config.root
     raw = Path(file)
-    candidates = [raw, cwd / file]
+    candidates = [raw, workspace / file]
     stem = raw.name
     if stem.endswith(".py"):
         stem = raw.stem
     if not stem.endswith("_pipeline"):
-        candidates.append(cwd / f"{stem}_pipeline.py")
+        candidates.append(workspace / f"{stem}_pipeline.py")
     if not file.endswith(".py"):
-        candidates.append(cwd / f"{file}.py")
+        candidates.append(workspace / f"{file}.py")
     for path in candidates:
         if path.is_file():
             return path.resolve()
     raise SystemExit(f"pipeline not found: {file}")
 
 
-def _cmd_run(file: str, raw_input: str, workspace: Path) -> int:
-    path = _resolve_pipeline(file, workspace)
+def _cmd_run(file: str, raw_input: str, config: GVAConfig) -> int:
+    path = _resolve_pipeline(file, config)
     try:
         payload = json.loads(raw_input or "{}")
     except json.JSONDecodeError as exc:
         raise SystemExit(f"input must be JSON: {exc}") from exc
     if not isinstance(payload, dict):
         raise SystemExit("input must be a JSON object")
-    loaded = load_pipeline(path)
+    loaded = load_pipeline(path, config)
     if loaded.error:
         print(loaded.error, file=sys.stderr)
         return 1
@@ -65,7 +86,7 @@ def _cmd_run(file: str, raw_input: str, workspace: Path) -> int:
         has_checkpointer=loaded.has_checkpointer,
     )
     saved = save_run(
-        workspace,
+        config.root,
         loaded.stem,
         attach_graph_meta(run, loaded.graph, loaded.graph_hash, loaded.file_sha256),
     )
@@ -81,7 +102,7 @@ def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(
         prog="graphviagent",
-        description="GraphVIAgent — inspect and replay LangGraph *_pipeline.py files",
+        description="GraphVIAgent — inspect and replay LangGraph pipelines",
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -95,7 +116,7 @@ def main(argv: list[str] | None = None) -> None:
     serve_p.add_argument("--open", action="store_true", help="open the UI in a browser")
 
     run_p = sub.add_parser("run", help="record a run without the browser")
-    run_p.add_argument("file", help="pipeline file or stem")
+    run_p.add_argument("file", help="pipeline file, stem, or graphviagent.toml id")
     run_p.add_argument("--input", default="{}", help="JSON object")
 
     if not argv or argv[0] not in {"serve", "run", "list", "-h", "--help"}:
@@ -104,18 +125,26 @@ def main(argv: list[str] | None = None) -> None:
         args = parser.parse_args(argv)
 
     if args.command == "serve":
-        root = Path(args.path).resolve()
-        if not root.exists():
-            raise SystemExit(f"path not found: {root}")
-        serve(root, host=args.host, port=args.port, open_browser=args.open)
+        config = _workspace(args.path)
+        serve(
+            config.root,
+            host=args.host,
+            port=args.port,
+            open_browser=args.open,
+            config=config,
+        )
         return
     if args.command == "run":
-        raise SystemExit(_cmd_run(args.file, args.input, Path.cwd()))
+        start = Path.cwd()
+        raw = Path(args.file)
+        if raw.is_file():
+            start = raw.resolve()
+        config = load_config(start)
+        activate_config(config)
+        raise SystemExit(_cmd_run(args.file, args.input, config))
 
-    root = Path(args.path).resolve()
-    if not root.exists():
-        raise SystemExit(f"path not found: {root}")
-    raise SystemExit(_list_pipelines(root))
+    config = _workspace(args.path)
+    raise SystemExit(_list_pipelines(config))
 
 
 if __name__ == "__main__":

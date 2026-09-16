@@ -8,7 +8,7 @@ Pipeline files do not import GraphVIAgent. Only runs you start from the UI or CL
 
 ## Requirements
 
-- Python 3.10 or newer
+- Python 3.11 or newer
 - A folder of LangGraph files named `*_pipeline.py`
 
 ## Install
@@ -83,7 +83,7 @@ graphviagent .
 graphviagent list .
 ```
 
-You should see `echo_pipeline.py  ok  examples=2`. If you see `no *_pipeline.py`, you are in the wrong folder or the file name is wrong.
+You should see `echo_pipeline.py  ok  examples=2`. If you see `no pipelines`, you are in the wrong folder or the file name is wrong.
 
 ## Record a run from the CLI
 
@@ -147,15 +147,39 @@ Add `.graphviagent/` to `.gitignore`.
 
 ## Pipeline contract
 
-A file is viewable if it is named `*_pipeline.py` and exposes one of:
+A file is viewable if it is named `*_pipeline.py` (or listed in `graphviagent.toml`) and exposes, in this order:
 
-- `build_graph()` / `get_graph()` / `create_graph()`
-- compiled `GRAPH` or `app`
-- `__graph__ = "factory_name"`
+- `build_graph()` / `get_graph()` / `create_graph()` / `__graph__`
+- compiled or `StateGraph` `GRAPH`
+- compiled `app` (`stream` and `invoke` only — a package named `app` is ignored)
 
 Optional: `EXAMPLES = [{"label": "hello", "input": {"text": "hello"}}]` (or a bare dict). The first example prefills the Trace input.
 
 If a node update includes `decisions`, `reason`, or `choice`, the UI labels the branch. That is optional.
+
+Do not put `GRAPH` / `app` only under `if __name__ == "__main__":`. The loader imports the file; it does not run that block.
+
+## Project config
+
+Put `graphviagent.toml` at the project root so `from app.graph import build_graph` works even when you launch `graphviagent` from another directory (Desktop, a shortcut, `venv/Scripts`):
+
+```toml
+root = "."
+pythonpath = ["."]
+env_file = ".env"
+context = {}
+
+[pipeline.decision]
+file = "decision_pipeline.py"
+```
+
+- `root` and `pythonpath` are resolved relative to the toml file, not the process cwd
+- `pythonpath` is inserted on `sys.path` before the pipeline runs; the file's own directory is always added too
+- `env_file` loads `KEY=VALUE` lines without overwriting variables already in the environment
+- If any `[pipeline.*]` tables exist, those files are the pipelines (`file` may be any `.py`). Optional `factory = "build_graph"`
+- If there are no `[pipeline.*]` tables, GraphVIAgent still globs `*_pipeline.py`
+
+`graphviagent serve /path/to/proj` uses that project's toml even when cwd is elsewhere.
 
 ## Examples in this repo
 

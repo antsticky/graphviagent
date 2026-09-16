@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.1-dev
+
+### Added
+- `graphviagent.toml` for project `root`, `pythonpath`, `env_file`, `context`, and explicit `[pipeline.*]` entries
+
+### Changed
+- Require Python 3.11+ (`tomllib`)
+- Load `*_pipeline.py` with the file's directory (and toml `pythonpath`) on `sys.path`, independent of process cwd
+- Graph extract order is `build_graph()` / `get_graph()` / `create_graph()` / `__graph__`, then `GRAPH`, then a compiled `app` (`stream` + `invoke` only)
+- Failed or empty modules are not cached as a loaded pipeline
+
 ## 1.1.0-dev
 
 ### Added

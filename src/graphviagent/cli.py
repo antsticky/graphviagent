@@ -5,13 +5,14 @@ import json
 import sys
 from pathlib import Path
 
+from graphviagent import __version__
 from graphviagent.config import GVAConfig, activate_config, load_config
 from graphviagent.discover import discover_pipelines
 from graphviagent.graph_hash import attach_graph_meta
 from graphviagent.load import load_pipeline
 from graphviagent.record import record_run
 from graphviagent.server import serve
-from graphviagent.store import save_run
+from graphviagent.store import run_status_of, save_run
 
 
 def _workspace(path_arg: str) -> GVAConfig:
@@ -90,12 +91,12 @@ def _cmd_run(file: str, raw_input: str, config: GVAConfig) -> int:
         loaded.stem,
         attach_graph_meta(run, loaded.graph, loaded.graph_hash, loaded.file_sha256),
     )
-    status = "error" if saved.get("error") else "ok"
+    status = run_status_of(saved)
     print(f"{saved['id']}  {status}  {saved.get('elapsed_ms')}ms  {loaded.stem}")
-    if saved.get("error"):
+    if status == "error" and saved.get("error"):
         print(saved["error"], file=sys.stderr)
     print(json.dumps(saved.get("result") or {}, indent=2))
-    return 1 if saved.get("error") else 0
+    return 0 if status == "ok" else 1
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -104,6 +105,7 @@ def main(argv: list[str] | None = None) -> None:
         prog="graphviagent",
         description="GraphVIAgent — inspect and replay LangGraph pipelines",
     )
+    parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command")
 
     list_p = sub.add_parser("list", help="list pipelines")
@@ -124,7 +126,7 @@ def main(argv: list[str] | None = None) -> None:
     run_p.add_argument("file", help="pipeline file, stem, or graphviagent.toml id")
     run_p.add_argument("--input", default="{}", help="JSON object")
 
-    if not argv or argv[0] not in {"serve", "run", "list", "-h", "--help"}:
+    if not argv or argv[0] not in {"serve", "run", "list", "-h", "--help", "-V", "--version"}:
         args = parser.parse_args(["list", *argv])
     else:
         args = parser.parse_args(argv)

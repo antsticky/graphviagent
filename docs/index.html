@@ -91,7 +91,9 @@
     .kicker {
       font-size: 11px; font-weight: 500; letter-spacing: 0.08em;
       text-transform: uppercase; color: #c4b5fd; margin: 0 0 12px;
+      display: flex; align-items: center; gap: 10px;
     }
+    .kicker .ver { text-transform: none; letter-spacing: 0.04em; }
     .kicker .wordmark {
       text-transform: none; letter-spacing: -0.02em; color: var(--ink);
     }
@@ -211,7 +213,7 @@
     .log-info { color: #93c5fd; }
     .log-print { color: #c8c8d0; }
     .log-warn { color: #fbbf24; }
-    section { margin: 0 0 56px; }
+    section { margin: 0 0 56px; scroll-margin-top: 56px; }
     h2 {
       font-size: 11px; font-weight: 500; text-transform: uppercase;
       letter-spacing: 0.06em; color: var(--muted); margin: 0 0 8px;
@@ -329,8 +331,156 @@
       color: var(--muted); font-size: 12px;
       display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap;
     }
+    .ver {
+      font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+      color: #fdba74; background: rgba(249, 115, 22, 0.16);
+      border: 1px solid #9a3412; border-radius: 999px; padding: 2px 8px;
+    }
+    .tour-chips {
+      display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 22px;
+      scroll-margin-top: 56px;
+    }
+    .tour-chip {
+      height: 32px; padding: 0 14px; border-radius: 8px;
+      font: 600 12px Inter, sans-serif; text-decoration: none;
+      display: inline-flex; align-items: center; gap: 8px;
+      border: 1px solid; transition: filter 0.15s ease, transform 0.15s ease;
+    }
+    .tour-chip:hover { filter: brightness(1.12); transform: translateY(-1px); }
+    .tour-chip.trace:hover { color: #fdba74; }
+    .tour-chip.runs:hover { color: #a5f3fc; }
+    .tour-chip.stats:hover { color: #e9d5ff; }
+    .tour-chip.compare:hover { color: #ddd6fe; }
+    .tour-chip i {
+      width: 7px; height: 7px; border-radius: 99px; display: inline-block;
+    }
+    .tour-chip.trace { background: rgba(249, 115, 22, 0.16); border-color: #9a3412; color: #fdba74; }
+    .tour-chip.trace i { background: #f97316; }
+    .tour-chip.runs { background: rgba(6, 182, 212, 0.16); border-color: #155e75; color: #a5f3fc; }
+    .tour-chip.runs i { background: #22d3ee; }
+    .tour-chip.stats { background: rgba(192, 132, 252, 0.16); border-color: #6b21a8; color: #e9d5ff; }
+    .tour-chip.stats i { background: #c084fc; }
+    .tour-chip.compare { background: rgba(124, 92, 255, 0.16); border-color: #4c3d86; color: #ddd6fe; }
+    .tour-chip.compare i { background: #a78bfa; }
+    .tour-card {
+      display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 28px;
+      align-items: center;
+      background: linear-gradient(180deg, #1c1c26, #15151a);
+      border: 1px solid var(--line);
+      border-radius: 16px; padding: 24px 26px;
+      margin: 0 0 14px; overflow: hidden; position: relative;
+      scroll-margin-top: 104px;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+    }
+    .tour-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+    }
+    .tour-card::before {
+      content: "";
+      position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+    }
+    .tour-card.trace { border-color: #3a2418; }
+    .tour-card.trace::before { background: #f97316; }
+    .tour-card.trace:hover { border-color: #9a3412; }
+    .tour-card.runs { border-color: #16323a; }
+    .tour-card.runs::before { background: #22d3ee; }
+    .tour-card.runs:hover { border-color: #155e75; }
+    .tour-card.stats { border-color: #2e1a44; }
+    .tour-card.stats::before { background: #c084fc; }
+    .tour-card.stats:hover { border-color: #6b21a8; }
+    .tour-card.compare { border-color: #2a2450; }
+    .tour-card.compare::before { background: #a78bfa; }
+    .tour-card.compare:hover { border-color: #4c3d86; }
+    .tour-kicker {
+      font-size: 10px; font-weight: 600; letter-spacing: 0.12em;
+      text-transform: uppercase; margin: 0 0 8px;
+    }
+    .tour-card.trace .tour-kicker { color: #fdba74; }
+    .tour-card.runs .tour-kicker { color: #67e8f9; }
+    .tour-card.stats .tour-kicker { color: #e9d5ff; }
+    .tour-card.compare .tour-kicker { color: #ddd6fe; }
+    .tour-card h3 { font-size: 22px; letter-spacing: -0.03em; margin: 0 0 8px; }
+    .tour-lead { color: var(--ink); font-size: 14px; margin: 0 0 12px; }
+    .tour-card ul { margin: 0; }
+    .tour-hash {
+      display: inline-block; margin-top: 12px;
+      font: 500 11px "IBM Plex Mono", ui-monospace, monospace;
+      color: #c4b5fd; background: #121216;
+      border: 1px solid #2a2a32; border-radius: 7px; padding: 4px 8px;
+    }
+    .tour-viz {
+      background: #101014; border: 1px solid #2a2a32; border-radius: 12px;
+      padding: 14px 14px 12px; min-height: 148px;
+    }
+    .viz-title {
+      font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--muted); margin: 0 0 10px;
+    }
+    .viz-flow { display: flex; flex-direction: column; align-items: center; gap: 0; }
+    .viz-node {
+      width: 100%; max-width: 200px; display: flex; align-items: center; gap: 8px;
+      padding: 8px 10px; border-radius: 8px;
+      background: #17171c; border: 1px solid #3f3f68; font-size: 12px;
+    }
+    .viz-node .dot { width: 7px; height: 7px; border-radius: 99px; background: #f97316; flex: 0 0 7px; }
+    .viz-node.live { border-color: #f97316; box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.16); }
+    .viz-node.live .dot { background: #22c55e; }
+    .viz-stem { width: 2px; height: 12px; background: #818cf8; opacity: 0.8; }
+    .viz-modes { display: flex; gap: 6px; margin-top: 10px; }
+    .viz-mode {
+      flex: 1; text-align: center; font-size: 10px; font-weight: 600;
+      padding: 4px 0; border-radius: 6px; background: #1a1a22; color: var(--muted);
+    }
+    .viz-mode.on { background: rgba(249, 115, 22, 0.16); color: #fdba74; }
+    .viz-bars { display: flex; align-items: flex-end; gap: 6px; height: 64px; }
+    .viz-bar { flex: 1; border-radius: 4px 4px 0 0; background: #22d3ee; opacity: 0.85; }
+    .viz-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin-top: 10px; }
+    .viz-cell {
+      height: 20px; border-radius: 4px; display: grid; place-items: center;
+      font-size: 10px; font-weight: 600; background: #14261c; color: #4ade80;
+    }
+    .viz-cell.bad { background: #2a1518; color: #fca5a5; }
+    .viz-cell.off { background: #1a1a20; color: #52525b; }
+    .viz-cost-meta {
+      display: flex; justify-content: space-between; gap: 8px;
+      font-size: 11px; color: var(--muted); margin: 0 0 8px;
+    }
+    .viz-cost-meta b { color: #86efac; font-weight: 600; }
+    .viz-cost {
+      height: 12px; border-radius: 99px; overflow: hidden;
+      background: #1c1c22; display: flex;
+    }
+    .viz-cost span:first-child { width: 62%; background: #86efac; }
+    .viz-cost span:last-child { width: 22%; background: #047857; }
+    .viz-cost.viz-route span:first-child { width: 50%; background: #4ade80; }
+    .viz-cost.viz-route span:last-child { width: 50%; background: #a8a29e; }
+    .viz-cost-meta.viz-route b { color: var(--ink); }
+    .viz-split { display: flex; gap: 6px; margin-top: 12px; font-size: 10px; font-weight: 600; }
+    .viz-ok { flex: 2; background: rgba(74, 222, 128, 0.16); color: #4ade80; border-radius: 6px; padding: 5px 8px; }
+    .viz-fail { flex: 1; background: rgba(240, 113, 120, 0.16); color: #fca5a5; border-radius: 6px; padding: 5px 8px; }
+    .viz-canceled { flex: 2; background: rgba(168, 162, 158, 0.16); color: #d6d3d1; border-radius: 6px; padding: 5px 8px; }
+    .viz-legend {
+      display: grid; gap: 5px; margin-top: 12px; font-size: 11px; color: var(--ink);
+    }
+    .viz-legend span { display: flex; align-items: center; gap: 8px; }
+    .viz-legend i {
+      width: 8px; height: 8px; border-radius: 99px; flex: 0 0 8px;
+    }
+    .viz-legend i.ok { background: #4ade80; }
+    .viz-legend i.fail { background: #f07178; }
+    .viz-legend i.canceled { background: #a8a29e; }
+    .viz-ab { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .viz-side {
+      background: #17171c; border: 1px solid #2a2a32; border-radius: 8px; padding: 8px 10px;
+    }
+    .viz-side h4 { margin: 0 0 6px; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+    .viz-row { display: flex; justify-content: space-between; font-size: 11px; padding: 3px 0; color: var(--ink); }
+    .viz-row em { font-style: normal; color: #fbbf24; }
+    .viz-row.same em { color: #4ade80; }
+    .af-mark.stats { background: #c084fc; }
     @media (max-width: 860px) {
-      .hero, .grid, .topics { grid-template-columns: 1fr; }
+      .hero, .grid, .topics, .tour-card { grid-template-columns: 1fr; }
       h1 { font-size: 36px; }
       .nav { display: none; }
     }
@@ -357,7 +507,7 @@
   <main>
     <section class="hero">
       <div>
-        <p class="kicker">Graph-View-Agent</p>
+        <p class="kicker">Graph-View-Agent <span class="ver">1.2.0</span></p>
         <h1>See your LangGraph run <em>as it happens</em>.</h1>
         <p class="lede">
           GraphVIAgent is an inspector for LangGraph. Point it at a folder of
@@ -375,6 +525,7 @@
         <div class="pills">
           <span class="pill">uninstrumented pipelines</span>
           <span class="pill">Python 3.11+</span>
+          <span class="pill">Statistics · Routing, Runtime &amp; Cost</span>
         </div>
       </div>
       <div class="mock" aria-hidden="true">
@@ -441,7 +592,7 @@
 
     <section id="features">
       <h2>Features</h2>
-      <p class="sell">Everything you need to watch, replay, and compare a LangGraph run.</p>
+      <p class="sell">Watch a run live, replay a node, then see every visit on the board, in Compare, and in Statistics.</p>
       <div class="grid">
         <article class="af-card">
           <h3><span class="af-mark"></span> Live topology</h3>
@@ -464,12 +615,16 @@
           <p>Runs is an Airflow-style grid of duration and task × run. Compare diffs input, path, per-node output, and timing between two runs, including each visit when a node ran more than once.</p>
         </article>
         <article class="af-card">
+          <h3><span class="af-mark stats"></span> Statistics: Routing, Runtime, and Cost</h3>
+          <p>Same topology as Trace. Routing shows run count, average node visits, and success vs failed vs canceled. Runtime writes average duration, a pipeline grand total, and average vs longest run. Cost writes average in/out tokens, a pipeline grand total, and average per run. Hover a color strip for a dotted legend (one label per color). Colored jumps keep you on that pipeline.</p>
+        </article>
+        <article class="af-card">
           <h3><span class="af-mark cancel"></span> Cancel, three at a time</h3>
-          <p>Up to three runs can execute together. Cancel is cooperative: an in-flight <code>sleep</code> finishes, then the run stops. History keeps failed runs.</p>
+          <p>Up to three runs can execute together. Cancel stops an in-flight run or a paused one. <code>time.sleep</code> is interrupted within ~50ms. Other blocking calls still finish first. History keeps failed and canceled runs as separate statuses.</p>
         </article>
         <article class="af-card">
           <h3><span class="af-mark hist"></span> Local history</h3>
-          <p>Each run is JSON under <code>.graphviagent/runs/&lt;pipeline&gt;/</code>. Export, import, or drop a file on the run list. Search input fields. Filter success, paused, or failed.</p>
+          <p>Each run is JSON under <code>.graphviagent/runs/&lt;pipeline&gt;/</code>. Export, import, or drop a file on the run list. Search input fields. Filter success, paused, canceled, or failed.</p>
         </article>
         <article class="af-card">
           <h3><span class="af-mark state"></span> State you can trust</h3>
@@ -548,8 +703,132 @@ graphviagent serve . --host 0.0.0.0 --expose</pre>
 
     <section id="manual">
       <h2>Manual</h2>
-      <p class="sell">How Trace, replay, the board, and Compare work once you are in the UI.</p>
-      <div class="topics">
+      <p class="sell">Four rooms, one pipeline. Jump Trace, Runs, Statistics, and Compare without losing the graph.</p>
+      <div class="tour-chips">
+        <a class="tour-chip trace" href="#tour-trace"><i></i> Trace</a>
+        <a class="tour-chip runs" href="#tour-runs"><i></i> Runs</a>
+        <a class="tour-chip stats" href="#tour-stats"><i></i> Statistics</a>
+        <a class="tour-chip compare" href="#tour-compare"><i></i> Compare</a>
+      </div>
+
+      <article class="tour-card trace" id="tour-trace">
+        <div>
+          <p class="tour-kicker">Live inspector</p>
+          <h3>Trace</h3>
+          <p class="tour-lead">The graph is a map, not an unrolled column. Cards pulse while a node runs. Taken, skipped, loops, and parallel <code>Send</code> stay on one picture.</p>
+          <ul>
+            <li><strong>Graph / Gantt / Agents</strong> — topology, wall-clock bars, or a speaker chain when a node returns <code>messages</code>.</li>
+            <li><strong>Steps</strong> — visit order with duration and spark metrics. Final state, Log, Memory, and Text tree fold under it.</li>
+            <li>Gutter dots are breakpoints. <strong>Continue</strong> / <strong>Step</strong> pause again. HITL graphs (<code>interrupt(...)</code>) pause with a resume-value box; <strong>Continue</strong> sends it.</li>
+            <li><strong>Replay step</strong> re-runs one node. <strong>Replay from</strong> continues from that checkpoint so routing can take the other branch. Side effects fire. Outdated graph hashes ask first.</li>
+            <li>Export, import (or drop JSON), then <strong>Runs</strong> / <strong>Statistics</strong> jump to this pipeline. <strong>Delete run</strong> is red, same size as the others.</li>
+          </ul>
+        </div>
+        <div class="tour-viz" aria-hidden="true">
+          <p class="viz-title">dummy_pipeline</p>
+          <div class="viz-flow">
+            <div class="viz-node"><span class="dot"></span> greet · Hello, Ada!</div>
+            <div class="viz-stem"></div>
+            <div class="viz-node live"><span class="dot"></span> shout · running</div>
+          </div>
+          <div class="viz-modes">
+            <span class="viz-mode on">Graph</span>
+            <span class="viz-mode">Gantt</span>
+            <span class="viz-mode">Agents</span>
+          </div>
+        </div>
+      </article>
+
+      <article class="tour-card runs" id="tour-runs">
+        <div>
+          <p class="tour-kicker">The board</p>
+          <h3>Runs</h3>
+          <p class="tour-lead">Airflow-style cards: duration bars, then task × run (<code>✓</code> / <code>✕</code> / <code>○</code>). Failed nodes stay in history and show as red.</p>
+          <ul>
+            <li>Click the name to open Trace. Click a bar, cell, or play control to open that run.</li>
+            <li><strong>Trace</strong> and <strong>Statistics</strong> jump to this pipeline. <strong>Clear</strong> deletes every run for it.</li>
+            <li>The URL is <code>#/runs/&lt;pipeline&gt;</code> so refresh lands on the same card.</li>
+          </ul>
+          <span class="tour-hash">#/runs/echo_pipeline</span>
+        </div>
+        <div class="tour-viz" aria-hidden="true">
+          <p class="viz-title">Duration × run</p>
+          <div class="viz-bars">
+            <span class="viz-bar" style="height:42%"></span>
+            <span class="viz-bar" style="height:88%"></span>
+            <span class="viz-bar" style="height:28%"></span>
+            <span class="viz-bar" style="height:64%"></span>
+            <span class="viz-bar" style="height:50%"></span>
+            <span class="viz-bar" style="height:74%"></span>
+            <span class="viz-bar" style="height:36%"></span>
+          </div>
+          <div class="viz-grid">
+            <span class="viz-cell">✓</span><span class="viz-cell">✓</span><span class="viz-cell">✓</span>
+            <span class="viz-cell">✓</span><span class="viz-cell bad">✕</span><span class="viz-cell">✓</span>
+            <span class="viz-cell off">○</span>
+          </div>
+        </div>
+      </article>
+
+      <article class="tour-card stats" id="tour-stats">
+        <div>
+          <p class="tour-kicker">Across every visit</p>
+          <h3>Statistics</h3>
+          <p class="tour-lead">Same topology as Trace. Pick a pipeline — there is no <strong>all</strong> view. Colored jump buttons (not the header menu) keep you on that graph.</p>
+          <ul>
+            <li><strong>Routing</strong> — run count, average node visits, success / failed / canceled split. Click a node for grouped branch <code>reason</code>s.</li>
+            <li><strong>Runtime</strong> — wall-clock grand total, average per run, violet average vs orange longest run. Click a node for min / avg / max.</li>
+            <li><strong>Cost</strong> — average in/out tokens per node, a pipeline grand total, and average per run. Tokens, not dollars.</li>
+            <li>Hover a color strip for a legend of color dots and labels, one per line.</li>
+            <li><strong>Trace</strong> and <strong>Runs</strong> sit before Routing / Cost / Runtime.</li>
+          </ul>
+          <span class="tour-hash">#/statistics/tokens_pipeline</span>
+        </div>
+        <div class="tour-viz" aria-hidden="true">
+          <p class="viz-title">Routing · outcomes</p>
+          <div class="viz-cost-meta viz-route"><span>grand total</span><b>8</b></div>
+          <div class="viz-cost viz-route"><span></span><span></span></div>
+          <div class="viz-split">
+            <span class="viz-ok">4 ok</span>
+            <span class="viz-fail">0 failed</span>
+            <span class="viz-canceled">4 canceled</span>
+          </div>
+          <div class="viz-legend">
+            <span><i class="ok"></i> success</span>
+            <span><i class="fail"></i> failed</span>
+            <span><i class="canceled"></i> canceled</span>
+          </div>
+        </div>
+      </article>
+
+      <article class="tour-card compare" id="tour-compare">
+        <div>
+          <p class="tour-kicker">Run A vs Run B</p>
+          <h3>Compare</h3>
+          <p class="tour-lead">Filter by pipeline (default all). Diff input, path, per-node output, and timing. Hover a cell to copy.</p>
+          <ul>
+            <li>If a node ran more than once (loop or branch), each visit is aligned separately — not only the first.</li>
+            <li>Open Node view from Trace for input, output, a <code>state_in</code> vs <code>state_out</code> diff, tools, and traceback frames. <strong>Call node</strong> is Replay step.</li>
+          </ul>
+        </div>
+        <div class="tour-viz" aria-hidden="true">
+          <p class="viz-title">Aligned visits</p>
+          <div class="viz-ab">
+            <div class="viz-side">
+              <h4>Run A</h4>
+              <div class="viz-row same">path <em>greet → shout</em></div>
+              <div class="viz-row">out <em>"ADA!"</em></div>
+            </div>
+            <div class="viz-side">
+              <h4>Run B</h4>
+              <div class="viz-row same">path <em>greet → shout</em></div>
+              <div class="viz-row">out <em>"ada"</em></div>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <div class="topics" style="margin-top:18px">
         <article class="topic">
           <h3>Pipeline contract</h3>
           <p>A file is viewable if it is named <code>*_pipeline.py</code> (or listed in <code>graphviagent.toml</code>) and exposes, in this order:</p>
@@ -573,34 +852,6 @@ file = "decision_pipeline.py"</pre>
           <p>With <code>[pipeline.*]</code> tables, those files are the graphs (<code>file</code> may be any <code>.py</code>, including a path outside the serve root). Those files are watched too. Without them, GraphVIAgent globs <code>*_pipeline.py</code>.</p>
         </article>
         <article class="topic">
-          <h3>Trace</h3>
-          <ul>
-            <li><strong>Graph</strong> — static map of nodes and edges. Taken paths, skipped branches, loops, and parallel <code>Send</code> fan-out.</li>
-            <li><strong>Gantt</strong> — wall-clock bars per node. Hover for start/end clock time, duration, memory, and tokens when present.</li>
-            <li><strong>Agents</strong> — speaker chain when a node returns <code>messages</code>.</li>
-            <li><strong>Steps</strong> — visit order with duration and spark metrics.</li>
-            <li><strong>Final state</strong>, <strong>Log</strong>, <strong>Memory</strong>, and <strong>Text tree</strong> fold under Steps.</li>
-          </ul>
-          <p>Node cards show <code>file:line</code>; click to open in the editor. Failed nodes include a traceback. Click the gutter dot on a topology card to break before that node. <strong>Continue</strong> resumes with those breakpoints; <strong>Step</strong> runs the next node and pauses again. Human-in-the-loop graphs (<code>interrupt(...)</code>) pause with <strong>Resume</strong>.</p>
-          <p>History search matches input fields. Filter all / success / paused / failed. <strong>Export</strong> downloads the open run as JSON. <strong>Import</strong> or drop a file on the run list. <strong>Delete run</strong> removes the open run.</p>
-        </article>
-        <article class="topic">
-          <h3>Node view</h3>
-          <p>Shows node input, output, a state diff (<code>state_in</code> vs <code>state_out</code>), and tools when the update has tool calls. Failed steps include traceback frames. <strong>Call node</strong> is the same as Replay step: it invokes the real node.</p>
-        </article>
-        <article class="topic">
-          <h3>Replay</h3>
-          <p><strong>Replay step</strong> re-runs only the selected node. <strong>Replay from</strong> continues the compiled graph from that checkpoint, so reducers and routing match <code>get_state</code> — including taking the other branch after an edit. GraphVIAgent attaches an in-process checkpointer when the pipeline did not. Approximate replay is only when that is impossible, or the original thread is gone after a restart. Both hit your real functions. If the pipeline file or graph hash changed, the run is marked <strong>outdated</strong> and replay asks before continuing.</p>
-        </article>
-        <article class="topic">
-          <h3>Runs</h3>
-          <p>Airflow-style cards: duration bars, then task × run (<code>✓</code> / <code>✕</code> / <code>○</code>). Click the name to open Trace. Click a bar, cell, or play control to open that run. <strong>Clear</strong> deletes every run for that pipeline.</p>
-        </article>
-        <article class="topic">
-          <h3>Compare</h3>
-          <p>Open Compare. Filter by pipeline (default all). Pick Run A and Run B. Diff input, path, per-node output, and timing. If a node ran more than once (loop or branch), each visit is aligned separately. Hover a cell to copy.</p>
-        </article>
-        <article class="topic">
           <h3>Privacy and storage</h3>
           <p>Everything stays on your machine. Runs are written under the folder you served or ran from:</p>
           <pre>my_graphs/.graphviagent/runs/echo_pipeline/&lt;id&gt;.json</pre>
@@ -612,7 +863,7 @@ file = "decision_pipeline.py"</pre>
             <li>Alpha: APIs, UI, and on-disk run format may change.</li>
             <li>Local only. Nothing is uploaded.</li>
             <li><code>logging</code> still respects the logger’s level. Root defaults to WARNING, so <code>logger.info</code> appears only if that logger is enabled for INFO.</li>
-            <li>Cancel waits for the current blocking call (for example <code>sleep</code>) to return.</li>
+            <li>Cancel interrupts <code>time.sleep</code> quickly. Other blocking calls (network, LLM) still finish before the run stops.</li>
           </ul>
         </article>
       </div>
@@ -635,12 +886,12 @@ file = "decision_pipeline.py"</pre>
           <p>Open the UI (default <code>127.0.0.1:8765</code>). <code>--open</code> launches a browser. <code>--host</code> and <code>--port</code> override the bind address. Binding beyond localhost requires <code>--expose</code> (and prints a warning): the server runs your pipeline Python, and only same-origin pages may call it.</p>
         </article>
       </div>
-      <p style="margin-top:14px">With a clone of the repo you can also run <code>graphviagent serve examples</code> to browse the bundled pipelines (branch, loop, parallel <code>Send</code>, tools, agents, errors).</p>
+      <p style="margin-top:14px">With a clone of the repo you can also run <code>graphviagent serve examples</code> to browse the bundled pipelines (branch, loop, parallel <code>Send</code>, tools, agents, waits, errors).</p>
     </section>
   </main>
 
   <footer>
-    <div><span class="wordmark">GraphV<span class="ia">IA</span>gent</span> · MIT · @antsticky</div>
+    <div><span class="wordmark">GraphV<span class="ia">IA</span>gent</span> · 1.2.0 · MIT · @antsticky</div>
     <div>
       <a href="https://pypi.org/project/graphviagent/">PyPI</a>
       ·

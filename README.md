@@ -6,6 +6,15 @@ Local Graph-View-Agent for LangGraph. Scan `*_pipeline.py` files, record runs un
 
 Pipeline files do not import GraphVIAgent. Only runs you start from the UI or CLI are stored.
 
+## What's new in 1.2.0
+
+- **Statistics** — Routing (success / failed / canceled, grouped branch reasons), Runtime (average vs longest run), and Cost (average tokens, pipeline totals) on the Trace topology. Hover a color strip for a dotted legend
+- **Cancel** is its own run status (`canceled`), not a failed run — including the history filter
+- Jump Trace ↔ Runs ↔ Statistics for the same pipeline (`#/runs/<name>`, `#/statistics/<name>`)
+- Local origin check, run `schema_version` / `gva_version`, Pipelines renamed to **Runs**
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 ## Requirements
 
 - Python 3.11 or newer
@@ -124,10 +133,10 @@ New or edited `*_pipeline.py` files (and toml-listed pipelines, including files 
 3. Click **Run**.
 4. Single-click a node to select it. Double-click to open **Node view**. Node cards show `file:line`; click to open in the editor. Failed nodes include a traceback.
 5. Click the gutter dot on a topology card to break before that node. Breakpoints persist per pipeline. **Continue** resumes with those breakpoints; **Step** runs the next node and pauses again.
-6. Human-in-the-loop graphs (`interrupt(...)`) pause with **Resume**. Send JSON such as `true` to keep a draft, or `"edit this"` to replace it. Continue after a process restart fails — checkpoints are in-memory.
-7. Filter the run list by status (all / success / paused / failed) or input text.
+6. Human-in-the-loop graphs (`interrupt(...)`) pause with a resume-value box. **Continue** sends that JSON (`true` to keep a draft, or `"edit this"` to replace it). Continue after a process restart fails — checkpoints are in-memory.
+7. Filter the run list by status (all / success / paused / canceled / failed) or input text.
 8. **Export** downloads the open run as JSON. **Import** or drop a JSON file on the run list.
-9. **Delete run** removes the open run. Hover a JSON box and use **Copy** to copy it.
+9. **Runs** and **Statistics** (between Import and Delete) jump to this pipeline. **Delete run** removes the open run. Hover a JSON box and use **Copy** to copy it. **Cancel** stops an in-flight run, or abandons a paused one — stored as **canceled**, not failed.
 
 **Replay step** runs only the selected node again. **Replay from** continues the compiled graph from that checkpoint (reducers and routing included). GraphVIAgent attaches an in-process checkpointer when the pipeline did not. Approximate replay is only when that is impossible, or the original thread is gone after a restart. Side effects will fire.
 
@@ -137,7 +146,7 @@ If a node returns `messages` or tool calls, they render as a thread above the JS
 
 ### Runs
 
-Airflow-style grid: duration bars, then task × run (`✓` / `✕` / `○`). Click the name to open Trace. Click a bar, cell, or ▶ to open that run. **Clear** deletes every run for that pipeline.
+Airflow-style grid: duration bars, then task × run (`✓` / `✕` / `○`). Click the name to open Trace. Click a bar, cell, or ▶ to open that run. **Trace** and **Statistics** jump to this pipeline (`#/runs/<name>`). **Clear** deletes every run for that pipeline.
 
 Failed nodes stay in history and show as red.
 
@@ -147,7 +156,7 @@ Open **Compare**. Filter by pipeline (default **all**). When a pipeline is selec
 
 ### Statistics
 
-Open **Statistics**. Choose a pipeline — there is no **all** view. **Routing** and **Cost** draw the same topology as Trace. Routing shows run count, average node visits per run, and a success/failed split; Cost writes average in/out tokens on each node, a total badge, and a pipeline grand total / average per run. Click a node on Routing to see branches grouped together, with similar `reason` text collapsed into a pattern.
+Open **Statistics** (`#/statistics/<name>`). Choose a pipeline — there is no **all** view. **Trace** and **Runs** jump to that pipeline. **Routing**, **Runtime**, and **Cost** draw the same topology as Trace. Routing shows run count, average node visits per run, and a success / failed / canceled split. Runtime writes average duration on each node and a pipeline grand total / average per run (violet average vs orange longest run). Cost writes average in/out tokens on each node, a total badge, and a pipeline grand total / average per run. Hover a color strip for a legend of color dots and labels, one per line. Click a node on Routing to see branches grouped together, with similar `reason` text collapsed into a pattern. Click a node on Runtime for min / avg / max.
 
 ## Where runs are stored
 
@@ -212,4 +221,5 @@ graphviagent serve examples
 - `examples/grade_pipeline.py` — score / max; `{maximum: 0}` raises
 - `examples/convert_pipeline.py` — `{value: 0, unit: "per_unit"}` or `{unit: "kelvin"}` raises
 - `examples/traceback_pipeline.py` — nested helpers; `{hits: 3, tries: 0}` raises with a clickable traceback
-- `examples/hitl_pipeline.py` — draft then `interrupt`; Resume from the UI with `true` or `"edit this"`
+- `examples/wait_pipeline.py` — three `time.sleep` nodes (`seconds`, default 1)
+- `examples/hitl_pipeline.py` — draft then `interrupt`; Continue from the UI with `true` or `"edit this"`

@@ -10,6 +10,7 @@ from uuid import uuid4
 
 STORE_DIRNAME = ".graphviagent"
 SCHEMA_VERSION = 1
+_CANCELED_ERRORS = {"cancelled", "canceled"}
 
 
 def store_root(workspace: Path) -> Path:
@@ -41,6 +42,25 @@ def run_schema_version(run: dict) -> int:
         raise ValueError("run schema_version must be an integer") from exc
 
 
+def run_is_canceled(data: dict | None) -> bool:
+    if not isinstance(data, dict):
+        return False
+    if data.get("canceled"):
+        return True
+    err = str(data.get("error") or "").strip().lower()
+    return err in _CANCELED_ERRORS
+
+
+def run_status_of(data: dict | None) -> str:
+    if run_is_canceled(data):
+        return "canceled"
+    if isinstance(data, dict) and data.get("error"):
+        return "error"
+    if isinstance(data, dict) and data.get("paused"):
+        return "paused"
+    return "ok"
+
+
 def migrate_run(run: dict) -> dict:
     if not isinstance(run, dict):
         raise ValueError("run must be a JSON object")
@@ -54,6 +74,11 @@ def migrate_run(run: dict) -> dict:
     out["schema_version"] = SCHEMA_VERSION
     if not out.get("gva_version"):
         out["gva_version"] = _gva_version()
+    if run_is_canceled(out):
+        out["canceled"] = True
+        err = str(out.get("error") or "").strip().lower()
+        if err in _CANCELED_ERRORS:
+            out["error"] = None
     return out
 
 
@@ -64,6 +89,29 @@ def save_run(workspace: Path, stem: str, run: dict) -> dict:
     dest = pipeline_dir(workspace, stem) / f"{run['id']}.json"
     dest.write_text(json.dumps(run, indent=2), encoding="utf-8")
     return run
+
+
+def cancel_paused_run(workspace: Path, run_id: str) -> dict | None:
+    run = load_run(workspace, run_id)
+    if run is None or run_is_canceled(run) or run.get("error") or not run.get("paused"):
+        return None
+    stem = run.get("pipeline")
+    if not stem:
+        return None
+    logs = [dict(item) for item in (run.get("logs") or []) if isinstance(item, dict)]
+    logs.append({
+        "t": run.get("elapsed_ms") or 0,
+        "src": "run",
+        "text": "run canceled",
+        "level": "info",
+    })
+    run["canceled"] = True
+    run["error"] = None
+    run["paused"] = False
+    run["next"] = []
+    run["interrupts"] = []
+    run["logs"] = logs
+    return save_run(workspace, str(stem), run)
 
 
 def list_runs(
@@ -98,14 +146,9 @@ def list_runs(
             "parent_id": data.get("parent_id"),
             "step_count": len(data.get("steps") or []),
             "elapsed_ms": data.get("elapsed_ms"),
-            "status": (
-                "error"
-                if data.get("error")
-                else "paused"
-                if data.get("paused")
-                else "ok"
-            ),
-            "paused": bool(data.get("paused")),
+            "status": run_status_of(data),
+            "paused": bool(data.get("paused")) and not run_is_canceled(data),
+            "canceled": run_is_canceled(data),
             "next": data.get("next") or [],
             "graph_hash": data.get("graph_hash"),
             "file_sha256": data.get("file_sha256"),
@@ -393,6 +436,9 @@ def collect_stats(workspace: Path, stem: str | None = None) -> dict:
                 "total": 0,
                 "usage_runs": 0,
                 "unavailable_runs": 0,
+                "elapsed_ms": 0.0,
+                "elapsed_n": 0,
+                "node_elapsed_ms": 0.0,
             },
         )
 
@@ -407,8 +453,29 @@ def collect_stats(workspace: Path, stem: str | None = None) -> dict:
                 "total": 0,
                 "visits": 0,
                 "unavailable": 0,
+                "elapsed_ms": 0.0,
+                "elapsed_n": 0,
+                "elapsed_min": None,
+                "elapsed_max": 0.0,
             },
         )
+
+    def add_elapsed(bucket: dict, ms: float) -> None:
+        if ms <= 0:
+            return
+        bucket["elapsed_ms"] = float(bucket.get("elapsed_ms") or 0) + ms
+        bucket["elapsed_n"] = int(bucket.get("elapsed_n") or 0) + 1
+        prev_min = bucket.get("elapsed_min")
+        try:
+            prev_f = float(prev_min) if prev_min is not None else None
+        except (TypeError, ValueError):
+            prev_f = None
+        bucket["elapsed_min"] = ms if prev_f is None else min(prev_f, ms)
+        try:
+            prev_max = float(bucket.get("elapsed_max") or 0)
+        except (TypeError, ValueError):
+            prev_max = 0.0
+        bucket["elapsed_max"] = max(prev_max, ms)
 
     for data in _iter_run_dicts(workspace, stem):
         pipe = str(data.get("pipeline") or "unknown")
@@ -417,8 +484,19 @@ def collect_stats(workspace: Path, stem: str | None = None) -> dict:
         completion = 0
         saw_unavailable = False
         saw_usage = False
+        step_elapsed_sum = 0.0
+        try:
+            run_elapsed = float(data.get("elapsed_ms") or 0)
+        except (TypeError, ValueError):
+            run_elapsed = 0.0
         for index, step in enumerate(steps):
             node = str(step.get("node") or "")
+            try:
+                step_ms = float(step.get("elapsed_ms") or 0)
+            except (TypeError, ValueError):
+                step_ms = 0.0
+            if step_ms > 0:
+                step_elapsed_sum += step_ms
             tokens = step.get("tokens")
             step_prompt = 0
             step_completion = 0
@@ -442,6 +520,7 @@ def collect_stats(workspace: Path, stem: str | None = None) -> dict:
                 bucket["visits"] += 1
                 if step_unavailable:
                     bucket["unavailable"] += 1
+                add_elapsed(bucket, step_ms)
 
             choices = _step_route_choices(step)
             if not choices and not step.get("pending"):
@@ -480,7 +559,12 @@ def collect_stats(workspace: Path, stem: str | None = None) -> dict:
             last = completed[-1]
             last_name = str(last.get("node") or "")
             unused = {_topo_name(str(item)) for item in (last.get("unused") or [])}
-            finished = not data.get("error") and not data.get("paused") and not last.get("error")
+            finished = (
+                not data.get("error")
+                and not run_is_canceled(data)
+                and not data.get("paused")
+                and not last.get("error")
+            )
             if last_name and finished and "END" not in unused:
                 bump_edge(pipe, last_name, "END")
 
@@ -493,23 +577,22 @@ def collect_stats(workspace: Path, stem: str | None = None) -> dict:
             bucket["usage_runs"] += 1
         elif saw_unavailable:
             bucket["unavailable_runs"] += 1
+        if run_elapsed <= 0 and step_elapsed_sum > 0:
+            run_elapsed = step_elapsed_sum
+        add_elapsed(bucket, run_elapsed)
+        bucket["node_elapsed_ms"] = float(bucket.get("node_elapsed_ms") or 0) + step_elapsed_sum
 
         run_rows.append(
             {
                 "id": data.get("id") or "",
                 "pipeline": pipe,
                 "created_at": data.get("created_at"),
-                "status": (
-                    "error"
-                    if data.get("error")
-                    else "paused"
-                    if data.get("paused")
-                    else "ok"
-                ),
+                "status": run_status_of(data),
                 "prompt": prompt,
                 "completion": completion,
                 "total": prompt + completion,
                 "unavailable": (not saw_usage) and saw_unavailable,
+                "elapsed_ms": round(run_elapsed, 2) if run_elapsed else 0,
             }
         )
 

@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
+from graphviagent import __version__
 from graphviagent.config import GVAConfig, activate_config, load_config
 from graphviagent.discover import discover_pipelines
 from graphviagent.graph_hash import attach_graph_meta
@@ -17,6 +18,7 @@ from graphviagent.record import MAX_RUN_THREADS, iter_run_events, record_run, re
 from graphviagent.render import ascii_tree, unrolled_mermaid
 from graphviagent.store import (
     collect_stats,
+    cancel_paused_run,
     delete_run,
     delete_runs,
     import_run,
@@ -202,7 +204,12 @@ PAGE = r"""<!DOCTYPE html>
     }
     .status-dot.ok { background: #22c55e; }
     .status-dot.error { background: #f07178; }
+    .status-dot.canceled { background: #a8a29e; }
     .status-dot.gray { background: #5a5a64; }
+    .status-dot.live {
+      background: var(--accent);
+      animation: live-pulse 1.1s ease-in-out infinite;
+    }
     .page { height: calc(100vh - 48px); overflow: auto; padding: 24px 28px; }
     .page[hidden], .layout[hidden] { display: none; }
     .page-inner { width: 100%; max-width: none; }
@@ -250,6 +257,11 @@ PAGE = r"""<!DOCTYPE html>
     }
     .af-bar.ok { background: #22c55e; }
     .af-bar.error { background: #ef4444; }
+    .af-bar.canceled { background: #78716c; }
+    .af-bar.running {
+      background: var(--accent);
+      animation: live-pulse 1.1s ease-in-out infinite;
+    }
     .af-bar:hover { filter: brightness(1.15); }
     .af-bar.skel {
       height: 10px; min-height: 8px; background: #26262e; cursor: default;
@@ -286,6 +298,11 @@ PAGE = r"""<!DOCTYPE html>
     }
     .af-mark.ok { background: #16a34a; }
     .af-mark.error { background: #dc2626; }
+    .af-mark.canceled { background: #78716c; }
+    .af-mark.running {
+      background: var(--accent);
+      animation: live-pulse 1.1s ease-in-out infinite;
+    }
     .af-mark.skip {
       background: transparent; color: #d97706; border: 1px solid #d97706;
     }
@@ -323,6 +340,7 @@ PAGE = r"""<!DOCTYPE html>
       color: var(--ink); padding: 8px 10px; margin: 0 0 2px;
     }
     .item { display: flex; align-items: center; gap: 8px; }
+    .item .pill { margin-left: auto; }
     .item:hover, .run:hover { background: #1f1f26; }
     .item.active, .run.active { background: var(--accent-dim); color: #fff; }
     .item.error { color: var(--danger); }
@@ -339,6 +357,7 @@ PAGE = r"""<!DOCTYPE html>
     #history .pill.mode-replay_from { color: #fbbf24; background: rgba(251, 191, 36, 0.16); }
     #history .pill.mode-approximate { color: #fdba74; background: rgba(251, 146, 60, 0.18); }
     #history .pill.mode-error { color: #fca5a5; background: rgba(240, 113, 120, 0.16); }
+    #history .pill.mode-canceled { color: #d6d3d1; background: rgba(168, 162, 158, 0.2); }
     #history .pill.mode-outdated { color: #fbbf24; background: rgba(251, 191, 36, 0.16); }
     .run-pills { display: flex; gap: 4px; flex: 0 0 auto; align-items: center; }
     .meta {
@@ -372,6 +391,7 @@ PAGE = r"""<!DOCTYPE html>
       box-sizing: border-box; line-height: 1;
       display: inline-flex; align-items: center; justify-content: center;
     }
+    button[hidden] { display: none !important; }
     button.primary { background: var(--accent); color: #fff; border: 0; }
     button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
     button.ghost:hover { background: #1f1f26; }
@@ -381,6 +401,7 @@ PAGE = r"""<!DOCTYPE html>
     button.ghost:disabled:hover { background: transparent; }
     button.cancel { border-color: #7f1d1d; color: #fca5a5; }
     button.cancel:hover { background: #2a1518; }
+    button.cancel:disabled:hover { background: transparent; }
     button.ghost.danger, button.danger {
       border: 1px solid #7f1d1d; color: #fca5a5; background: transparent;
     }
@@ -697,6 +718,9 @@ PAGE = r"""<!DOCTYPE html>
       border-radius: 7px; padding: 8px; font: 12px/1.4 "IBM Plex Mono", ui-monospace, monospace;
     }
     #history .pill.mode-paused { color: #fbbf24; background: rgba(251, 191, 36, 0.16); }
+    #history .pill.mode-running, .item .pill.mode-running {
+      color: #c4b5fd; background: rgba(124, 92, 255, 0.22);
+    }
     .g-body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
     .g-name { font-size: 13px; font-weight: 500; }
     .g-sub {
@@ -975,7 +999,7 @@ PAGE = r"""<!DOCTYPE html>
       height: 8px; border-radius: 99px; overflow: hidden; display: flex;
       background: #26262e; margin: 12px 0 8px;
     }
-    .st-hero-split i { display: block; height: 100%; flex: 0 0 auto; min-width: 0; }
+    .st-hero-split i { display: block; height: 100%; flex: 0 0 auto; min-width: 0; pointer-events: none; }
     .st-hero-split i.in, .st-fill i.in { background: var(--tok-in); }
     .st-hero-split i.out, .st-fill i.out { background: var(--tok-out); }
     .st-hero-legend {
@@ -991,6 +1015,8 @@ PAGE = r"""<!DOCTYPE html>
     }
     .st-swatch.in { background: var(--tok-in); }
     .st-swatch.out { background: var(--tok-out); }
+    .st-swatch.ms { background: #818cf8; }
+    .st-swatch.rest { background: #f59e0b; }
     .st-grid {
       display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
       gap: 14px; margin: 0 0 14px;
@@ -1148,12 +1174,40 @@ PAGE = r"""<!DOCTYPE html>
       display: block; margin-top: 2px; color: var(--muted);
       font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600;
     }
-    .st-sum .split, .st-cost-sum .split { min-width: 0; }
+    .st-sum .split, .st-cost-sum .split { min-width: 0; position: relative; }
     .st-sum .split .st-hero-split, .st-cost-sum .split .st-hero-split {
       margin: 0 0 8px; width: 100%;
+      cursor: help;
     }
-    .st-hero-split i.ok { background: #4ade80; }
-    .st-hero-split i.fail { background: var(--danger); }
+    .st-hero-split i.ok, .st-split-tip i.ok { background: #4ade80; }
+    .st-hero-split i.fail, .st-split-tip i.fail { background: var(--danger); }
+    .st-hero-split i.canceled, .st-split-tip i.canceled { background: #a8a29e; }
+    .st-hero-split i.avg, .st-hero-split i.ms, .st-split-tip i.avg { background: #818cf8; }
+    .st-hero-split i.max, .st-hero-split i.rest, .st-split-tip i.max { background: #f59e0b; }
+    .st-split-tip i.in { background: var(--tok-in); }
+    .st-split-tip i.out { background: var(--tok-out); }
+    .st-split-tip {
+      display: none;
+      position: absolute;
+      left: 0;
+      top: calc(100% + 6px);
+      z-index: 30;
+      padding: 8px 10px;
+      background: #1c1c22;
+      border: 1px solid #3a3a44;
+      border-radius: 8px;
+      box-shadow: 0 12px 28px rgba(0, 0, 0, 0.4);
+      pointer-events: none;
+      gap: 6px;
+    }
+    .st-hero-split:hover + .st-split-tip { display: grid; }
+    .st-split-tip-row {
+      display: flex; align-items: center; gap: 8px;
+      color: var(--ink); font-size: 12px; white-space: nowrap; line-height: 1.2;
+    }
+    .st-split-tip i {
+      width: 8px; height: 8px; border-radius: 99px; flex: 0 0 8px;
+    }
     .st-sum .meta, .st-cost-sum .meta {
       font-size: 12px; color: var(--muted);
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1333,6 +1387,7 @@ PAGE = r"""<!DOCTYPE html>
           <span class="view-switch">
             <button type="button" class="ghost active" id="statsTabRouting">Routing</button>
             <button type="button" class="ghost" id="statsTabCost">Cost</button>
+            <button type="button" class="ghost" id="statsTabRuntime">Runtime</button>
           </span>
         </span>
       </div>
@@ -1374,8 +1429,10 @@ PAGE = r"""<!DOCTYPE html>
         <input id="runFilter" type="search" placeholder="search input fields…"/>
         <select id="runStatus">
           <option value="all">all</option>
+          <option value="running">running</option>
           <option value="ok">success</option>
           <option value="paused">paused</option>
+          <option value="canceled">canceled</option>
           <option value="error">failed</option>
         </select>
       </div>
@@ -1392,11 +1449,10 @@ PAGE = r"""<!DOCTYPE html>
       <div id="exampleChips" class="chips"></div>
       <div class="toolbar">
         <button class="primary" id="runBtn">Run</button>
-        <button class="ghost cancel" id="cancelBtn" hidden>Cancel</button>
-        <button class="ghost" id="continueBtn" hidden>Continue</button>
-        <button class="ghost" id="stepBtn" hidden>Step</button>
-        <button class="primary" id="resumeBtn" hidden>Resume</button>
         <span id="runLive" class="run-live" hidden>Running</span>
+        <button class="ghost cancel" id="cancelBtn" disabled>Cancel</button>
+        <button class="ghost" id="continueBtn" disabled>Continue</button>
+        <button class="ghost" id="stepBtn" disabled>Step</button>
         <button class="ghost" id="replayBtn" disabled>Replay step</button>
         <button class="ghost" id="replayFromBtn" disabled>Replay from</button>
         <button class="ghost" id="exportBtn" disabled>Export</button>
@@ -1623,8 +1679,15 @@ PAGE = r"""<!DOCTYPE html>
       return Array.isArray(items) ? items : [];
     }
 
+    function runIsCanceled(run) {
+      if (!run) return false;
+      if (run.canceled || run.status === "canceled") return true;
+      const err = String(run.error || "").trim().toLowerCase();
+      return err === "cancelled" || err === "canceled";
+    }
+
     function runIsPaused(run) {
-      return Boolean(run && run.paused && !run.error);
+      return Boolean(run && run.paused && !run.error && !runIsCanceled(run));
     }
 
     function formatResumeDefault(run) {
@@ -1641,10 +1704,14 @@ PAGE = r"""<!DOCTYPE html>
       const nxt = (run && run.next) || [];
       if (hitlPayloads(run).length) {
         return nxt.length
-          ? "Waiting for resume — next: " + nxt.join(", ")
-          : "Waiting for resume";
+          ? "Waiting for a resume value — next: " + nxt.join(", ")
+          : "Waiting for a resume value";
       }
       return nxt.length ? "Paused before " + nxt.join(", ") : "Paused";
+    }
+
+    function currentLiveJob() {
+      return inflightRuns.find((job) => currentRun && job.id === currentRun.id) || null;
     }
 
     function syncPauseControls() {
@@ -1653,10 +1720,9 @@ PAGE = r"""<!DOCTYPE html>
       const paused = runIsPaused(currentRun) && !inflightRuns.length;
       const hits = paused ? hitlPayloads(currentRun) : [];
       const nxt = (currentRun && currentRun.next) || [];
-      $("continueBtn").hidden = !paused;
-      $("stepBtn").hidden = !paused;
-      $("stepBtn").disabled = !nxt.length;
-      $("resumeBtn").hidden = !paused || !hits.length;
+      $("continueBtn").disabled = !paused;
+      $("stepBtn").disabled = !paused || !nxt.length || hits.length > 0;
+      $("cancelBtn").disabled = !currentLiveJob() && !runIsPaused(currentRun);
       if (!paused) {
         if (banner) banner.hidden = true;
         if (panel) panel.hidden = true;
@@ -1958,13 +2024,17 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function pipelineStatus(p) {
+      if (p && inflightRuns.some((job) => job.fileId === p.id)) return "live";
       if (p && p.error) return "error";
       if (p && p.last_run && p.last_run.status === "error") return "error";
+      if (p && p.last_run && p.last_run.status === "canceled") return "canceled";
       if (p && p.last_run) return "ok";
       return "gray";
     }
 
     function runDotClass(run) {
+      if (run && (run.live || run.status === "running")) return "running";
+      if (runIsCanceled(run) || (run && run.status === "canceled")) return "canceled";
       return run && run.status === "error" ? "error" : "ok";
     }
 
@@ -1979,6 +2049,7 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function runHoverText(run) {
+      if (run && (run.live || run.status === "running")) return "running";
       const when = run.created_at ? new Date(run.created_at) : null;
       const date = when && !Number.isNaN(when.getTime())
         ? formatClock(when) + "  " + formatDayEn(when)
@@ -2003,13 +2074,15 @@ PAGE = r"""<!DOCTYPE html>
     function cellStatus(run, node) {
       const hits = (run.steps || []).filter((step) => step.node === node);
       if (!hits.length) return "skip";
-      if (hits.some((step) => step.status === "error")) return "error";
+      if (hits.some((step) => step.status === "error" || step.error)) return "error";
+      if (hits.some((step) => step.pending || step.status === "running")) return "running";
       return "ok";
     }
 
     function cellLabel(status) {
       if (status === "error") return "✕";
       if (status === "skip") return "○";
+      if (status === "running") return "●";
       return "✓";
     }
 
@@ -2039,7 +2112,44 @@ PAGE = r"""<!DOCTYPE html>
       columns.forEach((run) => fn(run));
     }
 
+    function liveRunsForPipeline(p) {
+      return inflightRuns
+        .filter((job) => job.fileId === p.id)
+        .map((job) => {
+          const run = job.run || {};
+          return {
+            id: job.id,
+            input: run.input != null ? run.input : job.input,
+            created_at: run.started_at || job.started_at,
+            elapsed_ms: run.elapsed_ms,
+            status: "running",
+            mode: "run",
+            live: true,
+            steps: run.steps || [],
+          };
+        });
+    }
+
+    function boardRunsForPipeline(p) {
+      const live = liveRunsForPipeline(p);
+      const liveIds = {};
+      live.forEach((row) => { liveIds[row.id] = true; });
+      return live.concat((p.recent || []).filter((row) => !liveIds[row.id]));
+    }
+
+    let pipeBoardLiveTimer = 0;
+    function schedulePipeBoardRefresh() {
+      if (currentView !== "runs") return;
+      if (pipeBoardLiveTimer) return;
+      pipeBoardLiveTimer = requestAnimationFrame(() => {
+        pipeBoardLiveTimer = 0;
+        renderPipeBoard();
+      });
+    }
+
     function renderPipeBoard() {
+      const page = $("pipelinesView");
+      const keepTop = page && currentView === "runs" ? page.scrollTop : null;
       const board = $("pipeBoard");
       board.innerHTML = "";
       if (!pipelines.length) {
@@ -2051,7 +2161,7 @@ PAGE = r"""<!DOCTYPE html>
         const card = document.createElement("div");
         card.className = "af-card" + (p.id === fileId || p.stem === runsFocusStem ? " active" : "");
         card.id = "pipe-" + p.stem;
-        const newestFirst = p.recent || [];
+        const newestFirst = boardRunsForPipeline(p);
         const columns = newestFirst.slice(0, slots).slice().reverse();
         const placeholders = Math.max(0, slots - columns.length);
         const last = newestFirst[0];
@@ -2106,7 +2216,9 @@ PAGE = r"""<!DOCTYPE html>
           const bar = document.createElement("button");
           bar.type = "button";
           bar.className = "af-bar " + runDotClass(run);
-          bar.style.height = Math.max(6, Math.round(((Number(run.elapsed_ms) || 0) / maxMs) * 52)) + "px";
+          const ms = Number(run.elapsed_ms) || 0;
+          const liveH = run.live || run.status === "running" ? 22 : 6;
+          bar.style.height = Math.max(liveH, Math.round((ms / maxMs) * 52)) + "px";
           bar.title = runHoverText(run);
           bar.onclick = () => openPipelineRun(p.id, run.id);
           bars.appendChild(bar);
@@ -2205,6 +2317,10 @@ PAGE = r"""<!DOCTYPE html>
         card.appendChild(grid);
         board.appendChild(card);
       });
+      if (keepTop != null) {
+        page.scrollTop = keepTop;
+        requestAnimationFrame(() => { page.scrollTop = keepTop; });
+      }
     }
 
     function hashParts() {
@@ -2266,28 +2382,42 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     async function openPipelineRun(pipelineId, runId) {
+      const job = inflightRuns.find((item) => item.id === runId);
       if (pipelineId !== fileId) await selectPipeline(pipelineId);
+      if (job && job.run) {
+        currentRun = job.run;
+        selectedStep = null;
+        renderRun(currentRun);
+        showView("trace");
+        return;
+      }
       await openRun(runId);
       showView("trace");
     }
 
     async function loadPipelines() {
       pipelines = (await api("/api/pipelines")).pipelines;
+      paintPipelines();
+      if (currentView === "runs") renderPipeBoard();
+      if (fileId) renderExampleChips();
+      if (!fileId && pipelines.length) selectPipeline(pipelines[0].id);
+    }
+
+    function paintPipelines() {
       const box = $("pipelines");
       box.innerHTML = "";
       pipelines.forEach((p) => {
+        const live = inflightRuns.some((job) => job.fileId === p.id);
         const btn = document.createElement("button");
         btn.className = "item" + (p.error ? " error" : "") + (p.id === fileId ? " active" : "");
         btn.innerHTML =
           '<span class="status-dot ' + pipelineStatus(p) + '"></span> ' +
-          escapeHtml(p.stem + (p.error ? " (error)" : ""));
+          escapeHtml(p.stem + (p.error ? " (error)" : "")) +
+          (live ? ' <span class="pill mode-running">running</span>' : "");
         btn.title = p.error || p.id;
         btn.onclick = () => selectPipeline(p.id);
         box.appendChild(btn);
       });
-      if (currentView === "runs") renderPipeBoard();
-      if (fileId) renderExampleChips();
-      if (!fileId && pipelines.length) selectPipeline(pipelines[0].id);
     }
 
     function pipeline() {
@@ -2376,24 +2506,51 @@ PAGE = r"""<!DOCTYPE html>
       const q = ($("runFilter").value || "").trim().toLowerCase();
       if (!q) return true;
       if (q === "has error" || q === "error" || q === "failed") return run.status === "error";
+      if (q === "canceled" || q === "cancelled" || q === "cancel") return run.status === "canceled";
       if (q === "ok" || q === "success") return run.status === "ok";
       if (q === "paused") return run.status === "paused";
+      if (q === "running" || q === "live") return run.status === "running";
       return inputSearchText(run.input).includes(q);
+    }
+
+    function liveHistoryRows() {
+      return inflightRuns
+        .filter((job) => job.fileId === fileId)
+        .map((job) => {
+          const run = job.run || {};
+          return {
+            id: job.id,
+            input: run.input != null ? run.input : job.input,
+            created_at: run.started_at || job.started_at,
+            elapsed_ms: run.elapsed_ms,
+            status: "running",
+            mode: "run",
+            live: true,
+          };
+        });
+    }
+
+    function historyDisplayRows() {
+      const live = liveHistoryRows();
+      const liveIds = {};
+      live.forEach((row) => { liveIds[row.id] = true; });
+      return live.concat(historyRuns.filter((row) => !liveIds[row.id]));
     }
 
     function renderHistory() {
       const box = $("history");
       if (!fileId) { box.textContent = "Select a pipeline"; return; }
-      const rows = historyRuns.filter(runMatchesFilter);
-      if (!historyRuns.length) { box.innerHTML = '<p class="empty">No runs — drop a JSON file to import</p>'; return; }
+      const listed = historyDisplayRows();
+      const rows = listed.filter(runMatchesFilter);
+      if (!listed.length) { box.innerHTML = '<p class="empty">No runs — drop a JSON file to import</p>'; return; }
       if (!rows.length) { box.innerHTML = '<p class="empty">No runs match</p>'; return; }
       box.innerHTML = "";
       rows.forEach((r) => {
         const btn = document.createElement("button");
         btn.className = "run" + (currentRun && currentRun.id === r.id ? " active" : "");
         const mode = r.mode || "run";
-        const pill = r.status === "error" ? "error" : r.status === "paused" ? "paused" : mode;
-        const known = { run: 1, replay: 1, replay_from: 1, error: 1, approximate: 1, paused: 1 };
+        const pill = runIsCanceled(r) ? "canceled" : r.status === "error" ? "error" : r.status === "paused" ? "paused" : r.status === "running" ? "running" : mode;
+        const known = { run: 1, replay: 1, replay_from: 1, error: 1, canceled: 1, approximate: 1, paused: 1, running: 1 };
         const pillClass = known[pill] ? pill : "run";
         const outdated = isOutdated(r)
           ? '<span class="pill mode-outdated">outdated</span>'
@@ -2408,9 +2565,21 @@ PAGE = r"""<!DOCTYPE html>
           '<div class="meta">' + escapeHtml(truncateJson(r.input)) +
           (r.elapsed_ms != null ? "  ·  " + escapeHtml(formatElapsed(r.elapsed_ms)) : "") +
           "</div>";
-        btn.onclick = () => openRun(r.id);
+        btn.onclick = () => openHistoryRun(r);
         box.appendChild(btn);
       });
+    }
+
+    function openHistoryRun(row) {
+      const job = inflightRuns.find((item) => item.id === row.id);
+      if (job && job.run) {
+        currentRun = job.run;
+        selectedStep = null;
+        renderRun(currentRun);
+        renderHistory();
+        return;
+      }
+      openRun(row.id);
     }
 
     async function loadHistory() {
@@ -4025,12 +4194,15 @@ PAGE = r"""<!DOCTYPE html>
     function syncRunControls() {
       const n = inflightRuns.length;
       $("runBtn").disabled = n >= 3;
-      $("runBtn").textContent = n ? "Run (" + n + "/3)" : "Run";
-      $("cancelBtn").hidden = n === 0;
+      $("runBtn").textContent = "Run";
+      $("cancelBtn").disabled = !currentLiveJob() && !runIsPaused(currentRun);
       const live = $("runLive");
       live.hidden = n === 0;
       live.textContent = n ? "Running " + n + "/3" : "Running";
       syncPauseControls();
+      paintPipelines();
+      renderHistory();
+      schedulePipeBoardRefresh();
     }
 
     async function readSse(res, onEvent) {
@@ -4062,16 +4234,27 @@ PAGE = r"""<!DOCTYPE html>
       }
     }
 
-    function handleLiveEvent(event, pendingByNode) {
+    function viewingJob(job) {
+      return Boolean(job && currentRun && currentRun.id === job.id);
+    }
+
+    function handleLiveEvent(event, pendingByNode, job) {
       const type = event && event.type;
+      const run = job.run || (job.run = { id: job.id, input: job.input, steps: [], result: {}, logs: [] });
+      const viewing = viewingJob(job);
       if (type === "start") {
-        currentRun.id = event.run_id || currentRun.id;
-        currentRun.input = event.input || currentRun.input;
-        currentRun.started_at = event.started_at;
+        run.id = event.run_id || run.id;
+        job.id = run.id;
+        run.input = event.input || run.input;
+        run.started_at = event.started_at;
+        if (viewing || !currentRun) currentRun = run;
+        renderHistory();
+        schedulePipeBoardRefresh();
+        syncRunControls();
         return;
       }
       if (type === "node_start") {
-        pulseNode(event.node, true);
+        if (viewing) pulseNode(event.node, true);
         const pending = {
           step_id: event.node + "#…",
           node: event.node,
@@ -4079,43 +4262,54 @@ PAGE = r"""<!DOCTYPE html>
           started_ms: event.started_ms,
         };
         (pendingByNode[event.node] || (pendingByNode[event.node] = [])).push(pending);
-        currentRun.steps = (currentRun.steps || []).concat([pending]);
-        renderLiveSteps(currentRun);
+        run.steps = (run.steps || []).concat([pending]);
+        if (viewing) renderLiveSteps(run);
+        schedulePipeBoardRefresh();
         return;
       }
       if (type === "step") {
         const step = event.step;
-        pulseNode(step.node, false);
-        markLiveCard(step);
+        if (viewing) {
+          pulseNode(step.node, false);
+          markLiveCard(step);
+        }
         const queue = pendingByNode[step.node] || [];
         const pending = queue.shift();
-        const steps = currentRun.steps || [];
+        const steps = run.steps || [];
         const idx = pending ? steps.indexOf(pending) : -1;
         if (idx >= 0) steps[idx] = step;
         else steps.push(step);
-        currentRun.steps = steps;
-        renderLiveSteps(currentRun);
-        if (graphViewMode === "gantt") renderGantt(currentRun);
-        if (graphViewMode === "agents") renderAgents(currentRun);
-        renderMemory(currentRun);
+        run.steps = steps;
+        if (viewing) {
+          renderLiveSteps(run);
+          if (graphViewMode === "gantt") renderGantt(run);
+          if (graphViewMode === "agents") renderAgents(run);
+          renderMemory(run);
+        }
+        schedulePipeBoardRefresh();
         return;
       }
       if (type === "state") {
-        currentRun.result = event.state;
-        setJson($("state"), event.state, null, { thread: false });
+        run.result = event.state;
+        if (viewing) setJson($("state"), event.state, null, { thread: false });
         return;
       }
       if (type === "log") {
-        currentRun.logs = (currentRun.logs || []).concat([{
+        run.logs = (run.logs || []).concat([{
           t: event.t, src: event.src, text: event.text, level: event.level, logger: event.logger,
         }]);
-        appendLog(event, true);
+        if (viewing) appendLog(event, true);
         return;
       }
       if (type === "done" || type === "paused") {
-        currentRun = event.run;
-        selectedStep = null;
-        renderRun(currentRun);
+        job.run = event.run;
+        if (job.fileId === fileId && event.run) {
+          currentRun = event.run;
+          selectedStep = null;
+          renderRun(currentRun);
+        }
+        renderHistory();
+        schedulePipeBoardRefresh();
         return;
       }
       if (type === "error") {
@@ -4145,12 +4339,23 @@ PAGE = r"""<!DOCTYPE html>
       }
       const runId = resume ? currentRun.id : newRunId();
       const controller = new AbortController();
-      const job = { id: runId, controller: controller };
+      const liveRun = resume
+        ? currentRun
+        : { id: runId, input: input, steps: [], result: {}, logs: [] };
+      const job = {
+        id: runId,
+        controller: controller,
+        fileId: fileId,
+        input: liveRun.input,
+        started_at: new Date().toISOString(),
+        resume: resume,
+        run: liveRun,
+      };
       inflightRuns.push(job);
-      syncRunControls();
       selectedStep = null;
+      currentRun = liveRun;
+      syncRunControls();
       if (!resume) {
-        currentRun = { id: runId, input: input, steps: [], result: {}, logs: [] };
         const logDetails = $("logDetails");
         if (logDetails) logDetails.open = true;
         renderLogs([]);
@@ -4200,10 +4405,10 @@ PAGE = r"""<!DOCTYPE html>
         }
         let finished = false;
         await readSse(res, (event) => {
-          handleLiveEvent(event, pendingByNode);
+          handleLiveEvent(event, pendingByNode, job);
           if (event && (event.type === "done" || event.type === "paused")) finished = true;
         });
-        if (!finished && !(currentRun && currentRun.error)) {
+        if (!finished && !(job.run && (job.run.error || job.run.canceled))) {
           throw new Error("run produced no result");
         }
       } catch (err) {
@@ -4212,8 +4417,17 @@ PAGE = r"""<!DOCTYPE html>
       } finally {
         inflightRuns = inflightRuns.filter((item) => item !== job);
         syncRunControls();
-        await loadHistory();
         await loadPipelines();
+        const keepId = job.run && job.run.id;
+        if (keepId && job.fileId === fileId) {
+          try {
+            await openRun(keepId);
+          } catch (err) {
+            await loadHistory();
+          }
+        } else {
+          await loadHistory();
+        }
       }
     }
 
@@ -4222,6 +4436,14 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     async function continueRun() {
+      const hits = hitlPayloads(currentRun);
+      if (hits.length) {
+        let value;
+        try { value = JSON.parse($("hitlValue").value || "true"); }
+        catch (err) { alert("Resume value must be JSON"); return; }
+        await streamLive({ resume: true, resume_value: value });
+        return;
+      }
       await streamLive({ resume: true });
     }
 
@@ -4235,23 +4457,18 @@ PAGE = r"""<!DOCTYPE html>
       await streamLive({ resume: true, interrupt_before: before, interrupt_after: [next] });
     }
 
-    async function resumeHitl() {
-      let value;
-      try { value = JSON.parse($("hitlValue").value || "true"); }
-      catch (err) { alert("Resume value must be JSON"); return; }
-      await streamLive({ resume: true, resume_value: value });
-    }
-
     async function cancelRuns() {
-      const jobs = inflightRuns.slice();
-      if (!jobs.length) return;
-      await Promise.all(jobs.map((job) =>
-        fetch("/api/run/cancel", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ run_id: job.id }),
-        }).catch(() => null)
-      ));
+      const job = currentLiveJob();
+      const id = job
+        ? job.id
+        : (runIsPaused(currentRun) && currentRun.id ? currentRun.id : "");
+      if (!id) return;
+      await fetch("/api/run/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run_id: id }),
+      }).catch(() => null);
+      if (!job) await openRun(id);
     }
 
     function currentPipeline() {
@@ -4259,8 +4476,10 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function isOutdated(run) {
+      if (!run || run.live || run.status === "running") return false;
+      if (inflightRuns.some((job) => job.id === run.id)) return false;
       const pipe = currentPipeline();
-      if (!run || !pipe) return false;
+      if (!pipe) return false;
       if (pipe.graph_hash && run.graph_hash !== pipe.graph_hash) return true;
       if (pipe.file_sha256 && run.file_sha256 !== pipe.file_sha256) return true;
       return false;
@@ -4376,14 +4595,25 @@ PAGE = r"""<!DOCTYPE html>
     async function removeRun() {
       if (!currentRun) return;
       await api("/api/runs/" + currentRun.id, { method: "DELETE" });
-      currentRun = null;
-      renderRun(null);
       await loadHistory();
       await loadPipelines();
+      const next = (historyRuns || [])[0];
+      if (next) {
+        await openRun(next.id);
+        return;
+      }
+      currentRun = null;
+      renderRun(null);
+      renderHistory();
     }
 
     async function clearPipelineRuns(p) {
-      if (!p || !confirm("Delete all runs for " + p.stem + "?")) return;
+      const page = $("pipelinesView");
+      const top = page ? page.scrollTop : 0;
+      if (!p || !confirm("Delete all runs for " + p.stem + "?")) {
+        if (page) page.scrollTop = top;
+        return;
+      }
       await api("/api/runs?file=" + encodeURIComponent(p.id), { method: "DELETE" });
       if (fileId === p.id) {
         currentRun = null;
@@ -4391,6 +4621,10 @@ PAGE = r"""<!DOCTYPE html>
         await loadHistory();
       }
       await loadPipelines();
+      if (page) {
+        page.scrollTop = top;
+        requestAnimationFrame(() => { page.scrollTop = top; });
+      }
     }
 
     function exportRun() {
@@ -4518,9 +4752,10 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function setStatsTab(name) {
-      statsTab = name === "cost" ? "cost" : "routing";
+      statsTab = name === "cost" ? "cost" : name === "runtime" ? "runtime" : "routing";
       $("statsTabRouting").classList.toggle("active", statsTab === "routing");
       $("statsTabCost").classList.toggle("active", statsTab === "cost");
+      $("statsTabRuntime").classList.toggle("active", statsTab === "runtime");
       renderStats();
     }
 
@@ -4595,6 +4830,12 @@ PAGE = r"""<!DOCTYPE html>
           } else {
             nodeDetail[name] = formatTok(row.prompt) + " in · " + formatTok(row.completion) + " out";
           }
+        } else if (mode === "runtime") {
+          const timed = Number(row.elapsed_n) || 0;
+          const ms = Number(row.elapsed_ms) || 0;
+          if (timed && ms) nodeDetail[name] = "avg " + formatElapsed(avgTok(ms, timed));
+          else if (ms) nodeDetail[name] = formatElapsed(ms);
+          else nodeDetail[name] = "no timing";
         }
       });
       const byNode = {};
@@ -4767,15 +5008,49 @@ PAGE = r"""<!DOCTYPE html>
         total: 0,
         usage_runs: 0,
         unavailable_runs: 0,
+        elapsed_ms: 0,
+        elapsed_n: 0,
+        node_elapsed_ms: 0,
       };
+    }
+
+    function statsPercentile(sorted, q) {
+      if (!sorted.length) return 0;
+      const idx = (sorted.length - 1) * q;
+      const lo = Math.floor(idx);
+      const hi = Math.ceil(idx);
+      if (lo === hi) return sorted[lo];
+      return sorted[lo] * (hi - idx) + sorted[hi] * (idx - lo);
+    }
+
+    function statsBarPercents(values) {
+      const nums = values.map((n) => Math.max(0, Number(n) || 0));
+      const total = nums.reduce((sum, n) => sum + n, 0);
+      if (!total) return nums.map(() => 0);
+      const pcts = nums.map((n, index) => (
+        index === nums.length - 1 ? 0 : Math.round((n / total) * 100)
+      ));
+      const used = pcts.slice(0, -1).reduce((sum, n) => sum + n, 0);
+      pcts[pcts.length - 1] = Math.max(0, 100 - used);
+      return pcts;
+    }
+
+    function statsColorTip(rows) {
+      return '<div class="st-split-tip">' +
+        rows.map((row) =>
+          '<div class="st-split-tip-row"><i class="' + row.kind + '"></i>' +
+          escapeHtml(row.label) + "</div>"
+        ).join("") +
+        "</div>";
     }
 
     function statsRunOutcomes(stem) {
       const rows = (statsData.runs || []).filter((row) => row.pipeline === stem);
-      const out = { ok: 0, fail: 0, paused: 0, total: rows.length };
+      const out = { ok: 0, fail: 0, paused: 0, canceled: 0, total: rows.length };
       rows.forEach((row) => {
         if (row.status === "error") out.fail += 1;
         else if (row.status === "paused") out.paused += 1;
+        else if (row.status === "canceled") out.canceled += 1;
         else out.ok += 1;
       });
       return out;
@@ -4788,19 +5063,24 @@ PAGE = r"""<!DOCTYPE html>
         .filter((item) => item.pipeline === stem)
         .reduce((sum, item) => sum + (Number(item.visits) || 0), 0);
       const out = statsRunOutcomes(stem);
-      const decided = out.ok + out.fail;
-      const okPct = decided ? Math.round((out.ok / decided) * 100) : 0;
-      const failPct = decided ? (100 - okPct) : 0;
-      let meta = out.ok + " ok · " + out.fail + " failed";
+      const pcts = statsBarPercents([out.ok, out.fail, out.canceled]);
+      let meta = out.ok + " ok · " + out.fail + " failed · " + out.canceled + " canceled";
       if (out.paused) meta += " · " + out.paused + " paused";
       const el = document.createElement("div");
       el.className = "st-sum";
       el.innerHTML =
         '<div class="fig"><b>' + escapeHtml(String(runs)) + "</b><span>grand total</span></div>" +
         '<div class="fig"><b>' + escapeHtml(formatTok(avgTok(visits, runs))) + "</b><span>avg node count</span></div>" +
-        '<div class="split"><div class="st-hero-split"><i class="ok" style="width:' + okPct +
-        '%"></i><i class="fail" style="width:' + failPct +
-        '%"></i></div><div class="meta">' + escapeHtml(meta) + "</div></div>";
+        '<div class="split"><div class="st-hero-split">' +
+        '<i class="ok" style="width:' + pcts[0] + '%"></i>' +
+        '<i class="fail" style="width:' + pcts[1] + '%"></i>' +
+        '<i class="canceled" style="width:' + pcts[2] + '%"></i>' +
+        "</div>" + statsColorTip([
+          { kind: "ok", label: "success" },
+          { kind: "fail", label: "failed" },
+          { kind: "canceled", label: "canceled" },
+        ]) +
+        '<div class="meta">' + escapeHtml(meta) + "</div></div>";
       return el;
     }
 
@@ -4825,10 +5105,89 @@ PAGE = r"""<!DOCTYPE html>
       el.innerHTML =
         '<div class="fig"><b>' + escapeHtml(formatTok(total)) + "</b><span>grand total</span></div>" +
         '<div class="fig"><b>' + escapeHtml(formatTok(avgTok(total, denom))) + "</b><span>avg / run</span></div>" +
-        '<div class="split"><div class="st-hero-split"><i class="in" style="width:' + inPct +
-        '%"></i><i class="out" style="width:' + outPct +
-        '%"></i></div><div class="meta">' + escapeHtml(meta) + "</div></div>";
+        '<div class="split"><div class="st-hero-split">' +
+        '<i class="in" style="width:' + inPct + '%"></i>' +
+        '<i class="out" style="width:' + outPct + '%"></i>' +
+        "</div>" + statsColorTip([
+          { kind: "in", label: "input tokens" },
+          { kind: "out", label: "output tokens" },
+        ]) +
+        '<div class="meta">' + escapeHtml(meta) + "</div></div>";
       return el;
+    }
+
+    function statsRuntimeSummary(stem) {
+      const row = statsPipeRow(stem);
+      const runs = Number(row.runs) || 0;
+      const timed = Number(row.elapsed_n) || 0;
+      const wall = Number(row.elapsed_ms) || 0;
+      const times = (statsData.runs || [])
+        .filter((item) => item.pipeline === stem)
+        .map((item) => Number(item.elapsed_ms))
+        .filter((n) => Number.isFinite(n) && n > 0)
+        .sort((a, b) => a - b);
+      const denom = timed || times.length;
+      const avg = avgTok(wall, denom);
+      const maxMs = times.length ? times[times.length - 1] : 0;
+      const pcts = statsBarPercents([avg, Math.max(0, maxMs - avg)]);
+      let meta = "";
+      if (!wall && !maxMs) meta = "no timing recorded";
+      else {
+        meta = formatElapsed(avg) + " avg · " + formatElapsed(maxMs) + " max";
+        if (timed && timed !== runs) meta += " · " + timed + " timed";
+        else meta += " · " + runs + " run" + (runs === 1 ? "" : "s");
+      }
+      const el = document.createElement("div");
+      el.className = "st-sum";
+      el.innerHTML =
+        '<div class="fig"><b>' + escapeHtml(formatElapsed(wall) || "0ms") + "</b><span>grand total</span></div>" +
+        '<div class="fig"><b>' + escapeHtml(formatElapsed(avg) || "0ms") + "</b><span>avg / run</span></div>" +
+        '<div class="split"><div class="st-hero-split">' +
+        '<i class="avg" style="width:' + pcts[0] + '%"></i>' +
+        '<i class="max" style="width:' + pcts[1] + '%"></i>' +
+        "</div>" + statsColorTip([
+          { kind: "avg", label: "average" },
+          { kind: "max", label: "max" },
+        ]) +
+        '<div class="meta">' + escapeHtml(meta) + "</div></div>";
+      return el;
+    }
+
+    function statsRuntimePanel(stem, node) {
+      const row = (statsData.nodes || []).find((item) =>
+        item.pipeline === stem && topoName(item.node) === node
+      );
+      if (!row) return "";
+      const visits = Number(row.visits) || 0;
+      const timed = Number(row.elapsed_n) || 0;
+      const total = Number(row.elapsed_ms) || 0;
+      const avg = timed ? avgTok(total, timed) : 0;
+      const min = row.elapsed_min == null ? 0 : Number(row.elapsed_min) || 0;
+      const max = Number(row.elapsed_max) || 0;
+      const pipe = statsPipeRow(stem);
+      const pipeMs = Number(pipe.node_elapsed_ms) || 0;
+      const share = pipeMs ? Math.round((total / pipeMs) * 100) : 0;
+      const maxBar = Math.max(avg, min, max, 1);
+      const rows = [
+        { label: "average", value: formatElapsed(avg) || "—", width: Math.max(4, Math.round((avg / maxBar) * 100)) },
+        { label: "min", value: min ? formatElapsed(min) : "—", width: min ? Math.max(4, Math.round((min / maxBar) * 100)) : 0 },
+        { label: "max", value: max ? formatElapsed(max) : "—", width: max ? 100 : 0 },
+        { label: "total", value: formatElapsed(total) || "—", width: 0 },
+        { label: "share of node time", value: share + "%", width: share ? Math.max(4, share) : 0 },
+      ];
+      const body = rows.map((item) => {
+        return '<div class="st-why-group"><div class="st-why-row">' +
+          '<div class="st-why-text">' + escapeHtml(item.label) + "</div>" +
+          '<div class="st-why-n">' + escapeHtml(item.value) + "</div>" +
+          (item.width
+            ? '<div class="st-why-bar"><i style="width:' + item.width + '%"></i></div>'
+            : "") +
+          "</div></div>";
+      }).join("");
+      return '<div class="st-why-panel"><h3>' + escapeHtml(node) +
+        " · " + visits + " visit" + (visits === 1 ? "" : "s") +
+        (timed && timed !== visits ? " · " + timed + " timed" : "") +
+        "</h3><div class=\"st-why\">" + body + "</div></div>";
     }
 
     function renderStatsMaps(mode) {
@@ -4844,6 +5203,7 @@ PAGE = r"""<!DOCTYPE html>
       const map = document.createElement("div");
       map.className = "st-map";
       if (mode === "cost") map.appendChild(statsCostSummary(pipe));
+      else if (mode === "runtime") map.appendChild(statsRuntimeSummary(pipe));
       else map.appendChild(statsRoutingSummary(pipe));
       const graph = document.createElement("div");
       graph.className = "st-graph";
@@ -4851,6 +5211,10 @@ PAGE = r"""<!DOCTYPE html>
       if (mode === "routing" && statsChoice && statsChoice.pipeline === pipe && statsChoice.node) {
         const extra = document.createElement("div");
         extra.innerHTML = statsReasonPanel(pipe, statsChoice.node);
+        if (extra.firstChild) map.appendChild(extra.firstChild);
+      } else if (mode === "runtime" && statsChoice && statsChoice.pipeline === pipe && statsChoice.node) {
+        const extra = document.createElement("div");
+        extra.innerHTML = statsRuntimePanel(pipe, statsChoice.node);
         if (extra.firstChild) map.appendChild(extra.firstChild);
       }
       board.appendChild(map);
@@ -4865,8 +5229,13 @@ PAGE = r"""<!DOCTYPE html>
       renderStatsMaps("cost");
     }
 
+    function renderStatsRuntime() {
+      renderStatsMaps("runtime");
+    }
+
     function renderStats() {
       if (statsTab === "cost") renderStatsCost();
+      else if (statsTab === "runtime") renderStatsRuntime();
       else renderStatsRouting();
     }
 
@@ -5252,7 +5621,6 @@ PAGE = r"""<!DOCTYPE html>
     $("cancelBtn").onclick = () => cancelRuns().catch((e) => alert(e.message));
     $("continueBtn").onclick = () => continueRun().catch((e) => alert(e.message));
     $("stepBtn").onclick = () => stepRun().catch((e) => alert(e.message));
-    $("resumeBtn").onclick = () => resumeHitl().catch((e) => alert(e.message));
     $("replayBtn").onclick = () => openFromButton("replay");
     $("replayFromBtn").onclick = () => openFromButton("replay_from");
     $("replayFromHereBtn").onclick = () => rerun("resume").catch((e) => alert(e.message));
@@ -5309,6 +5677,7 @@ PAGE = r"""<!DOCTYPE html>
     };
     $("statsTabRouting").onclick = () => setStatsTab("routing");
     $("statsTabCost").onclick = () => setStatsTab("cost");
+    $("statsTabRuntime").onclick = () => setStatsTab("runtime");
     document.addEventListener("click", async (event) => {
       const src = event.target.closest && event.target.closest(".src-link");
       if (src) {
@@ -5505,10 +5874,10 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         key = self._run_key(run_id)
         with self.run_lock:
             cancel = self.active_runs.get(key) if key else None
-        if cancel is None:
-            return False
-        cancel.set()
-        return True
+        if cancel is not None:
+            cancel.set()
+            return True
+        return cancel_paused_run(self.workspace, run_id) is not None
 
     def _read_json(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
@@ -5920,7 +6289,7 @@ def serve(
     GraphVIHandler.watcher = watcher
     server = ThreadingHTTPServer((host, port), handler)
     url = f"http://{host}:{port}"
-    print(f"GraphVIAgent {url}  workspace={workspace}", flush=True)
+    print(f"GraphVIAgent {__version__}  {url}  workspace={workspace}", flush=True)
     if is_public_bind(host):
         print(
             "WARNING: reachable on the network. Anyone who can open this URL "

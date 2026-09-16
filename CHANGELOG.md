@@ -1,12 +1,21 @@
 # Changelog
 
-## 1.1.4-dev
+## 1.2.0
 
 ### Added
+- Statistics page (`#/statistics`, `#/statistics/<pipeline>`): Routing, Runtime, and Cost on the same topology as Trace
+  - Routing: run count, average node visits per run, success / failed / canceled split; click a node for grouped branch `reason`s
+  - Runtime: wall-clock grand total and average per run; the strip is average vs longest run; click a node for min / avg / max
+  - Cost: average in/out tokens per node, a pipeline grand total, and average per run (tokens, not dollars)
+  - Hover a color strip for a legend of color dots and labels (one per line)
+- `GET /api/stats` (optional `file=` filter). Trace, Runs, and Compare stay the same; run `status` may be `canceled`
+- In-page jumps Trace ↔ Runs ↔ Statistics for the open pipeline (header menu colors stay the same)
+- `graphviagent --version` / `-V`
+- Runs deep-links `#/runs/<pipeline>` scroll to that pipeline card
 - Origin / `Host` check on the local UI so other websites cannot trigger runs; `--host 0.0.0.0` requires `--expose` and prints a warning
 - `schema_version` (currently `1`) and `gva_version` on saved runs; older files still load, newer schemas are refused
-- Statistics page (`#/statistics`): Routing histogram of `choice` / `decisions`, and Cost view of in/out tokens per node, run, and pipeline
 - `examples/tokens_pipeline.py` — dummy random token usage on each node so Cost has numbers without an LLM
+- `examples/wait_pipeline.py` — three `time.sleep` nodes so Cancel / Continue / Step have time to catch the run
 
 ### Fixed
 - `load_run` returns `None` for truncated or invalid JSON instead of raising (open/compare 404, not 500)
@@ -15,10 +24,16 @@
 - Delete, list, and import resolve toml pipeline ids (including files outside the serve root) instead of `Path.stem`
 - File watch covers toml-listed pipelines whose files live outside the workspace
 - Compare aligns every visit of a node (loops and branches) instead of only the first
+- Cancel stops only the open run; concurrent runs of the same pipeline no longer share one cancel flag
+- Cancel interrupts in-run `time.sleep` within ~50ms instead of waiting for the full nap
 
 ### Changed
 - Rename the Pipelines page to **Runs** (`#/runs`; `#/pipelines` still opens it)
 - Duration and memory labels scale (µs/ms/s, B/KB/MB/GB); Gantt hover Start/End use clock time
+- Delete run and Clear use the same size as other toolbar buttons, in red
+- Trace toolbar keeps Cancel / Continue / Step visible; they disable unless a run is in flight or paused. HITL `interrupt(...)` uses Continue with the resume-value panel
+- Cancel writes `canceled: true` (status `canceled`) instead of `error: cancelled`, including the history filter. Older files with `error: cancelled` still count as canceled
+- In-flight runs appear in the left Runs list (and a live mark on the pipeline)
 
 ## 1.1.3-dev
 

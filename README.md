@@ -114,7 +114,7 @@ New or edited `*_pipeline.py` files refresh the sidebar on their own. You do not
 1. Select the pipeline in the sidebar.
 2. Edit the JSON input (the first `EXAMPLES` item is prefilled).
 3. Click **Run**.
-4. Single-click a node to select it. Double-click to open **Node view**.
+4. Single-click a node to select it. Double-click to open **Node view**. Node cards show `file:line`; click to open in the editor. Failed nodes include a traceback.
 5. Filter the run list by status (all / success / failed), node name, or input text.
 6. **Export** downloads the open run as JSON. **Import** or drop a JSON file on the run list.
 7. **Delete run** removes the open run. Hover a JSON box and use **Copy** to copy it.
@@ -196,3 +196,4 @@ graphviagent serve examples
 - `examples/stats_pipeline.py` — mean of a list; `{values: []}` raises
 - `examples/grade_pipeline.py` — score / max; `{maximum: 0}` raises
 - `examples/convert_pipeline.py` — `{value: 0, unit: "per_unit"}` or `{unit: "kelvin"}` raises
+- `examples/traceback_pipeline.py` — nested helpers; `{hits: 3, tries: 0}` raises with a clickable traceback

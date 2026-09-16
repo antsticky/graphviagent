@@ -393,6 +393,32 @@ PAGE = r"""<!DOCTYPE html>
     .g-card.agent { width: 220px; }
     .io-tools { grid-column: 1 / -1; }
     .io-tools[hidden] { display: none !important; }
+    .io-trace { grid-column: 1 / -1; }
+    .io-trace[hidden] { display: none !important; }
+    .src-link {
+      color: #c4b5fd; cursor: pointer; text-decoration: none;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 11px;
+    }
+    .src-link:hover { color: #fff; text-decoration: underline; }
+    .g-src { line-height: 1.3; }
+    .step-src { color: var(--muted); font-size: 11px; margin-top: 1px; }
+    .nv-meta .src-link { font-size: 12px; }
+    .trace {
+      margin: 0; padding: 8px 10px; border-radius: 8px;
+      background: #121216; max-height: 280px; overflow: auto;
+    }
+    .trace.empty { color: var(--muted); }
+    .trace-frame {
+      display: grid; grid-template-columns: auto 1fr; gap: 6px 10px;
+      padding: 6px 0; border-bottom: 1px solid #2a2a32;
+      font: 12px/1.4 "IBM Plex Mono", ui-monospace, monospace;
+    }
+    .trace-frame:last-child { border-bottom: 0; }
+    .trace-frame.library { opacity: 0.45; }
+    .trace-loc { color: var(--muted); white-space: nowrap; }
+    .trace-name { color: var(--ink); }
+    .trace-text { grid-column: 1 / -1; color: #d4d4dc; white-space: pre-wrap; }
     .tool-bars { display: flex; gap: 6px; margin: 0 0 10px; }
     .tool-bar {
       flex: 1; min-width: 0; height: 10px; border-radius: 99px;
@@ -1050,6 +1076,10 @@ PAGE = r"""<!DOCTYPE html>
           <h2>Tools</h2>
           <div id="stepTools" class="json empty">Select a node to see tool calls.</div>
         </div>
+        <div class="pane io-trace" hidden>
+          <h2>Traceback</h2>
+          <div id="stepTrace" class="trace empty">No traceback for this node.</div>
+        </div>
       </div>
     </div>
   </div>
@@ -1096,6 +1126,44 @@ PAGE = r"""<!DOCTYPE html>
       return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
         "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
       }[ch]));
+    }
+
+    function sourceMap(run) {
+      const spec = graphSpec(run || currentRun);
+      return (spec && spec.source) || {};
+    }
+
+    function nodeSource(stepOrName, run) {
+      if (stepOrName && typeof stepOrName === "object") {
+        if (stepOrName.source && stepOrName.source.file) return stepOrName.source;
+        const mapped = sourceMap(run)[stepOrName.node];
+        return mapped || null;
+      }
+      return sourceMap(run)[stepOrName] || null;
+    }
+
+    function sourceLabel(loc) {
+      if (!loc || !loc.file) return "";
+      const parts = String(loc.file).replace(/\\/g, "/").split("/");
+      const base = parts[parts.length - 1] || loc.file;
+      return loc.line ? base + ":" + loc.line : base;
+    }
+
+    function editorHref(loc) {
+      if (!loc || !loc.file) return "";
+      const path = String(loc.file).replace(/\\/g, "/");
+      const line = loc.line || 1;
+      const prefixed = path.charAt(1) === ":" ? "/" + path : path;
+      return "vscode://file" + prefixed + ":" + line;
+    }
+
+    function sourceChipHtml(loc) {
+      if (!loc || !loc.file) return "";
+      const href = editorHref(loc);
+      const label = sourceLabel(loc);
+      const title = loc.file + (loc.line ? ":" + loc.line : "");
+      return '<a class="src-link" href="' + escapeHtml(href) + '" data-src="1" title="' +
+        escapeHtml(title) + '">' + escapeHtml(label) + "</a>";
     }
 
     const EN_MONTHS = ["Jan.", "Feb.", "Mar.", "Apr.", "May", "June", "July", "Aug.", "Sept.", "Oct.", "Nov.", "Dec."];
@@ -2208,6 +2276,34 @@ PAGE = r"""<!DOCTYPE html>
       }).join("");
     }
 
+    function renderTraceback(step) {
+      const board = $("stepTrace");
+      const pane = board && board.closest(".io-trace");
+      if (!board) return;
+      const frames = (step && step.error_frames) || [];
+      const inspect = nodeViewMode === "all";
+      board.dataset.hasFrames = frames.length ? "1" : "0";
+      if (pane) pane.hidden = !inspect || !frames.length;
+      if (!inspect) return;
+      if (!frames.length) {
+        board.className = "trace empty";
+        board.textContent = step && step.error
+          ? "No Python frames were captured for this error."
+          : "No traceback for this node.";
+        return;
+      }
+      board.className = "trace";
+      board.innerHTML = frames.map((frame) => {
+        const loc = { file: frame.file, line: frame.line };
+        const chip = sourceChipHtml(loc);
+        return '<div class="trace-frame' + (frame.library ? " library" : "") + '">' +
+          '<span class="trace-loc">' + (chip || escapeHtml(sourceLabel(loc) || "—")) + "</span>" +
+          '<span class="trace-name">' + escapeHtml(frame.name || "") + "</span>" +
+          (frame.text ? '<div class="trace-text">' + escapeHtml(frame.text) + "</div>" : "") +
+          "</div>";
+      }).join("");
+    }
+
     function showStepIO(step) {
       const empty = $("stepIn");
       const editor = $("nodeInput");
@@ -2223,19 +2319,22 @@ PAGE = r"""<!DOCTYPE html>
         setJson($("stepOut"), null, "The keys this node returned.");
         renderStateDiff(null);
         renderStepTools(null);
+        renderTraceback(null);
         return;
       }
       $("nvTitle").textContent = step.node || "Node";
       const metrics = stepMetrics(step);
-      $("nvMeta").textContent = [
-        step.step_id,
-        formatElapsed(step.elapsed_ms) || "—",
-        formatMemory(metrics.mb) + " mem",
-        formatMemory(metrics.peak) + " peak",
-        formatTokens(metrics),
-        metrics.toolTokens ? metrics.toolTokens + " tool tok" : "",
-        metrics.tool != null ? formatElapsed(metrics.tool) + " tool" : "— tool",
-        step.error ? "error" : "",
+      const loc = nodeSource(step);
+      $("nvMeta").innerHTML = [
+        escapeHtml(step.step_id || ""),
+        sourceChipHtml(loc),
+        escapeHtml(formatElapsed(step.elapsed_ms) || "—"),
+        escapeHtml(formatMemory(metrics.mb) + " mem"),
+        escapeHtml(formatMemory(metrics.peak) + " peak"),
+        escapeHtml(formatTokens(metrics)),
+        metrics.toolTokens ? escapeHtml(metrics.toolTokens + " tool tok") : "",
+        metrics.tool != null ? escapeHtml(formatElapsed(metrics.tool) + " tool") : escapeHtml("— tool"),
+        step.error ? escapeHtml("error") : "",
       ].filter(Boolean).join("  ·  ");
       $("ioName").textContent = formatElapsed(step.elapsed_ms);
       empty.style.display = "none";
@@ -2245,6 +2344,7 @@ PAGE = r"""<!DOCTYPE html>
       setJson($("stepOut"), step.update);
       renderStateDiff(step);
       renderStepTools(step);
+      renderTraceback(step);
     }
 
     function isNodeViewOpen() {
@@ -2257,10 +2357,12 @@ PAGE = r"""<!DOCTYPE html>
       const from = $("replayFromHereBtn");
       const diff = $("stateDiff") && $("stateDiff").closest(".io-diff");
       const tools = $("stepTools") && $("stepTools").closest(".io-tools");
+      const trace = $("stepTrace") && $("stepTrace").closest(".io-trace");
       call.hidden = nodeViewMode === "replay_from";
       from.hidden = nodeViewMode === "replay";
       if (diff) diff.hidden = nodeViewMode !== "all";
       if (tools) tools.hidden = nodeViewMode !== "all";
+      if (trace) trace.hidden = nodeViewMode !== "all" || !($("stepTrace") && $("stepTrace").dataset.hasFrames === "1");
       call.textContent = nodeViewMode === "replay" ? "Replay step" : "Call node";
       call.className = "primary";
       from.className = nodeViewMode === "replay_from" ? "primary" : "ghost";
@@ -2339,6 +2441,7 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function stepDetail(step) {
+      if (step.error) return step.error;
       if (step.reason) return step.reason;
       const update = step.update || {};
       for (const key of ["greeting", "shout", "polished", "output", "result"]) {
@@ -2368,11 +2471,15 @@ PAGE = r"""<!DOCTYPE html>
       if (step.node) card.dataset.node = step.node;
       if (!skipped && step.step_id) card.dataset.stepId = step.step_id;
       const detail = skipped ? (step.reason || "not taken") : stepDetail(step);
+      const loc = skipped ? null : nodeSource(step);
+      const srcHtml = loc ? '<span class="g-src">' + sourceChipHtml(loc) + "</span>" : "";
       card.innerHTML =
         '<span class="g-dot"></span><span class="g-body">' +
         '<span class="g-name">' + escapeHtml(step.node || "") + "</span>" +
+        srcHtml +
         (detail ? '<span class="g-sub">' + escapeHtml(detail) + "</span>" : "") +
         "</span>";
+      if (loc) card.title = sourceLabel(loc);
       return card;
     }
 
@@ -2892,6 +2999,7 @@ PAGE = r"""<!DOCTYPE html>
         ["Tool tokens", metrics.toolTokens == null ? "—" : String(metrics.toolTokens)],
         ["Tool", metrics.tool != null ? formatElapsed(metrics.tool) : "—"],
         ["Kind", kindLabel],
+        ["Source", sourceLabel(nodeSource(step)) || "—"],
       ];
       return (
         '<div class="tip-name">' + escapeHtml(step.node || "") + "</div>" +
@@ -3121,11 +3229,14 @@ PAGE = r"""<!DOCTYPE html>
         row.dataset.stepId = step.step_id;
         const kind = step.error ? "error" : stepKind(step.node);
         const elapsed = step.pending ? "…" : formatElapsed(step.elapsed_ms);
+        const loc = nodeSource(step);
+        const srcHtml = loc ? '<div class="step-src">' + sourceChipHtml(loc) + "</div>" : "";
         row.innerHTML =
           '<div class="bar ' + kind + '"></div><div>' +
           '<div class="step-id">' + escapeHtml(step.step_id) + "</div>" +
           '<div class="step-name">' + escapeHtml(step.node) + "</div>" +
-          '<div class="step-why">' + escapeHtml(step.pending ? "running" : (step.reason || "")) + "</div></div>" +
+          srcHtml +
+          '<div class="step-why">' + escapeHtml(step.pending ? "running" : (step.error || step.reason || "")) + "</div></div>" +
           (step.pending ? "<div></div>" : sparkBars(stepMetrics(step), maxes)) +
           '<div class="step-ms">' + escapeHtml(elapsed) + "</div>";
         if (!step.pending) bindStepActions(row, step);
@@ -3197,11 +3308,14 @@ PAGE = r"""<!DOCTYPE html>
         row.dataset.stepId = step.step_id;
         const kind = step.error ? "error" : stepKind(step.node);
         const elapsed = formatElapsed(step.elapsed_ms);
+        const loc = nodeSource(step);
+        const srcHtml = loc ? '<div class="step-src">' + sourceChipHtml(loc) + "</div>" : "";
         row.innerHTML =
           '<div class="bar ' + kind + '"></div><div>' +
           '<div class="step-id">' + escapeHtml(step.step_id) + "</div>" +
           '<div class="step-name">' + escapeHtml(step.node) + "</div>" +
-          '<div class="step-why">' + escapeHtml(step.reason || "") + "</div></div>" +
+          srcHtml +
+          '<div class="step-why">' + escapeHtml(step.error || step.reason || "") + "</div></div>" +
           sparkBars(stepMetrics(step), maxes) +
           '<div class="step-ms">' + escapeHtml(elapsed) + "</div>";
         bindStepActions(row, step);
@@ -3911,6 +4025,14 @@ PAGE = r"""<!DOCTYPE html>
     $("navPipelines").onclick = () => showView("pipelines");
     $("navCompare").onclick = () => showView("compare");
     document.addEventListener("click", async (event) => {
+      const src = event.target.closest && event.target.closest(".src-link");
+      if (src) {
+        event.preventDefault();
+        event.stopPropagation();
+        const href = src.getAttribute("href");
+        if (href) window.location.href = href;
+        return;
+      }
       const btn = event.target.closest(".copy-btn");
       if (!btn) return;
       event.preventDefault();

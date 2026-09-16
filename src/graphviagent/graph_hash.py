@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import functools
 import hashlib
 import inspect
 import json
+from pathlib import Path
 from typing import Any
 
 from graphviagent.record import graph_edges
@@ -108,7 +110,25 @@ def graph_tools(app: Any) -> list[str]:
     return sorted(found)
 
 
-def _callable_source(obj: Any) -> str | None:
+_UNWRAP_ATTRS = ("func", "afunc", "fn", "bound", "runnable", "_func")
+_LIBRARY_PATH_MARKERS = (
+    "/langgraph/",
+    "/langchain_core/",
+    "/langchain/",
+    "/graphviagent/",
+    "/site-packages/",
+    "/lib/python",
+)
+
+
+def _is_library_path(path: str) -> bool:
+    if not path or path.startswith("<"):
+        return True
+    normalized = path.replace("\\", "/")
+    return any(marker in normalized for marker in _LIBRARY_PATH_MARKERS)
+
+
+def _walk_callables(obj: Any) -> Any:
     seen: set[int] = set()
     stack = [obj]
     while stack:
@@ -119,15 +139,86 @@ def _callable_source(obj: Any) -> str | None:
         if marker in seen:
             continue
         seen.add(marker)
-        try:
-            source = inspect.getsource(current)
-        except (TypeError, OSError):
-            source = None
-        if source:
-            return source
-        for attr in ("func", "afunc", "fn", "bound", "runnable", "_func"):
+        yield current
+        if isinstance(current, functools.partial):
+            stack.append(current.func)
+            stack.extend(current.args)
+            stack.extend(current.keywords.values() if current.keywords else ())
+        for attr in _UNWRAP_ATTRS:
             stack.append(getattr(current, attr, None))
-    return None
+
+
+def _unwrap_callable(obj: Any) -> Any | None:
+    functions: list[Any] = []
+    others: list[Any] = []
+    for current in _walk_callables(obj):
+        try:
+            inspect.getsourcefile(current)
+        except (TypeError, OSError):
+            continue
+        if inspect.isfunction(current) or inspect.ismethod(current):
+            functions.append(current)
+        else:
+            others.append(current)
+    pool = functions or others
+    if not pool:
+        return None
+
+    def score(item: Any) -> tuple[int, int]:
+        try:
+            file = inspect.getsourcefile(item) or ""
+        except (TypeError, OSError):
+            file = ""
+        name = getattr(item, "__name__", "") or ""
+        return (0 if _is_library_path(file) else 1, 0 if name == "<lambda>" else 1)
+
+    return max(pool, key=score)
+
+
+def _callable_source(obj: Any) -> str | None:
+    target = _unwrap_callable(obj)
+    if target is None:
+        return None
+    try:
+        return inspect.getsource(target)
+    except (TypeError, OSError):
+        return None
+
+
+def callable_location(obj: Any) -> dict[str, Any] | None:
+    target = _unwrap_callable(obj)
+    if target is None:
+        return None
+    try:
+        raw_file = inspect.getsourcefile(target) or inspect.getfile(target)
+    except (TypeError, OSError):
+        raw_file = None
+    if not raw_file or raw_file.startswith("<"):
+        return None
+    try:
+        file = str(Path(raw_file).resolve())
+    except OSError:
+        file = raw_file
+    line: int | None = None
+    end_line: int | None = None
+    try:
+        lines, start = inspect.getsourcelines(target)
+        line = int(start)
+        end_line = int(start) + len(lines) - 1
+    except (TypeError, OSError, ValueError):
+        code = getattr(target, "__code__", None)
+        first = getattr(code, "co_firstlineno", None)
+        if isinstance(first, int):
+            line = first
+    name = getattr(target, "__qualname__", None) or getattr(target, "__name__", None)
+    loc: dict[str, Any] = {"file": file}
+    if line is not None:
+        loc["line"] = line
+    if end_line is not None:
+        loc["end_line"] = end_line
+    if isinstance(name, str) and name:
+        loc["name"] = name
+    return loc
 
 
 def graph_impls(app: Any) -> dict[str, str]:
@@ -145,6 +236,20 @@ def graph_impls(app: Any) -> dict[str, str]:
     return impls
 
 
+def graph_sources(app: Any) -> dict[str, dict[str, Any]]:
+    found: dict[str, dict[str, Any]] = {}
+    nodes = getattr(app, "nodes", None)
+    if not isinstance(nodes, dict):
+        return found
+    for name, node in nodes.items():
+        if str(name) in _SKIP_NODES:
+            continue
+        loc = callable_location(node)
+        if loc:
+            found[str(name)] = loc
+    return found
+
+
 def fingerprint_graph(app: Any, file_sha256: str | None = None) -> tuple[dict[str, Any], str]:
     spec = {
         "nodes": graph_nodes(app),
@@ -156,6 +261,7 @@ def fingerprint_graph(app: Any, file_sha256: str | None = None) -> tuple[dict[st
     }
     raw = json.dumps(spec, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    spec["source"] = graph_sources(app)
     return spec, digest
 
 

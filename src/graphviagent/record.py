@@ -7,9 +7,11 @@ import queue
 import sys
 import threading
 import time
+import traceback
 import tracemalloc
 from datetime import datetime, timezone
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
 
@@ -622,25 +624,30 @@ def _install_node_probes(
                 previous_node = getattr(_capture_tls, "node", None)
                 _capture_tls.node = node_name
                 memory = _MemoryTrace()
+                frames: list[dict[str, Any]] | None = None
                 try:
                     return orig(*args, **kwargs)
+                except Exception as exc:
+                    frames = exception_frames(exc)
+                    raise
                 finally:
                     _capture_tls.node = previous_node
                     memory_mb, memory_peak_mb = memory.snapshot()
                     memory.close()
                     ended_ms = round((time.perf_counter() - clock0) * 1000, 2)
+                    probe = {
+                        "node": node_name,
+                        "started_ms": started_ms,
+                        "ended_ms": ended_ms,
+                        "elapsed_ms": round(max(0.0, ended_ms - started_ms), 2),
+                        "memory_mb": memory_mb,
+                        "memory_peak_mb": memory_peak_mb,
+                        "input": incoming,
+                    }
+                    if frames:
+                        probe["error_frames"] = frames
                     with lock:
-                        probes.append(
-                            {
-                                "node": node_name,
-                                "started_ms": started_ms,
-                                "ended_ms": ended_ms,
-                                "elapsed_ms": round(max(0.0, ended_ms - started_ms), 2),
-                                "memory_mb": memory_mb,
-                                "memory_peak_mb": memory_peak_mb,
-                                "input": incoming,
-                            }
-                        )
+                        probes.append(probe)
 
             return probed
 
@@ -755,6 +762,106 @@ def merge_state(current: dict, update: dict) -> dict:
 
 def _format_error(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
+
+
+_LIBRARY_FRAME_MARKERS = (
+    "/langgraph/",
+    "/langchain_core/",
+    "/langchain/",
+    "/graphviagent/",
+    "/site-packages/",
+    "/lib/python",
+)
+
+
+def _is_library_frame(path: str) -> bool:
+    if not path or path.startswith("<"):
+        return True
+    normalized = path.replace("\\", "/")
+    return any(marker in normalized for marker in _LIBRARY_FRAME_MARKERS)
+
+
+def exception_frames(exc: BaseException, *, limit: int = 40) -> list[dict[str, Any]]:
+    frames: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        extracted = traceback.extract_tb(current.__traceback__) or []
+        for item in extracted:
+            raw = item.filename or ""
+            try:
+                file = str(Path(raw).resolve()) if raw and not raw.startswith("<") else raw
+            except OSError:
+                file = raw
+            frame: dict[str, Any] = {
+                "file": file,
+                "line": item.lineno,
+                "name": item.name,
+                "text": item.line,
+                "library": _is_library_frame(file),
+            }
+            frames.append(frame)
+        current = current.__cause__ or current.__context__
+    if len(frames) > limit:
+        return frames[-limit:]
+    return frames
+
+
+def _error_update(exc: BaseException) -> dict[str, Any]:
+    return {"error": _format_error(exc), "error_frames": exception_frames(exc)}
+
+
+def _plain_update(update: Any) -> Any:
+    if not isinstance(update, dict) or "error_frames" not in update:
+        return update
+    return {key: value for key, value in update.items() if key != "error_frames"}
+
+
+def _source_map(app: Any) -> dict[str, dict[str, Any]]:
+    try:
+        from graphviagent.graph_hash import graph_sources
+    except Exception:
+        return {}
+    try:
+        found = graph_sources(app)
+    except Exception:
+        return {}
+    return found if isinstance(found, dict) else {}
+
+
+def _attach_source(
+    step: dict,
+    node: str,
+    *,
+    source_map: dict[str, dict[str, Any]] | None = None,
+    probe: dict | None = None,
+) -> None:
+    loc = None
+    if probe and isinstance(probe.get("source"), dict):
+        loc = probe["source"]
+    elif source_map:
+        loc = source_map.get(node)
+    if loc:
+        step["source"] = jsonable(loc)
+
+
+def _attach_error(
+    step: dict,
+    update: Any,
+    *,
+    probe: dict | None = None,
+) -> None:
+    if not (isinstance(update, dict) and update.get("error")):
+        return
+    step["error"] = str(update.get("error"))
+    frames = None
+    if probe and isinstance(probe.get("error_frames"), list):
+        frames = probe["error_frames"]
+    elif isinstance(update.get("error_frames"), list):
+        frames = update["error_frames"]
+    if frames:
+        step["error_frames"] = jsonable(frames)
 
 
 def _is_cancelled(exc: BaseException) -> bool:
@@ -1157,6 +1264,7 @@ def _build_step(
     wall0: float,
     live_out: dict | None = None,
     superstep: int = 0,
+    source_map: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict, dict]:
     visits[node] = visits.get(node, 0) + 1
     graph_in = state if isinstance(state, dict) else {}
@@ -1183,22 +1291,23 @@ def _build_step(
     else:
         state_out = merge_state(state_in, update)
         graph_out = merge_state(graph_in, update)
+    stored_update = _plain_update(update)
     step = {
         "step_id": f"{node}#{visits[node]}",
         "index": None,
         "node": node,
-        "update": jsonable(update),
+        "update": jsonable(stored_update),
         "state_in": jsonable(state_in),
         "state_out": jsonable(state_out),
-        "reason": extract_reason(update),
-        "decisions": jsonable(extract_decisions(update)),
+        "reason": extract_reason(stored_update),
+        "decisions": jsonable(extract_decisions(stored_update)),
         "unused": [],
         "superstep": superstep,
     }
     _attach_timing(step, started_ms=started_ms, ended_ms=ended_ms, wall_start=wall0)
-    _attach_metrics(step, update, memory_mb, memory_peak_mb)
-    if failed:
-        step["error"] = str(update.get("error"))
+    _attach_metrics(step, stored_update, memory_mb, memory_peak_mb)
+    _attach_source(step, node, source_map=source_map, probe=probe)
+    _attach_error(step, update, probe=probe)
     completed_end[node] = ended_ms
     return step, graph_out
 
@@ -1303,6 +1412,7 @@ def _execute_run(
     _install_stdio_capture()
     pending_updates: dict[str, Any] | None = None
     superstep = 0
+    source_map = _source_map(app)
 
     def consume_updates(payload: dict, live_out: dict | None) -> None:
         nonlocal state
@@ -1328,6 +1438,7 @@ def _execute_run(
                 wall0=wall0,
                 live_out=live_out,
                 superstep=superstep,
+                source_map=source_map,
             )
             step["index"] = len(steps)
             steps.append(step)
@@ -1414,7 +1525,7 @@ def _execute_run(
             run_error = _format_error(exc)
             failed = _guess_failed_node(raw_events, edges)
             if failed:
-                update = {"error": run_error}
+                update = _error_update(exc)
                 ended_ms = _elapsed_ms(clock0)
                 raw_events.append((failed, update, ended_ms))
                 step, state = _build_step(
@@ -1429,6 +1540,7 @@ def _execute_run(
                     edges=edges,
                     wall0=wall0,
                     superstep=superstep,
+                    source_map=source_map,
                 )
                 step["index"] = len(steps)
                 steps.append(step)
@@ -1632,28 +1744,29 @@ def _replay_step_approximate(
         run_error = None
     except Exception as exc:
         run_error = _format_error(exc)
-        update = {"error": run_error}
+        update = _error_update(exc)
     finally:
         memory_mb, memory_peak_mb = memory.snapshot()
         memory.close()
     extra = usage.take(step["node"])
     ended_ms = _elapsed_ms(clock0)
-    state_out = copy.deepcopy(state_in) if run_error else merge_state(state_in, update)
+    stored_update = _plain_update(update)
+    state_out = copy.deepcopy(state_in) if run_error else merge_state(state_in, stored_update)
     new_step = {
         "step_id": f"{step['node']}#replay",
         "index": 0,
         "node": step["node"],
-        "update": jsonable(update),
+        "update": jsonable(stored_update),
         "state_in": jsonable(state_in),
         "state_out": jsonable(state_out),
-        "reason": extract_reason(update),
-        "decisions": jsonable(extract_decisions(update)),
+        "reason": extract_reason(stored_update),
+        "decisions": jsonable(extract_decisions(stored_update)),
         "unused": [],
     }
     _attach_timing(new_step, started_ms=0, ended_ms=ended_ms, wall_start=wall0)
-    _attach_metrics(new_step, update, memory_mb, memory_peak_mb, extra=extra)
-    if run_error:
-        new_step["error"] = run_error
+    _attach_metrics(new_step, stored_update, memory_mb, memory_peak_mb, extra=extra)
+    _attach_source(new_step, step["node"], source_map=_source_map(app))
+    _attach_error(new_step, update)
     return _finish_replay_run(
         {
             "id": uuid4().hex,
@@ -1741,7 +1854,7 @@ def _resume_approximate(
                 update = {"value": update}
         except Exception as exc:
             run_error = _format_error(exc)
-            update = {"error": run_error}
+            update = _error_update(exc)
             memory_mb, memory_peak_mb = memory.snapshot()
             extra = usage.take(recorded["node"])
             raw.append(
@@ -1775,28 +1888,30 @@ def _resume_approximate(
 
     current = copy.deepcopy(state)
     prev_end = 0.0
+    source_map = _source_map(app)
     for index, (node, incoming, update, ended_ms, memory_mb, memory_peak_mb, extra) in enumerate(raw):
         visits[node] = visits.get(node, 0) + 1
         next_node = raw[index + 1][0] if index + 1 < len(raw) else None
         state_in = copy.deepcopy(incoming)
         failed = isinstance(update, dict) and update.get("error")
-        state_out = copy.deepcopy(state_in) if failed else merge_state(current, update)
+        stored_update = _plain_update(update)
+        state_out = copy.deepcopy(state_in) if failed else merge_state(current, stored_update)
         started_ms = prev_end
         built = {
             "step_id": f"{node}#{visits[node]}",
             "index": index,
             "node": node,
-            "update": jsonable(update),
+            "update": jsonable(stored_update),
             "state_in": jsonable(state_in),
             "state_out": jsonable(state_out),
-            "reason": extract_reason(update),
-            "decisions": jsonable(extract_decisions(update)),
+            "reason": extract_reason(stored_update),
+            "decisions": jsonable(extract_decisions(stored_update)),
             "unused": unused_targets(node, next_node, edges),
         }
         _attach_timing(built, started_ms=started_ms, ended_ms=ended_ms, wall_start=wall0)
-        _attach_metrics(built, update, memory_mb, memory_peak_mb, extra=extra)
-        if failed:
-            built["error"] = str(update.get("error"))
+        _attach_metrics(built, stored_update, memory_mb, memory_peak_mb, extra=extra)
+        _attach_source(built, node, source_map=source_map)
+        _attach_error(built, update)
         steps.append(built)
         prev_end = ended_ms
         current = state_out

@@ -10,10 +10,18 @@ def format_elapsed(ms: object) -> str:
         value = float(ms)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return ""
-    if value < 1000:
-        text = f"{value:.1f}ms"
-        return text.replace(".0ms", "ms")
-    return f"{value / 1000:.2f}s"
+    if value == 0:
+        return "0ms"
+    if value >= 1000:
+        text = f"{value / 1000:.2f}".rstrip("0").rstrip(".")
+        return text + "s"
+    ms_text = f"{value:.1f}"
+    if float(ms_text) != 0:
+        if ms_text.endswith(".0"):
+            ms_text = ms_text[:-2]
+        return ms_text + "ms"
+    us = round(value * 1000)
+    return f"{us}µs" if us else "0ms"
 
 
 def _detail(step: dict) -> str:

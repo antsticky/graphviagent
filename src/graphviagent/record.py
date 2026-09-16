@@ -85,7 +85,7 @@ def _attach_timing(
 
 
 def _bytes_to_mb(value: float) -> float:
-    return round(max(0.0, float(value)) / (1024 * 1024), 4)
+    return round(max(0.0, float(value) / (1024 * 1024)), 9)
 
 
 class _MemoryTrace:
@@ -440,8 +440,8 @@ def _attach_metrics(
         extra = _take_usage(str(step.get("node") or "run"))
     tokens = extract_tokens(update, extra)
     tools, tool_latency_ms = extract_tool_metrics(update, step.get("elapsed_ms"))
-    step["memory_mb"] = round(float(memory_mb or 0), 4)
-    step["memory_peak_mb"] = round(float(memory_peak_mb or 0), 4)
+    step["memory_mb"] = round(float(memory_mb or 0), 9)
+    step["memory_peak_mb"] = round(float(memory_peak_mb or 0), 9)
     step["tokens"] = tokens
     step["tools"] = jsonable(tools)
     step["tool_latency_ms"] = tool_latency_ms

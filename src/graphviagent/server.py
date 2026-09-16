@@ -734,7 +734,7 @@ PAGE = r"""<!DOCTYPE html>
     .step-why { color: var(--muted); margin-top: 2px; }
     .step-ms, .run-ms, #stepsMs {
       color: var(--muted); font-variant-numeric: tabular-nums;
-      font-size: 11px; white-space: nowrap;
+      font-size: 11px; white-space: nowrap; text-transform: none;
     }
     .spark {
       display: flex; align-items: flex-end; gap: 2px;
@@ -1462,19 +1462,44 @@ PAGE = r"""<!DOCTYPE html>
       return formatClock(d) + "  " + formatDayEn(d);
     }
 
+    function formatScaled(value, units) {
+      if (!Number.isFinite(value)) return "";
+      const zeroUnit = units.find((unit) => unit.zero) || units[units.length - 1];
+      if (value === 0) return "0" + zeroUnit.suffix;
+      for (let i = 0; i < units.length; i++) {
+        const unit = units[i];
+        const last = i === units.length - 1;
+        const scaled = value / unit.size;
+        const shown = unit.digits === 0
+          ? Math.round(scaled)
+          : Number(scaled.toFixed(unit.digits));
+        if (shown === 0 && !last) continue;
+        if (!last && scaled < 1 && !unit.fraction) continue;
+        if (unit.digits === 0) return shown + unit.suffix;
+        return shown.toFixed(unit.digits).replace(/\.?0+$/, "") + unit.suffix;
+      }
+      return "0" + zeroUnit.suffix;
+    }
+
     function formatElapsed(ms) {
       const value = Number(ms);
       if (!Number.isFinite(value)) return "";
-      if (value < 1000) return (Math.round(value * 10) / 10) + "ms";
-      return (value / 1000).toFixed(2) + "s";
+      return formatScaled(value, [
+        { size: 1000, suffix: "s", digits: 2 },
+        { size: 1, suffix: "ms", digits: 1, fraction: true, zero: true },
+        { size: 0.001, suffix: "µs", digits: 0 },
+      ]);
     }
 
     function formatMemory(mb) {
       if (mb == null || !Number.isFinite(Number(mb))) return "—";
-      const value = Number(mb);
-      if (value < 0.001) return "0 MB";
-      if (value < 1) return value.toFixed(3) + " MB";
-      return value.toFixed(2) + " MB";
+      const bytes = Number(mb) * 1024 * 1024;
+      return formatScaled(bytes, [
+        { size: 1024 * 1024 * 1024, suffix: " GB", digits: 2 },
+        { size: 1024 * 1024, suffix: " MB", digits: 2, fraction: true },
+        { size: 1024, suffix: " KB", digits: 1, fraction: true },
+        { size: 1, suffix: " B", digits: 0, zero: true },
+      ]);
     }
 
     function stepMetrics(step) {

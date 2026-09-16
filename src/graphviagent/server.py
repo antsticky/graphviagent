@@ -1541,7 +1541,7 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function formatTokens(metrics) {
-      if (metrics && metrics.tokenUnavailable) return "n/a";
+      if (metrics && metrics.tokenUnavailable) return "—";
       if (!metrics || metrics.tokens == null) return "—";
       return (metrics.prompt || 0) + " in + " + (metrics.completion || 0) + " out";
     }
@@ -3293,10 +3293,9 @@ PAGE = r"""<!DOCTYPE html>
       const startAt = formatTime(step.started_at);
       const endAt = formatTime(step.ended_at);
       const metrics = stepMetrics(step);
-      const originMs = Number(origin) || 0;
       const rows = [
-        ["Start", formatElapsed(event.start - originMs) + (startAt ? "  ·  " + startAt : "")],
-        ["End", formatElapsed(event.end - originMs) + (endAt ? "  ·  " + endAt : "")],
+        ["Start", startAt || "—"],
+        ["End", endAt || "—"],
         ["Duration", formatElapsed(event.end - event.start) || formatElapsed(step.elapsed_ms) || "—"],
         ["Memory", formatMemory(metrics.mb)],
         ["Peak", formatMemory(metrics.peak)],

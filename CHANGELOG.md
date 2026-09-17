@@ -3,6 +3,7 @@
 ## 1.2.1-dev
 
 ### Fixed
+- Parallel `Send` nodes keep probe timing, print/log capture, token attribution, and cancellable `time.sleep` when LangGraph runs them on a worker thread; multiple visits of the same node in one superstep are recorded separately
 - Routing color strip includes paused (amber) so it matches the grand total; caption and legend say **success**, not ok
 - Runtime average / max / grand total use successful runs only (canceled, failed, and paused are listed as “other”)
 - Runtime strip is the same single line as Cost / Routing, with average vs max (not max − avg)

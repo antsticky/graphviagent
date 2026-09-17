@@ -9,6 +9,7 @@ import threading
 import time
 import traceback
 import tracemalloc
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from pathlib import Path
@@ -29,6 +30,96 @@ _capture_lock = threading.Lock()
 _capture_depth = 0
 _probe_guard = threading.Lock()
 _probed_apps: dict[int, dict[str, Any]] = {}
+_TLS_FIELDS = (
+    "cancel",
+    "emit",
+    "probes",
+    "probe_lock",
+    "clock0",
+    "usage",
+    "on_stdio",
+    "node",
+)
+
+
+@dataclass
+class _RunCapture:
+    """Per-run hooks shared with LangGraph worker threads (not thread-local)."""
+
+    cancel: Any = None
+    emit: Any = None
+    probes: list | None = None
+    probe_lock: threading.Lock | None = None
+    clock0: float | None = None
+    usage: Any = None
+    on_stdio: Any = None
+
+
+_run_captures: dict[str, _RunCapture] = {}
+_run_captures_lock = threading.Lock()
+
+
+def _invoke_thread_id(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str | None:
+    candidates: list[Any] = [kwargs.get("config")]
+    if len(args) > 1:
+        candidates.append(args[1])
+    candidates.append(kwargs)
+    for obj in candidates:
+        if not isinstance(obj, dict):
+            continue
+        inner = obj.get("configurable")
+        if not isinstance(inner, dict):
+            inner = obj
+        tid = inner.get("thread_id")
+        if tid:
+            return str(tid)
+    return None
+
+
+def _register_run_capture(thread_id: str, capture: _RunCapture) -> None:
+    with _run_captures_lock:
+        _run_captures[str(thread_id)] = capture
+
+
+def _unregister_run_capture(thread_id: str | None) -> None:
+    if not thread_id:
+        return
+    with _run_captures_lock:
+        _run_captures.pop(str(thread_id), None)
+
+
+def _lookup_run_capture(thread_id: str | None) -> _RunCapture | None:
+    with _run_captures_lock:
+        if thread_id:
+            found = _run_captures.get(str(thread_id))
+            if found is not None:
+                return found
+        if len(_run_captures) == 1:
+            return next(iter(_run_captures.values()))
+    return None
+
+
+def _tls_snapshot() -> dict[str, Any]:
+    return {name: getattr(_capture_tls, name, None) for name in _TLS_FIELDS}
+
+
+def _tls_restore(previous: dict[str, Any]) -> None:
+    for name, value in previous.items():
+        setattr(_capture_tls, name, value)
+
+
+def _tls_bind_capture(capture: _RunCapture | None) -> dict[str, Any]:
+    previous = _tls_snapshot()
+    if capture is None:
+        return previous
+    _capture_tls.cancel = capture.cancel
+    _capture_tls.emit = capture.emit
+    _capture_tls.probes = capture.probes
+    _capture_tls.probe_lock = capture.probe_lock
+    _capture_tls.clock0 = capture.clock0
+    _capture_tls.usage = capture.usage
+    _capture_tls.on_stdio = capture.on_stdio
+    return previous
 _time_sleep = time.sleep
 _sleep_depth = 0
 _capture_stdout: Any = None
@@ -687,52 +778,55 @@ def _install_node_probes(
 
             def make_probed(node_name: str, orig: Any) -> Any:
                 def probed(*args: Any, **kwargs: Any) -> Any:
-                    if _tls_cancel_set():
-                        raise RunCancelled("cancelled")
-                    clock = getattr(_capture_tls, "clock0", None)
-                    started_ms = (
-                        round((time.perf_counter() - clock) * 1000, 2) if clock else 0.0
-                    )
-                    incoming = _probe_input(args, kwargs)
-                    emit_fn = getattr(_capture_tls, "emit", None)
-                    if emit_fn:
-                        emit_fn({"type": "node_start", "node": node_name, "started_ms": started_ms})
-                        emit_fn({"type": "log", "t": started_ms, "src": node_name, "text": "started", "level": "info"})
-                    previous_node = getattr(_capture_tls, "node", None)
+                    capture = _lookup_run_capture(_invoke_thread_id(args, kwargs))
+                    previous = _tls_bind_capture(capture)
                     _capture_tls.node = node_name
-                    memory = _MemoryTrace()
-                    frames: list[dict[str, Any]] | None = None
                     try:
-                        return orig(*args, **kwargs)
-                    except Exception as exc:
-                        frames = exception_frames(exc)
-                        raise
-                    finally:
-                        _capture_tls.node = previous_node
-                        memory_mb, memory_peak_mb = memory.snapshot()
-                        memory.close()
-                        ended_ms = (
-                            round((time.perf_counter() - clock) * 1000, 2) if clock else started_ms
+                        if _tls_cancel_set():
+                            raise RunCancelled("cancelled")
+                        clock = getattr(_capture_tls, "clock0", None)
+                        started_ms = (
+                            round((time.perf_counter() - clock) * 1000, 2) if clock else 0.0
                         )
-                        probe = {
-                            "node": node_name,
-                            "started_ms": started_ms,
-                            "ended_ms": ended_ms,
-                            "elapsed_ms": round(max(0.0, ended_ms - started_ms), 2),
-                            "memory_mb": memory_mb,
-                            "memory_peak_mb": memory_peak_mb,
-                            "input": incoming,
-                        }
-                        if frames:
-                            probe["error_frames"] = frames
-                        bucket = getattr(_capture_tls, "probes", None)
-                        bucket_lock = getattr(_capture_tls, "probe_lock", None)
-                        if bucket is not None:
-                            if bucket_lock is not None:
-                                with bucket_lock:
+                        incoming = _probe_input(args, kwargs)
+                        emit_fn = getattr(_capture_tls, "emit", None)
+                        if emit_fn:
+                            emit_fn({"type": "node_start", "node": node_name, "started_ms": started_ms})
+                            emit_fn({"type": "log", "t": started_ms, "src": node_name, "text": "started", "level": "info"})
+                        memory = _MemoryTrace()
+                        frames: list[dict[str, Any]] | None = None
+                        try:
+                            return orig(*args, **kwargs)
+                        except Exception as exc:
+                            frames = exception_frames(exc)
+                            raise
+                        finally:
+                            memory_mb, memory_peak_mb = memory.snapshot()
+                            memory.close()
+                            ended_ms = (
+                                round((time.perf_counter() - clock) * 1000, 2) if clock else started_ms
+                            )
+                            probe = {
+                                "node": node_name,
+                                "started_ms": started_ms,
+                                "ended_ms": ended_ms,
+                                "elapsed_ms": round(max(0.0, ended_ms - started_ms), 2),
+                                "memory_mb": memory_mb,
+                                "memory_peak_mb": memory_peak_mb,
+                                "input": incoming,
+                            }
+                            if frames:
+                                probe["error_frames"] = frames
+                            bucket = getattr(_capture_tls, "probes", None)
+                            bucket_lock = getattr(_capture_tls, "probe_lock", None)
+                            if bucket is not None:
+                                if bucket_lock is not None:
+                                    with bucket_lock:
+                                        bucket.append(probe)
+                                else:
                                     bucket.append(probe)
-                            else:
-                                bucket.append(probe)
+                    finally:
+                        _tls_restore(previous)
 
                 return probed
 
@@ -1602,30 +1696,47 @@ def _execute_run(
             }
         )
 
-    _capture_tls.emit = push
-    _capture_tls.clock0 = clock0
-    _capture_tls.on_stdio = on_stdio
-    _capture_tls.node = None
-    _capture_tls.usage = usage
     stored_input = user_input if isinstance(user_input, dict) else {}
     emit({"type": "start", "run_id": run_id, "input": jsonable(stored_input), "started_at": _iso_from_wall(wall0, 0)})
     push({"type": "log", "t": 0, "src": "run", "text": "run started", "level": "info"})
     probes, restore_probes, probe_lock = _install_node_probes(
         app, clock0, cancel=cancel, emit=push
     )
+    capture = _RunCapture(
+        cancel=cancel,
+        emit=push,
+        probes=probes,
+        probe_lock=probe_lock,
+        clock0=clock0,
+        usage=usage,
+        on_stdio=on_stdio,
+    )
+    _register_run_capture(run_id, capture)
+    _tls_bind_capture(capture)
+    _capture_tls.node = None
     completed_end: dict[str, float] = {}
     _install_stdio_capture()
     _install_cancellable_sleep()
-    pending_updates: dict[str, Any] | None = None
+    pending_updates: list[tuple[str, Any]] = []
     superstep = 0
     source_map = _source_map(app)
     streamed_interrupts: list[Any] = []
 
-    def consume_updates(payload: dict, live_out: dict | None) -> None:
+    def consume_updates(payload: dict | list, live_out: dict | None) -> None:
         nonlocal state
         ended_ms = _elapsed_ms(clock0)
         graph_in = state
-        for node, update in payload.items():
+        if isinstance(payload, list):
+            items = [
+                (str(item[0]), item[1])
+                for item in payload
+                if isinstance(item, (tuple, list)) and len(item) >= 2
+            ]
+        elif isinstance(payload, dict):
+            items = [(str(key), value) for key, value in payload.items()]
+        else:
+            return
+        for node, update in items:
             node = str(node)
             if node in _SKIP_NODES or node == "__interrupt__":
                 continue
@@ -1670,7 +1781,7 @@ def _execute_run(
             except Exception:
                 pass
         consume_updates(pending_updates, live_end)
-        pending_updates = None
+        pending_updates = []
 
     def sync_live_state() -> None:
         nonlocal state
@@ -1711,19 +1822,19 @@ def _execute_run(
                             streamed_interrupts.extend(extra)
                         else:
                             streamed_interrupts.append(extra)
-                    cleaned = {
-                        key: value
+                    cleaned = [
+                        (str(key), value)
                         for key, value in payload.items()
                         if str(key) not in _SKIP_NODES and str(key) != "__interrupt__"
-                    }
+                    ]
                     if cleaned:
-                        pending_updates = cleaned
+                        pending_updates.extend(cleaned)
                 continue
             if mode == "values":
                 live = payload if isinstance(payload, dict) else {"value": payload}
                 if pending_updates:
                     consume_updates(pending_updates, live)
-                    pending_updates = None
+                    pending_updates = []
                     superstep += 1
                     state = live
                 else:
@@ -1804,16 +1915,10 @@ def _execute_run(
                 emit({"type": "state", "state": jsonable(state)})
     finally:
         restore_probes()
+        _unregister_run_capture(run_id)
         _uninstall_stdio_capture()
         _uninstall_cancellable_sleep()
-        _capture_tls.emit = None
-        _capture_tls.on_stdio = None
-        _capture_tls.node = None
-        _capture_tls.clock0 = None
-        _capture_tls.usage = None
-        _capture_tls.cancel = None
-        _capture_tls.probes = None
-        _capture_tls.probe_lock = None
+        _tls_restore({name: None for name in _TLS_FIELDS})
 
     paused = False
     nxt: list[str] = []

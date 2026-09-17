@@ -10,6 +10,7 @@ from typing import Any
 
 SENTINEL = object()
 HEARTBEAT_S = 2.0
+STOP_JOIN_S = 2.0
 
 
 class DuplicateRun(Exception):
@@ -64,6 +65,7 @@ class RunJob:
     state_patch: dict[str, Any] | None = None
     replay_input: dict[str, Any] | None = None
     source_run_id: str | None = None
+    restore_pause: bool = False
 
     @property
     def priority(self) -> int:
@@ -123,7 +125,7 @@ class RunScheduler:
         self._thread = threading.Thread(target=self._dispatch, name="gva-dispatch", daemon=True)
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = STOP_JOIN_S) -> None:
         self._stopped.set()
         with self._cond:
             waiting = list(self._waiting)
@@ -131,17 +133,21 @@ class RunScheduler:
             active = list(self._active.values())
             self._cond.notify_all()
         for job in waiting:
-            self._finish_cancel(job, started=False)
+            self._finish_cancel(job, started=False, restore_pause=True)
         for job in active:
             job.cancel.set()
         thread = self._thread
         self._thread = None
         if thread is not None:
-            thread.join(timeout=2)
+            thread.join(timeout=timeout)
         with self._lock:
             workers = list(self._workers.values())
+        deadline = time.monotonic() + timeout
         for worker in workers:
-            worker.join()
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            worker.join(timeout=left)
 
     def snapshot(self) -> dict[str, int]:
         with self._lock:
@@ -204,7 +210,7 @@ class RunScheduler:
                     return index + 1
         return None
 
-    def cancel(self, run_id: str) -> bool:
+    def cancel(self, run_id: str, *, restore_pause: bool = False) -> bool:
         with self._cond:
             for index, job in enumerate(self._waiting):
                 if job.matches(run_id):
@@ -223,8 +229,9 @@ class RunScheduler:
         if job is None:
             return False
         if waiting:
-            self._finish_cancel(job, started=False)
+            self._finish_cancel(job, started=False, restore_pause=restore_pause)
             return True
+        job.restore_pause = restore_pause
         job.cancel.set()
         return True
 
@@ -269,7 +276,7 @@ class RunScheduler:
                 self._active[job.run_id] = job
                 self._broadcast_positions()
             thread = threading.Thread(
-                target=self._run, args=(job,), name=f"gva-run-{job.run_id[:8]}", daemon=False
+                target=self._run, args=(job,), name=f"gva-run-{job.run_id[:8]}", daemon=True
             )
             with self._lock:
                 self._workers[job.run_id] = thread
@@ -279,7 +286,12 @@ class RunScheduler:
         job.wait_ms = round((time.monotonic() - job.enqueued_at) * 1000, 2)
         try:
             if job.cancel.is_set():
-                self._finish_cancel(job, started=True, emit_sentinel=False)
+                self._finish_cancel(
+                    job,
+                    started=True,
+                    emit_sentinel=False,
+                    restore_pause=job.restore_pause,
+                )
                 return
             self._execute_fn(job)
         except Exception as exc:
@@ -291,8 +303,18 @@ class RunScheduler:
                 self._workers.pop(job.run_id, None)
                 self._cond.notify_all()
 
-    def _finish_cancel(self, job: RunJob, *, started: bool, emit_sentinel: bool = True) -> None:
+    def _finish_cancel(
+        self,
+        job: RunJob,
+        *,
+        started: bool,
+        emit_sentinel: bool = True,
+        restore_pause: bool = False,
+    ) -> None:
         job.cancel.set()
+        # Disconnect / process stop may return a queued Continue to paused.
+        # The Cancel button always stores canceled.
+        job.restore_pause = bool(restore_pause) and job.resume
         wait_ms = round((time.monotonic() - job.enqueued_at) * 1000, 2)
         job.wait_ms = wait_ms
         if self._persist_cancel is not None:

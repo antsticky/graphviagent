@@ -1,6 +1,38 @@
 # Changelog
 
-## 1.4.0-dev
+## 1.4.1-dev
+
+### Changed
+- Missing `thread_id` on node `invoke` / `ainvoke` uses the already-bound TLS capture or the only live run (1.4.0 left that uninferred)
+- Graph workers are daemon threads. `serve` shutdown joins them for 2s so Ctrl+C does not wait out the current LLM / `sleep`; leftover `running` stubs are canceled on the next `serve`
+- File watch still skips hashing when size is unchanged (cloud-sync `mtime` jitter). Same-size edits do not refresh the file-change panel or sidebar graph hash until you click **Run**, which always re-reads the file
+- `POST /api/rerun` returns one JSON run when the replay finishes (same as `POST /api/run`). Live Replay in the UI uses `POST /api/rerun/stream` (`text/event-stream`, same events as `/api/run/stream`)
+- Interned `MemorySaver`s stay keyed by pipeline path so Continue / Step survive a reload, and are dropped when that file is no longer discovered
+- Pipeline contract documents `ainvoke` as well as `stream` / `invoke`. Replay asks before an outdated graph; Continue / Step do not
+
+### Fixed
+- Loopback `Host` checks accept `localhost`, `::1`, and `127.0.0.0/8` addresses — not hostnames that merely start with `127.` (`127.attacker.example`)
+- File watch schedules pipeline directories added to `graphviagent.toml` after `serve` started, not only those present at `start()`
+- Continue / Step after a pipeline file change, toml reload, or a failed import that was then fixed no longer lose in-memory checkpoints
+- Cancel on a queued Continue / Step stores **canceled**; closing the tab still dequeues that wait and leaves the paused run alone
+- Cancel after a node `invoke` finished no longer records that visit as `canceled: true`; only an in-flight node that raised `RunCancelled` is marked canceled
+- Import of a queued/running stub no longer blocks Clear / Delete; in-flight flags are dropped (queued Continue stays paused, other stubs are stored as canceled)
+- HITL resume-value box keeps what you type; it only refills when the pause (run / interrupt) changes, not on the 2s control poll
+- Clicking the selected pipeline no longer clears Trace; a live SSE run stays on screen and opens when it finishes. A scan miss of that file also keeps the open run
+- Replay step / Replay from can be canceled (or aborted by closing the tab) like a live Run
+- Node probes still record timing, prints, tokens, and cancel-during-sleep when LangGraph omits `thread_id`. `ainvoke` is patched too
+- Node `memory_mb` / peak no longer stop process-wide `tracemalloc` when another node is still running
+- Parallel `Send` visits record that node’s own `state_out` (not the merged superstep)
+- Replay no longer falls back to `merge_state` when a checkpoint fork fails — that error is stored as a failed replay. Approximate replay is only when the graph has no checkpointer
+- Empty-`ends` `Send` branches no longer fan out to every node without an incoming edge
+- Runtime node min / avg / max count only successful visits
+- `GET` / `DELETE /api/runs/{id}` require a hex run id and look up the file by name
+- Same-host `https` Origin / Referer (and `Host` on port 80 / 443) is allowed
+- UI run ids stay 32 hex chars when `crypto.randomUUID` is missing
+- Trace **Fit** scales the graph to the pane using both width and height
+- Runs board cells use step `canceled` / `status: canceled`, so a mid-node cancel is a gray dash instead of a green check
+
+## 1.4.0
 
 ### Added
 - Run-slot limit is `--concurrent` / `concurrent` in `graphviagent.toml` / `GVA_CONCURRENT` (default 3). Every graph execution takes a slot: live Run, Continue/Step, `POST /api/run`, and Replay / Replay from. Overflow waits in a server-side FIFO (`--queue-limit` / `queue_limit` / `GVA_QUEUE_LIMIT`, default 4× concurrent). Resume / HITL jumps ahead of new runs so a paused run is not stuck behind other live work. LangGraph node fan-out is separate (`--node-concurrency` / `node_concurrency` / `GVA_NODE_CONCURRENCY`; omitted = unlimited). Slots and the queue live on the server (`GET /api/meta`); two browser tabs share them.

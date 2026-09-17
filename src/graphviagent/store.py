@@ -13,6 +13,7 @@ from uuid import uuid4
 STORE_DIRNAME = ".graphviagent"
 SCHEMA_VERSION = 1
 _CANCELED_ERRORS = {"cancelled", "canceled"}
+_RUN_ID_CHARS = frozenset("0123456789abcdefABCDEF")
 
 
 def store_root(workspace: Path) -> Path:
@@ -23,6 +24,35 @@ def pipeline_dir(workspace: Path, stem: str) -> Path:
     path = store_root(workspace) / stem
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def normalize_run_id(value: object) -> str | None:
+    if value is None or value == "":
+        return None
+    text = str(value).replace("-", "").strip()
+    if not text or len(text) > 64 or any(ch not in _RUN_ID_CHARS for ch in text):
+        raise ValueError("run_id must be a hex id")
+    return text.lower()
+
+
+def _run_json_paths(workspace: Path, run_id: object) -> list[Path]:
+    try:
+        rid = normalize_run_id(run_id)
+    except ValueError:
+        return []
+    if not rid:
+        return []
+    root = store_root(workspace)
+    if not root.is_dir():
+        return []
+    found: list[Path] = []
+    for folder in root.iterdir():
+        if not folder.is_dir():
+            continue
+        path = folder / f"{rid}.json"
+        if path.is_file():
+            found.append(path)
+    return found
 
 
 def _gva_version() -> str:
@@ -72,6 +102,26 @@ def run_status_of(data: dict | None) -> str:
         return "running"
     if isinstance(data, dict) and data.get("paused"):
         return "paused"
+    return "ok"
+
+
+def step_is_canceled(step: dict | None) -> bool:
+    if not isinstance(step, dict):
+        return False
+    if step.get("canceled"):
+        return True
+    status = str(step.get("status") or "").strip().lower()
+    if status in _CANCELED_ERRORS:
+        return True
+    err = str(step.get("error") or "").strip().lower()
+    return err in _CANCELED_ERRORS
+
+
+def step_status_of(step: dict | None) -> str:
+    if step_is_canceled(step):
+        return "canceled"
+    if isinstance(step, dict) and step.get("error"):
+        return "error"
     return "ok"
 
 
@@ -248,6 +298,8 @@ def cancel_queue_stub(
     run["running"] = False
     run["wait_ms"] = wait_ms
     run["run_ms"] = 0
+    # resume=True: tab close / serve stop — put a queued Continue back to paused.
+    # resume=False: Cancel button — store canceled even if this was a Continue/Step.
     if resume:
         run["paused"] = True
         run["canceled"] = False
@@ -348,6 +400,8 @@ def list_runs(
             "canceled": run_is_canceled(data),
             "queued": bool(data.get("queued")),
             "running": bool(data.get("running")),
+            "approximate": bool(data.get("approximate")),
+            "approximate_reason": data.get("approximate_reason"),
             "wait_ms": data.get("wait_ms"),
             "run_ms": data.get("run_ms"),
             "next": data.get("next") or [],
@@ -360,7 +414,8 @@ def list_runs(
                     "node": step.get("node"),
                     "step_id": step.get("step_id"),
                     "elapsed_ms": step.get("elapsed_ms"),
-                    "status": "error" if step.get("error") else "ok",
+                    "status": step_status_of(step),
+                    "canceled": step_is_canceled(step),
                 }
                 for step in (data.get("steps") or [])
                 if isinstance(step, dict)
@@ -380,10 +435,7 @@ def pipeline_has_busy_runs(workspace: Path, stem: str) -> bool:
 
 
 def load_run(workspace: Path, run_id: str) -> dict | None:
-    root = store_root(workspace)
-    if not root.is_dir() or not run_id:
-        return None
-    for path in root.glob(f"*/{run_id}.json"):
+    for path in _run_json_paths(workspace, run_id):
         data = _read_run_file(path)
         if data is not None:
             return data
@@ -391,13 +443,11 @@ def load_run(workspace: Path, run_id: str) -> dict | None:
 
 
 def delete_run(workspace: Path, run_id: str) -> bool:
-    root = store_root(workspace)
-    if not root.is_dir():
+    paths = _run_json_paths(workspace, run_id)
+    if not paths:
         return False
-    for path in root.glob(f"*/{run_id}.json"):
-        path.unlink()
-        return True
-    return False
+    paths[0].unlink()
+    return True
 
 
 def list_all_runs(
@@ -685,6 +735,8 @@ def collect_stats(workspace: Path, stem: str | None = None) -> dict:
         saw_unavailable = False
         saw_usage = False
         step_elapsed_sum = 0.0
+        ok_step_elapsed_sum = 0.0
+        run_ok = run_status_of(data) == "ok"
         try:
             run_elapsed = float(data.get("elapsed_ms") or 0)
         except (TypeError, ValueError):
@@ -712,6 +764,7 @@ def collect_stats(workspace: Path, stem: str | None = None) -> dict:
                         saw_usage = True
             prompt += step_prompt
             completion += step_completion
+            step_ok = run_ok and not step.get("error") and not step.get("canceled")
             if node:
                 bucket = node_bucket(pipe, node)
                 bucket["prompt"] += step_prompt
@@ -720,7 +773,10 @@ def collect_stats(workspace: Path, stem: str | None = None) -> dict:
                 bucket["visits"] += 1
                 if step_unavailable:
                     bucket["unavailable"] += 1
-                add_elapsed(bucket, step_ms)
+                if step_ok:
+                    add_elapsed(bucket, step_ms)
+                    if step_ms > 0:
+                        ok_step_elapsed_sum += step_ms
 
             choices = _step_route_choices(step)
             if not choices and not step.get("pending"):
@@ -782,8 +838,9 @@ def collect_stats(workspace: Path, stem: str | None = None) -> dict:
             bucket["unavailable_runs"] += 1
         if run_elapsed <= 0 and step_elapsed_sum > 0:
             run_elapsed = step_elapsed_sum
-        add_elapsed(bucket, run_elapsed)
-        bucket["node_elapsed_ms"] = float(bucket.get("node_elapsed_ms") or 0) + step_elapsed_sum
+        if run_ok:
+            add_elapsed(bucket, run_elapsed)
+            bucket["node_elapsed_ms"] = float(bucket.get("node_elapsed_ms") or 0) + ok_step_elapsed_sum
 
         run_rows.append(
             {
@@ -843,6 +900,38 @@ def delete_runs(workspace: Path, stem: str) -> int:
     return count
 
 
+def _settle_inflight_snapshot(run: dict) -> dict:
+    """Imported JSON is not a live job; drop queued/running so Clear/Delete work."""
+    if not (run.get("queued") or run.get("running")):
+        return run
+    restore_pause = bool(run.get("paused")) and not run.get("running")
+    already_done = run_is_canceled(run) or bool(run.get("error"))
+    run["queued"] = False
+    run["running"] = False
+    steps = run.get("steps")
+    if isinstance(steps, list):
+        cleaned: list[dict] = []
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            item = dict(step)
+            item.pop("pending", None)
+            cleaned.append(item)
+        run["steps"] = cleaned
+    if restore_pause:
+        run["paused"] = True
+        run["canceled"] = False
+        return run
+    if already_done:
+        return run
+    run["canceled"] = True
+    run["paused"] = False
+    run["error"] = None
+    run["next"] = []
+    run["interrupts"] = []
+    return run
+
+
 def import_run(workspace: Path, run: dict, *, fallback_stem: str, known_stems: list[str] | None = None) -> dict:
     if not isinstance(run, dict):
         raise ValueError("run must be a JSON object")
@@ -866,6 +955,7 @@ def import_run(workspace: Path, run: dict, *, fallback_stem: str, known_stems: l
     if not stem:
         raise ValueError("run needs a pipeline name")
     clean["pipeline"] = stem
+    _settle_inflight_snapshot(clean)
     return save_run(workspace, stem, clean)
 
 

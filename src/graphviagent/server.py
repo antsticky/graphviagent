@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import ipaddress
 import json
 import queue
 import threading
@@ -9,7 +10,7 @@ import webbrowser
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
 from graphviagent import __version__
@@ -23,7 +24,7 @@ from graphviagent.config import (
 )
 from graphviagent.discover import discover_pipelines
 from graphviagent.graph_hash import attach_graph_meta
-from graphviagent.load import LoadedPipeline, load_pipeline
+from graphviagent.load import LoadedPipeline, load_pipeline, retain_memory_savers
 from graphviagent.record import iter_run_events, replay_step, resume_from_step
 from graphviagent.render import ascii_tree, unrolled_mermaid
 from graphviagent.scheduler import DuplicateRun, HEARTBEAT_S, QueueFull, RunJob, RunScheduler, SENTINEL
@@ -41,6 +42,7 @@ from graphviagent.store import (
     load_run,
     mark_run_started,
     merge_resume_run,
+    normalize_run_id,
     pipeline_has_busy_runs,
     run_is_busy,
     save_queued_stub,
@@ -63,10 +65,17 @@ _MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 
 
 def is_loopback_host(host: str) -> bool:
-    name = (host or "").strip().lower().strip("[]")
-    if name in _LOOPBACK_HOSTS or name.startswith("127."):
+    name = (host or "").strip().lower().strip("[]").rstrip(".")
+    if name in _LOOPBACK_HOSTS:
         return True
-    return False
+    try:
+        addr = ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    if addr.is_loopback:
+        return True
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return mapped is not None and mapped.is_loopback
 
 
 def is_public_bind(host: str) -> bool:
@@ -113,7 +122,8 @@ def request_allowed(
     host_name, host_port = split_host_header(host_header)
     if not host_name:
         return False
-    if host_port is not None and host_port != bind_port:
+    # A TLS/HTTP proxy may send Host: example.com:443 while serve binds 8765.
+    if host_port is not None and host_port != bind_port and host_port not in {80, 443}:
         return False
     if loopback_only and not is_loopback_host(host_name):
         return False
@@ -143,15 +153,26 @@ def _origin_matches(
     bind_port: int,
 ) -> bool:
     parsed = urlparse(url)
-    if parsed.scheme and parsed.scheme != "http":
+    scheme = (parsed.scheme or "").lower()
+    if scheme and scheme not in {"http", "https"}:
         return False
     hostname = (parsed.hostname or "").lower()
     if not hostname or hostname != host_name:
         return False
     origin_port = parsed.port
-    if origin_port is None and parsed.scheme == "http":
-        origin_port = 80
-    expected = host_port if host_port is not None else bind_port
+    if origin_port is None:
+        if scheme == "https":
+            origin_port = 443
+        elif scheme == "http":
+            origin_port = 80
+    if host_port is not None:
+        expected = host_port
+    elif scheme == "https":
+        expected = 443
+    elif scheme == "http":
+        expected = 80
+    else:
+        expected = bind_port
     if origin_port is not None and origin_port != expected:
         return False
     return True
@@ -638,17 +659,13 @@ PAGE = r"""<!DOCTYPE html>
     #diagram .gzoom {
       position: absolute;
       inset: 0;
-      display: flex;
-      justify-content: center;
-      align-items: flex-start;
-      padding-top: 12px;
       pointer-events: none;
     }
     .gflow {
       display: flex; flex-direction: column; align-items: center;
       width: 228px;
       padding: 18px 0 22px;
-      transform-origin: 114px 0;
+      transform-origin: 0 0;
       pointer-events: auto;
       will-change: transform;
     }
@@ -656,7 +673,7 @@ PAGE = r"""<!DOCTYPE html>
       width: max-content;
       min-width: 228px;
       padding: 28px 80px 44px;
-      transform-origin: 50% 0;
+      transform-origin: 0 0;
       position: relative;
       gap: 52px;
     }
@@ -835,6 +852,11 @@ PAGE = r"""<!DOCTYPE html>
     .step-id { color: var(--muted); font-size: 11px; }
     .step-name { font-weight: 500; }
     .step-why { color: var(--muted); margin-top: 2px; }
+    .approx-note {
+      color: #fdba74; background: rgba(251, 146, 60, 0.12);
+      border: 1px solid rgba(251, 146, 60, 0.28); border-radius: 8px;
+      padding: 8px 10px; margin: 0 0 10px; font-size: 12px; line-height: 1.4;
+    }
     .step-ms, .run-ms, #stepsMs {
       color: var(--muted); font-variant-numeric: tabular-nums;
       font-size: 11px; white-space: nowrap; text-transform: none;
@@ -1671,12 +1693,14 @@ PAGE = r"""<!DOCTYPE html>
     let graphPanY = 0;
     let graphViewMode = "graph";
     let inflightRuns = [];
+    let runIdSeq = 0;
     let pendingCancel = null;
     let runLimit = 3;
     let queueLimit = 12;
     let slotActive = 0;
     let slotQueued = 0;
     let breakpoints = {};
+    let hitlFillKey = "";
 
     const $ = (id) => document.getElementById(id);
 
@@ -1784,6 +1808,14 @@ PAGE = r"""<!DOCTYPE html>
       }
     }
 
+    function hitlPauseKey(run, hits) {
+      const id = run && run.id ? String(run.id) : "";
+      const n = ((run && run.steps) || []).length;
+      let payload = "";
+      try { payload = JSON.stringify(hits); } catch (err) { payload = ""; }
+      return id + "\n" + n + "\n" + payload;
+    }
+
     function pauseBannerText(run) {
       const nxt = (run && run.next) || [];
       if (hitlPayloads(run).length) {
@@ -1833,6 +1865,7 @@ PAGE = r"""<!DOCTYPE html>
       $("stepBtn").disabled = !paused || !nxt.length || hits.length > 0;
       syncCancelButton();
       if (!paused) {
+        hitlFillKey = "";
         if (banner) banner.hidden = true;
         if (panel) panel.hidden = true;
         return;
@@ -1843,9 +1876,20 @@ PAGE = r"""<!DOCTYPE html>
       }
       if (panel) {
         panel.hidden = !hits.length;
-        if (hits.length) {
-          $("hitlHint").textContent = JSON.stringify(hits, null, 2);
-          $("hitlValue").value = formatResumeDefault(currentRun);
+        if (!hits.length) {
+          hitlFillKey = "";
+          return;
+        }
+        const hint = $("hitlHint");
+        const box = $("hitlValue");
+        let payload = "";
+        try { payload = JSON.stringify(hits, null, 2); } catch (err) { payload = "[]"; }
+        if (hint && hint.textContent !== payload) hint.textContent = payload;
+        const key = hitlPauseKey(currentRun, hits);
+        if (key !== hitlFillKey) {
+          hitlFillKey = key;
+          const next = formatResumeDefault(currentRun);
+          if (box && box.value !== next) box.value = next;
         }
       }
     }
@@ -2219,8 +2263,8 @@ PAGE = r"""<!DOCTYPE html>
         }
         return "skip";
       }
-      if (hits.some((step) => step.status === "error" || step.error)) return "error";
       if (hits.some((step) => step.canceled || step.status === "canceled")) return "canceled";
+      if (hits.some((step) => step.status === "error" || step.error)) return "error";
       if (hits.some((step) => step.pending || step.status === "running")) return "running";
       return "ok";
     }
@@ -2590,7 +2634,10 @@ PAGE = r"""<!DOCTYPE html>
           escapeHtml(p.stem + (p.error ? " (error)" : "")) +
           (canceling ? ' <span class="pill mode-canceling">canceling</span>' : live || lastLive ? ' <span class="pill mode-running">running</span>' : queued || lastQueued ? ' <span class="pill mode-queued">queued</span>' : "");
         btn.title = p.error || p.id;
-        btn.onclick = () => selectPipeline(p.id);
+        btn.onclick = () => {
+          if (p.id === fileId) return;
+          selectPipeline(p.id);
+        };
         box.appendChild(btn);
       });
     }
@@ -2623,7 +2670,22 @@ PAGE = r"""<!DOCTYPE html>
       });
     }
 
+    function keepCurrentPipeline(files) {
+      if (!fileId) return false;
+      const ids = files || [];
+      if (!ids.length) return true;
+      if (ids.indexOf(fileId) >= 0) return true;
+      if (inflightRuns.some((job) => job.fileId === fileId)) return true;
+      return Boolean(currentRun);
+    }
+
     async function selectPipeline(id) {
+      if (id === fileId) {
+        await loadPipelines();
+        renderExampleChips();
+        await loadHistory();
+        return;
+      }
       fileId = id;
       currentRun = null;
       selectedStep = null;
@@ -2749,7 +2811,9 @@ PAGE = r"""<!DOCTYPE html>
           ? '<span class="pill mode-outdated">outdated</span>'
           : "";
         const approx = r.approximate
-          ? '<span class="pill mode-approximate">approximate</span>'
+          ? '<span class="pill mode-approximate"' +
+            (r.approximate_reason ? ' title="' + escapeHtml(r.approximate_reason) + '"' : "") +
+            ">approximate</span>"
           : "";
         btn.innerHTML =
           '<div class="run-top"><span>' + escapeHtml(formatTime(r.created_at)) +
@@ -3864,21 +3928,45 @@ PAGE = r"""<!DOCTYPE html>
         "translate(" + graphPanX + "px, " + graphPanY + "px) scale(" + graphZoom + ")";
     }
 
-    function graphPartsRect(flow) {
-      const parts = flow.querySelectorAll(".g-cap, .g-card, .g-line, .g-skip, .gantt-head, .gantt-row, .gantt-bar");
-      if (!parts.length) return flow.getBoundingClientRect();
+    function graphContentBox(flow) {
+      const origin = flow.getBoundingClientRect();
+      const parts = flow.querySelectorAll(".g-cap, .g-card, .g-line, .g-skip, .g-badge, .gantt-head, .gantt-row, .gantt-bar");
       let left = Infinity;
       let top = Infinity;
       let right = -Infinity;
       let bottom = -Infinity;
+      const include = (x, y, w, h) => {
+        if (!(w > 0 && h > 0)) return;
+        left = Math.min(left, x);
+        top = Math.min(top, y);
+        right = Math.max(right, x + w);
+        bottom = Math.max(bottom, y + h);
+      };
       parts.forEach((el) => {
         const rect = el.getBoundingClientRect();
-        left = Math.min(left, rect.left);
-        top = Math.min(top, rect.top);
-        right = Math.max(right, rect.right);
-        bottom = Math.max(bottom, rect.bottom);
+        include(rect.left - origin.left, rect.top - origin.top, rect.width, rect.height);
       });
-      return { left, top, right, bottom, width: right - left, height: bottom - top };
+      const svg = flow.querySelector("svg.topo-svg");
+      if (svg) {
+        try {
+          const bbox = svg.getBBox();
+          include(bbox.x, bbox.y, bbox.width, bbox.height);
+        } catch (err) {}
+      }
+      if (!Number.isFinite(left)) {
+        return {
+          x: 0,
+          y: 0,
+          width: Math.max(flow.scrollWidth || flow.offsetWidth, 1),
+          height: Math.max(flow.scrollHeight || flow.offsetHeight, 1),
+        };
+      }
+      return {
+        x: left,
+        y: top,
+        width: Math.max(right - left, 1),
+        height: Math.max(bottom - top, 1),
+      };
     }
 
     function fitGraphZoom() {
@@ -3894,15 +3982,31 @@ PAGE = r"""<!DOCTYPE html>
       const pad = 24;
       const availW = Math.max(box.clientWidth - pad, 1);
       const availH = Math.max(box.clientHeight - pad, 1);
-      const natural = graphPartsRect(flow);
-      const width = Math.max(natural.width, 1);
-      const height = Math.max(natural.height, 1);
-      graphZoom = Math.max(0.25, Math.min(availW / width, availH / height));
-      applyGraphZoom();
+      const content = graphContentBox(flow);
+      const zoom = Math.min(availW / content.width, availH / content.height);
+      graphZoom = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+      const flowRect = flow.getBoundingClientRect();
       const boxRect = box.getBoundingClientRect();
-      const graphRect = graphPartsRect(flow);
-      graphPanX += (boxRect.left + boxRect.width / 2) - (graphRect.left + graphRect.width / 2);
-      graphPanY += (boxRect.top + boxRect.height / 2) - (graphRect.top + graphRect.height / 2);
+      graphPanX = (boxRect.left + boxRect.width / 2) - flowRect.left - (content.x + content.width / 2) * graphZoom;
+      graphPanY = (boxRect.top + boxRect.height / 2) - flowRect.top - (content.y + content.height / 2) * graphZoom;
+      applyGraphZoom();
+    }
+
+    function nudgeGraphZoom(factor) {
+      const box = $("diagram");
+      const flow = box && box.querySelector(".gflow");
+      if (!box || !flow || box.classList.contains("empty")) return;
+      const prev = graphZoom;
+      const next = factor > 1
+        ? Math.min(2.5, Math.round(prev * factor * 100) / 100)
+        : Math.max(0.25, Math.round(prev * factor * 100) / 100);
+      if (next === prev) return;
+      const boxRect = box.getBoundingClientRect();
+      const origin = flow.getBoundingClientRect();
+      const k = next / prev;
+      graphPanX += (boxRect.left + boxRect.width / 2 - origin.left) * (1 - k);
+      graphPanY += (boxRect.top + boxRect.height / 2 - origin.top) * (1 - k);
+      graphZoom = next;
       applyGraphZoom();
     }
 
@@ -4377,10 +4481,11 @@ PAGE = r"""<!DOCTYPE html>
       }
       if (run.approximate) {
         const note = document.createElement("div");
-        note.className = "step-why";
-        note.textContent = "Approximate replay — graph reducers and routing were not used"
-          + (run.approximate_reason ? " (" + escapeHtml(run.approximate_reason) + ")" : "")
-          + ".";
+        note.className = "approx-note";
+        const reason = run.approximate_reason
+          ? String(run.approximate_reason)
+          : "the recorded path was used without graph routing";
+        note.textContent = "Approximate replay — " + reason + (/\.\s*$/.test(reason) ? "" : ".");
         steps.appendChild(note);
       }
       const selected = (run.steps || []).find((step) => step.step_id === selectedStep);
@@ -4411,8 +4516,30 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function newRunId() {
-      if (crypto.randomUUID) return crypto.randomUUID().replace(/-/g, "");
-      return Math.random().toString(16).slice(2) + Date.now().toString(16);
+      const web = typeof crypto !== "undefined" ? crypto : null;
+      if (web && web.randomUUID) return web.randomUUID().replace(/-/g, "");
+      const bytes = new Uint8Array(16);
+      if (web && web.getRandomValues) {
+        web.getRandomValues(bytes);
+      } else {
+        runIdSeq += 1;
+        let t = Date.now();
+        const p = (typeof performance !== "undefined" && performance.now)
+          ? Math.floor(performance.now() * 1000)
+          : 0;
+        for (let i = 0; i < 16; i++) {
+          bytes[i] = (
+            Math.floor(Math.random() * 256)
+            ^ (t & 255)
+            ^ ((p >>> ((i & 3) * 8)) & 255)
+            ^ ((runIdSeq >>> ((i & 3) * 8)) & 255)
+          ) & 255;
+          t = Math.floor(t / 256) || Date.now();
+        }
+      }
+      let hex = "";
+      for (let i = 0; i < 16; i++) hex += bytes[i].toString(16).padStart(2, "0");
+      return hex;
     }
 
     function syncRunControls() {
@@ -4572,6 +4699,59 @@ PAGE = r"""<!DOCTYPE html>
       }
     }
 
+    async function followSseJob(job, path, payload) {
+      const pendingByNode = {};
+      try {
+        const res = await fetch(path, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: job.controller && job.controller.signal,
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          if (res.status === 429) {
+            throw new Error(
+              data.error ||
+              ("queue full (" + (data.queued || 0) + "/" + (data.queue_limit || queueLimit) +
+                " waiting, " + (data.active || 0) + "/" + (data.limit || runLimit) + " running)")
+            );
+          }
+          if (res.status === 409) {
+            throw new Error(data.error || "that run_id is already active");
+          }
+          throw new Error(data.error || res.statusText);
+        }
+        let finished = false;
+        await readSse(res, (event) => {
+          handleLiveEvent(event, pendingByNode, job);
+          if (event && (event.type === "done" || event.type === "paused" || event.type === "canceled")) finished = true;
+        });
+        if (!finished && !(job.run && (job.run.error || job.run.canceled))) {
+          throw new Error("run produced no result");
+        }
+      } catch (err) {
+        if (err && err.name === "AbortError") return;
+        throw err;
+      } finally {
+        const keepId = job.run && job.run.id;
+        const watching = Boolean(currentRun && (currentRun.id === job.id || currentRun.id === keepId));
+        inflightRuns = inflightRuns.filter((item) => item !== job);
+        syncRunControls();
+        await loadMeta();
+        await loadPipelines();
+        if (watching && keepId && job.fileId === fileId) {
+          try {
+            await openRun(keepId);
+          } catch (err) {
+            await loadHistory();
+          }
+        } else {
+          await loadHistory();
+        }
+      }
+    }
+
     async function streamLive(extra) {
       extra = extra || {};
       const resume = Boolean(extra.resume);
@@ -4640,56 +4820,7 @@ PAGE = r"""<!DOCTYPE html>
       if (Object.prototype.hasOwnProperty.call(extra, "resume_value")) {
         payload.resume_value = extra.resume_value;
       }
-      const pendingByNode = {};
-      try {
-        const res = await fetch("/api/run/stream", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-          signal: controller.signal,
-        });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          if (res.status === 429) {
-            throw new Error(
-              data.error ||
-              ("queue full (" + (data.queued || 0) + "/" + (data.queue_limit || queueLimit) +
-                " waiting, " + (data.active || 0) + "/" + (data.limit || runLimit) + " running)")
-            );
-          }
-          if (res.status === 409) {
-            throw new Error(data.error || "that run_id is already active");
-          }
-          throw new Error(data.error || res.statusText);
-        }
-        let finished = false;
-        await readSse(res, (event) => {
-          handleLiveEvent(event, pendingByNode, job);
-          if (event && (event.type === "done" || event.type === "paused" || event.type === "canceled")) finished = true;
-        });
-        if (!finished && !(job.run && (job.run.error || job.run.canceled))) {
-          throw new Error("run produced no result");
-        }
-      } catch (err) {
-        if (err && err.name === "AbortError") return;
-        throw err;
-      } finally {
-        const keepId = job.run && job.run.id;
-        const watching = Boolean(currentRun && (currentRun.id === job.id || currentRun.id === keepId));
-        inflightRuns = inflightRuns.filter((item) => item !== job);
-        syncRunControls();
-        await loadMeta();
-        await loadPipelines();
-        if (watching && keepId && job.fileId === fileId) {
-          try {
-            await openRun(keepId);
-          } catch (err) {
-            await loadHistory();
-          }
-        } else {
-          await loadHistory();
-        }
-      }
+      await followSseJob(job, "/api/run/stream", payload);
     }
 
     async function runGraph() {
@@ -4851,14 +4982,16 @@ PAGE = r"""<!DOCTYPE html>
         alert("Select a node first");
         return;
       }
+      const stepId = selectedStep;
       const input = readNodeInput();
       closeNodeView();
       if (!(await confirmOutdatedReplay())) return;
       const parentId = currentRun.id;
       const runId = newRunId();
+      const controller = new AbortController();
       const job = {
         id: runId,
-        controller: null,
+        controller: controller,
         fileId: fileId,
         input: currentRun.input,
         started_at: new Date().toISOString(),
@@ -4878,33 +5011,22 @@ PAGE = r"""<!DOCTYPE html>
         },
       };
       inflightRuns.push(job);
+      selectedStep = null;
       currentRun = job.run;
       syncRunControls();
-      try {
-        const saved = await api("/api/rerun", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            run_id: parentId,
-            new_run_id: runId,
-            step_id: selectedStep,
-            mode,
-            input,
-          }),
-        });
-        job.run = saved;
-        if (currentRun && currentRun.id === runId) {
-          currentRun = saved;
-          selectedStep = (currentRun.steps && currentRun.steps[0] && currentRun.steps[0].step_id) || null;
-          renderRun(currentRun);
-        }
-      } finally {
-        inflightRuns = inflightRuns.filter((item) => item !== job);
-        syncRunControls();
-        await loadHistory();
-        await loadPipelines();
-        await loadMeta();
+      const logDetails = $("logDetails");
+      if (logDetails) logDetails.open = true;
+      if (graphViewMode === "graph") {
+        const spec = graphSpec(null);
+        if (spec) renderTopoGraph(spec, { live: true, steps: [] }, "Replaying…");
       }
+      await followSseJob(job, "/api/rerun/stream", {
+        run_id: parentId,
+        new_run_id: runId,
+        step_id: stepId,
+        mode,
+        input,
+      });
     }
 
     async function removeRun() {
@@ -5801,9 +5923,11 @@ PAGE = r"""<!DOCTYPE html>
     async function refreshAfterFileChange(changedIds) {
       await loadPipelines();
       const files = (pipelines || []).map((p) => p.id);
-      if (fileId && files.length && files.indexOf(fileId) < 0) {
+      if (fileId && files.length && !keepCurrentPipeline(files)) {
         fileId = files[0];
         currentRun = null;
+        selectedStep = null;
+        loadBreakpoints();
       }
       if (fileId) {
         renderExampleChips();
@@ -5909,14 +6033,8 @@ PAGE = r"""<!DOCTYPE html>
         window.addEventListener("mouseup", up);
       });
     })();
-    $("zoomIn").onclick = () => {
-      graphZoom = Math.min(2.5, Math.round(graphZoom * 1.2 * 100) / 100);
-      applyGraphZoom();
-    };
-    $("zoomOut").onclick = () => {
-      graphZoom = Math.max(0.25, Math.round(graphZoom / 1.2 * 100) / 100);
-      applyGraphZoom();
-    };
+    $("zoomIn").onclick = () => nudgeGraphZoom(1.2);
+    $("zoomOut").onclick = () => nudgeGraphZoom(1 / 1.2);
     $("zoomFit").onclick = () => fitGraphZoom();
     $("viewGraph").onclick = () => setGraphView("graph");
     $("viewGantt").onclick = () => setGraphView("gantt");
@@ -6182,12 +6300,13 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def _normalize_run_id(self, value: object) -> str | None:
-        if not value:
-            return None
-        text = str(value).replace("-", "")
-        if not text or len(text) > 64 or any(ch not in "0123456789abcdefABCDEF" for ch in text):
+        return normalize_run_id(value)
+
+    def _run_id_from_path(self, path: str) -> str:
+        run_id = self._normalize_run_id(unquote(path.rsplit("/", 1)[-1]))
+        if not run_id:
             raise ValueError("run_id must be a hex id")
-        return text.lower()
+        return run_id
 
     def _name_list(self, raw: object) -> list[str] | None:
         if raw is None or raw == "":
@@ -6246,7 +6365,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                         str(stem),
                         run_id,
                         wait_ms=float(run.get("wait_ms") or 0),
-                        resume=bool(run.get("paused")),
+                        resume=False,
                     )
                     is not None
                 )
@@ -6255,10 +6374,10 @@ class GraphVIHandler(BaseHTTPRequestHandler):
     def _disconnect_run(self, run_id: str) -> None:
         sched = self.scheduler
         if sched is not None and sched.is_queued(run_id):
-            sched.cancel(run_id)
+            sched.cancel(run_id, restore_pause=True)
             return
         if sched is not None and sched.is_active(run_id):
-            sched.cancel(run_id)
+            sched.cancel(run_id, restore_pause=True)
             return
         run = load_run(self.workspace, run_id)
         if run and (run.get("queued") or run.get("running")):
@@ -6279,7 +6398,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
             job.stem,
             job.run_id,
             wait_ms=job.wait_ms,
-            resume=job.resume,
+            resume=job.restore_pause,
         )
 
     def _queue_position(self, run_id: object) -> int | None:
@@ -6297,6 +6416,27 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                 run = dict(run)
                 run["queue_position"] = pos
         return run
+
+    def _stream_job(self, job: RunJob, run_id: str) -> None:
+        started = False
+        try:
+            self._sse_begin()
+            started = True
+            self._sse_pump(job)
+        except Exception as exc:
+            if is_disconnect(exc):
+                self._disconnect_run(run_id)
+            elif started:
+                try:
+                    self._sse_data({"type": "error", "error": str(exc)})
+                except Exception as inner:
+                    if is_disconnect(inner):
+                        self._disconnect_run(run_id)
+                    else:
+                        self._cancel_run(run_id)
+            else:
+                self._cancel_run(run_id)
+                raise
 
     def _build_job(
         self,
@@ -6382,7 +6522,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                         job.stem,
                         job.run_id,
                         wait_ms=float(event.get("wait_ms") or job.wait_ms or 0),
-                        resume=job.resume,
+                        resume=job.restore_pause,
                     )
                 if saved is not None:
                     event = {"type": "done", "run": self._with_render(saved)}
@@ -6685,7 +6825,11 @@ class GraphVIHandler(BaseHTTPRequestHandler):
             )
             return
         if parsed.path.startswith("/api/runs/"):
-            run_id = parsed.path.rsplit("/", 1)[-1]
+            try:
+                run_id = self._run_id_from_path(parsed.path)
+            except ValueError as exc:
+                self._json(400, {"error": str(exc)})
+                return
             try:
                 run = load_run(self.workspace, run_id)
             except ValueError as exc:
@@ -6723,8 +6867,16 @@ class GraphVIHandler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True, "deleted": count})
             return
         if parsed.path.startswith("/api/runs/"):
-            run_id = parsed.path.rsplit("/", 1)[-1]
-            run = load_run(self.workspace, run_id)
+            try:
+                run_id = self._run_id_from_path(parsed.path)
+            except ValueError as exc:
+                self._json(400, {"error": str(exc)})
+                return
+            try:
+                run = load_run(self.workspace, run_id)
+            except ValueError as exc:
+                self._json(409, {"error": str(exc)})
+                return
             if run is None:
                 self._json(404, {"error": "run not found"})
                 return
@@ -6780,25 +6932,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                     thread_id=thread_id,
                 )
                 self._try_enqueue(job, loaded)
-                started = False
-                try:
-                    self._sse_begin()
-                    started = True
-                    self._sse_pump(job)
-                except Exception as exc:
-                    if is_disconnect(exc):
-                        self._disconnect_run(client_run_id)
-                    elif started:
-                        try:
-                            self._sse_data({"type": "error", "error": str(exc)})
-                        except Exception as inner:
-                            if is_disconnect(inner):
-                                self._disconnect_run(client_run_id)
-                            else:
-                                self._cancel_run(client_run_id)
-                    else:
-                        self._cancel_run(client_run_id)
-                        raise
+                self._stream_job(job, client_run_id)
                 return
             if parsed.path == "/api/run":
                 loaded = self._get_loaded(payload["file"])
@@ -6822,7 +6956,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                     self._cancel_run(run_id)
                     raise
                 return
-            if parsed.path == "/api/rerun":
+            if parsed.path in {"/api/rerun", "/api/rerun/stream"}:
                 run = load_run(self.workspace, payload["run_id"])
                 if run is None:
                     self._json(404, {"error": "run not found"})
@@ -6867,6 +7001,9 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                     parent_id=str(run.get("id") or ""),
                     from_step=str(payload["step_id"]),
                 )
+                if parsed.path.endswith("/stream"):
+                    self._stream_job(job, new_id)
+                    return
                 try:
                     saved = self._drain_job(job)
                     self._json(200, self._with_render(saved))
@@ -6945,9 +7082,13 @@ def serve(
             flush=True,
         )
 
+    def retain_savers() -> None:
+        retain_memory_savers(discover_pipelines(GraphVIHandler.workspace, GraphVIHandler.config))
+
     def invalidate(file_ids: list[str]) -> None:
         for file_id in file_ids:
             GraphVIHandler.cache.pop(file_id, None)
+        retain_savers()
 
     def on_config(updated: GVAConfig) -> None:
         apply_limit_overrides(
@@ -6962,6 +7103,7 @@ def serve(
         GraphVIHandler.node_concurrency = updated.node_concurrency
         GraphVIHandler.queue_limit = effective_queue_limit(updated)
         GraphVIHandler.cache.clear()
+        retain_savers()
 
     watcher = PipelineWatcher(
         GraphVIHandler.workspace,
@@ -6980,6 +7122,8 @@ def serve(
     GraphVIHandler.scheduler = scheduler
     scheduler.start()
     server = ThreadingHTTPServer((host, port), handler)
+    server.daemon_threads = True
+    server.block_on_close = False
     url = f"http://{host}:{port}"
     extras = f"concurrent={config.concurrent}  queue_limit={GraphVIHandler.queue_limit}"
     if config.node_concurrency is not None:
@@ -7000,7 +7144,14 @@ def serve(
         threading.Timer(0.4, lambda: webbrowser.open(browse)).start()
     try:
         server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[graphviagent] shutting down", flush=True)
     finally:
+        try:
+            server.shutdown()
+        except Exception:
+            pass
+        server.server_close()
         scheduler.stop()
         GraphVIHandler.scheduler = None
         watcher.stop()

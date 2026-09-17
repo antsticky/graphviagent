@@ -113,6 +113,8 @@ class PipelineWatcher:
         self._events: list[dict[str, Any]] = []
         self._timer: threading.Timer | None = None
         self._observer: Observer | None = None
+        self._handler: _DebouncedHandler | None = None
+        self._watches: dict[str, Any] = {}
 
     def watches(self, path: Path) -> bool:
         if path.name == CONFIG_NAME:
@@ -135,28 +137,63 @@ class PipelineWatcher:
         with self._lock:
             return key in self._files
 
+    def _outside_workspace(self, folder: Path) -> bool:
+        return folder != self.workspace and self.workspace not in folder.parents
+
     def _watch_folders(self) -> list[Path]:
         folders = [self.workspace]
         seen = {str(self.workspace)}
-        for path in discover_pipelines(self.workspace, self._config):
-            parent = path.resolve().parent
-            if parent == self.workspace or self.workspace in parent.parents:
-                continue
-            key = str(parent)
+
+        def add(folder: Path) -> None:
+            folder = folder.resolve()
+            if not self._outside_workspace(folder):
+                return
+            key = str(folder)
             if key in seen:
-                continue
+                return
             seen.add(key)
-            folders.append(parent)
+            folders.append(folder)
+
+        config = self._config
+        if config is not None and config.path is not None:
+            add(config.path.parent)
+        for path in discover_pipelines(self.workspace, config):
+            add(path.resolve().parent)
         return folders
+
+    def _sync_watch_folders(self) -> None:
+        observer = self._observer
+        handler = self._handler
+        if observer is None or handler is None:
+            return
+        wanted = {str(folder): folder for folder in self._watch_folders()}
+        for key, watch in list(self._watches.items()):
+            if key in wanted:
+                continue
+            try:
+                observer.unschedule(watch)
+            except KeyError:
+                pass
+            self._watches.pop(key, None)
+        for key, folder in wanted.items():
+            if key in self._watches:
+                continue
+            if not folder.is_dir():
+                continue
+            try:
+                self._watches[key] = observer.schedule(
+                    handler, str(folder), recursive=True
+                )
+            except OSError:
+                continue
 
     def start(self) -> None:
         self.refresh(emit=False)
-        handler = _DebouncedHandler(self)
+        self._handler = _DebouncedHandler(self)
         observer = Observer()
-        for folder in self._watch_folders():
-            observer.schedule(handler, str(folder), recursive=True)
-        observer.start()
         self._observer = observer
+        self._sync_watch_folders()
+        observer.start()
 
     def stop(self) -> None:
         with self._lock:
@@ -168,6 +205,8 @@ class PipelineWatcher:
             self._observer.stop()
             self._observer.join(timeout=2)
             self._observer = None
+        self._handler = None
+        self._watches.clear()
 
     def files(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -187,6 +226,7 @@ class PipelineWatcher:
 
     def refresh(self, emit: bool = True) -> None:
         reloaded = self._reload_config()
+        self._sync_watch_folders()
         with self._lock:
             prev = self._files
         nxt = snapshot_files(self.workspace, self._config, previous=prev)

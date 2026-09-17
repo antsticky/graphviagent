@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import ast
 import copy
+import inspect
 import json
 import logging
 import queue
 import sys
+import textwrap
 import threading
 import time
 import traceback
@@ -40,6 +43,7 @@ _TLS_FIELDS = (
     "usage",
     "on_stdio",
     "node",
+    "probing",
 )
 
 
@@ -97,12 +101,31 @@ def _lookup_run_capture(thread_id: str | None) -> _RunCapture | None:
         return _run_captures.get(str(thread_id))
 
 
+def _sole_run_capture() -> _RunCapture | None:
+    with _run_captures_lock:
+        if len(_run_captures) != 1:
+            return None
+        return next(iter(_run_captures.values()))
+
+
 def _active_capture() -> _RunCapture | None:
+    bound = getattr(_capture_tls, "capture", None)
+    if isinstance(bound, _RunCapture):
+        return bound
     tid = getattr(_capture_tls, "thread_id", None)
-    if not tid:
-        capture = getattr(_capture_tls, "capture", None)
-        tid = getattr(capture, "thread_id", None) if capture is not None else None
-    return _lookup_run_capture(str(tid) if tid else None)
+    if tid:
+        found = _lookup_run_capture(str(tid))
+        if found is not None:
+            return found
+    return _sole_run_capture()
+
+
+def _resolve_run_capture(thread_id: str | None) -> _RunCapture | None:
+    if thread_id:
+        found = _lookup_run_capture(thread_id)
+        if found is not None:
+            return found
+    return _active_capture()
 
 
 def _tls_snapshot() -> dict[str, Any]:
@@ -130,6 +153,7 @@ def _tls_bind_capture(capture: _RunCapture | None) -> dict[str, Any]:
     _capture_tls.usage = capture.usage
     _capture_tls.on_stdio = capture.on_stdio
     _capture_tls.node = None
+    _capture_tls.probing = None
     return previous
 
 
@@ -196,24 +220,66 @@ def _bytes_to_mb(value: float) -> float:
     return round(max(0.0, float(value) / (1024 * 1024)), 9)
 
 
+_memory_guard = threading.Lock()
+_memory_depth = 0
+_memory_owned = False
+
+
 class _MemoryTrace:
+    """Best-effort per-node bytes. tracemalloc is process-wide; we refcount it."""
+
     def __init__(self) -> None:
-        self.own = not tracemalloc.is_tracing()
-        if self.own:
-            tracemalloc.start()
-        current, _peak = tracemalloc.get_traced_memory()
-        self.prev = current
+        global _memory_depth, _memory_owned
+        self._closed = False
+        self._overlapped = False
+        with _memory_guard:
+            if _memory_depth == 0:
+                if not tracemalloc.is_tracing():
+                    tracemalloc.start()
+                    _memory_owned = True
+                if hasattr(tracemalloc, "reset_peak"):
+                    tracemalloc.reset_peak()
+            else:
+                self._overlapped = True
+            _memory_depth += 1
+            current, peak = tracemalloc.get_traced_memory()
+            self.prev = current
+            self.peak0 = peak
 
     def snapshot(self) -> tuple[float, float]:
-        current, peak = tracemalloc.get_traced_memory()
-        delta = max(0, current - self.prev)
-        peak_from_baseline = max(0, peak - self.prev)
-        self.prev = current
-        return _bytes_to_mb(delta), _bytes_to_mb(max(delta, peak_from_baseline))
+        with _memory_guard:
+            if not tracemalloc.is_tracing():
+                return 0.0, 0.0
+            if _memory_depth > 1:
+                self._overlapped = True
+            current, peak = tracemalloc.get_traced_memory()
+            delta = max(0, current - self.prev)
+            if self._overlapped:
+                peak_delta = delta
+            else:
+                peak_delta = max(delta, max(0, peak - self.peak0))
+            self.prev = current
+            self.peak0 = max(self.peak0, peak)
+            return _bytes_to_mb(delta), _bytes_to_mb(peak_delta)
 
     def close(self) -> None:
-        if self.own and tracemalloc.is_tracing():
-            tracemalloc.stop()
+        global _memory_depth, _memory_owned
+        with _memory_guard:
+            if self._closed:
+                return
+            self._closed = True
+            _memory_depth = max(0, _memory_depth - 1)
+            if _memory_depth == 0 and _memory_owned:
+                if tracemalloc.is_tracing():
+                    tracemalloc.stop()
+                _memory_owned = False
+
+
+def _memory_finish(memory: _MemoryTrace) -> tuple[float, float]:
+    try:
+        return memory.snapshot()
+    finally:
+        memory.close()
 
 
 def _as_int(value: Any) -> int:
@@ -816,6 +882,78 @@ def _tls_cancel_set() -> bool:
     return cancel is not None and getattr(cancel, "is_set", lambda: False)()
 
 
+def _start_node_probe(node_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any] | None:
+    if getattr(_capture_tls, "probing", None) == node_name:
+        return None
+    capture = _resolve_run_capture(_invoke_thread_id(args, kwargs))
+    previous = _tls_bind_capture(capture) if capture is not None else _tls_snapshot()
+    _capture_tls.node = node_name
+    _capture_tls.probing = node_name
+    try:
+        if _tls_cancel_set():
+            _tls_restore(previous)
+            raise RunCancelled("cancelled")
+        clock = getattr(_capture_tls, "clock0", None)
+        started_ms = round((time.perf_counter() - clock) * 1000, 2) if clock else 0.0
+        incoming = _probe_input(args, kwargs)
+        emit_fn = getattr(_capture_tls, "emit", None)
+        if emit_fn:
+            emit_fn({"type": "node_start", "node": node_name, "started_ms": started_ms})
+            emit_fn({"type": "log", "t": started_ms, "src": node_name, "text": "started", "level": "info"})
+        return {
+            "previous": previous,
+            "clock": clock,
+            "started_ms": started_ms,
+            "incoming": incoming,
+            "memory": _MemoryTrace(),
+            "node": node_name,
+        }
+    except RunCancelled:
+        raise
+    except Exception:
+        _tls_restore(previous)
+        raise
+
+
+def _finish_node_probe(
+    ctx: dict[str, Any],
+    result: Any,
+    frames: list[dict[str, Any]] | None,
+    canceled: bool,
+) -> None:
+    memory = ctx["memory"]
+    clock = ctx["clock"]
+    started_ms = ctx["started_ms"]
+    try:
+        memory_mb, memory_peak_mb = _memory_finish(memory)
+        ended_ms = round((time.perf_counter() - clock) * 1000, 2) if clock else started_ms
+        probe = {
+            "node": ctx["node"],
+            "started_ms": started_ms,
+            "ended_ms": ended_ms,
+            "elapsed_ms": round(max(0.0, ended_ms - started_ms), 2),
+            "memory_mb": memory_mb,
+            "memory_peak_mb": memory_peak_mb,
+            "input": ctx["incoming"],
+        }
+        if canceled:
+            probe["canceled"] = True
+        elif result is not None:
+            probe["result"] = result
+        if frames:
+            probe["error_frames"] = frames
+        bucket = getattr(_capture_tls, "probes", None)
+        bucket_lock = getattr(_capture_tls, "probe_lock", None)
+        if bucket is not None:
+            if bucket_lock is not None:
+                with bucket_lock:
+                    bucket.append(probe)
+            else:
+                bucket.append(probe)
+    finally:
+        _tls_restore(ctx["previous"])
+
+
 def _install_node_probes(
     app: Any,
     clock0: float,
@@ -838,8 +976,10 @@ def _install_node_probes(
             info["count"] = max(0, int(info["count"]) - 1)
             if info["count"]:
                 return
-            for target, original in info["restores"]:
+            for target, original, original_ainvoke in info["restores"]:
                 target.invoke = original
+                if original_ainvoke is not None:
+                    target.ainvoke = original_ainvoke
             _probed_apps.pop(key, None)
 
     with _probe_guard:
@@ -848,7 +988,7 @@ def _install_node_probes(
             existing["count"] += 1
             return probes, restore, lock
 
-        restores: list[tuple[Any, Any]] = []
+        restores: list[tuple[Any, Any, Any]] = []
         for name, node in nodes.items():
             if str(name) in _SKIP_NODES:
                 continue
@@ -856,82 +996,88 @@ def _install_node_probes(
             if target is None:
                 continue
             original = target.invoke
+            original_ainvoke = getattr(target, "ainvoke", None)
 
             def make_probed(node_name: str, orig: Any) -> Any:
                 def probed(*args: Any, **kwargs: Any) -> Any:
-                    capture = _lookup_run_capture(_invoke_thread_id(args, kwargs))
-                    previous = _tls_bind_capture(capture)
-                    _capture_tls.node = node_name
+                    ctx = _start_node_probe(node_name, args, kwargs)
+                    if ctx is None:
+                        return orig(*args, **kwargs)
+                    result: Any = None
+                    frames: list[dict[str, Any]] | None = None
+                    canceled = False
                     try:
-                        if _tls_cancel_set():
-                            raise RunCancelled("cancelled")
-                        clock = getattr(_capture_tls, "clock0", None)
-                        started_ms = (
-                            round((time.perf_counter() - clock) * 1000, 2) if clock else 0.0
-                        )
-                        incoming = _probe_input(args, kwargs)
-                        emit_fn = getattr(_capture_tls, "emit", None)
-                        if emit_fn:
-                            emit_fn({"type": "node_start", "node": node_name, "started_ms": started_ms})
-                            emit_fn({"type": "log", "t": started_ms, "src": node_name, "text": "started", "level": "info"})
-                        memory = _MemoryTrace()
-                        frames: list[dict[str, Any]] | None = None
-                        try:
-                            return orig(*args, **kwargs)
-                        except Exception as exc:
-                            frames = exception_frames(exc)
-                            raise
-                        finally:
-                            memory_mb, memory_peak_mb = memory.snapshot()
-                            memory.close()
-                            ended_ms = (
-                                round((time.perf_counter() - clock) * 1000, 2) if clock else started_ms
-                            )
-                            probe = {
-                                "node": node_name,
-                                "started_ms": started_ms,
-                                "ended_ms": ended_ms,
-                                "elapsed_ms": round(max(0.0, ended_ms - started_ms), 2),
-                                "memory_mb": memory_mb,
-                                "memory_peak_mb": memory_peak_mb,
-                                "input": incoming,
-                            }
-                            if frames:
-                                probe["error_frames"] = frames
-                            bucket = getattr(_capture_tls, "probes", None)
-                            bucket_lock = getattr(_capture_tls, "probe_lock", None)
-                            if bucket is not None:
-                                if bucket_lock is not None:
-                                    with bucket_lock:
-                                        bucket.append(probe)
-                                else:
-                                    bucket.append(probe)
+                        result = orig(*args, **kwargs)
+                        return result
+                    except Exception as err:
+                        frames = exception_frames(err)
+                        canceled = _is_cancelled(err)
+                        raise
                     finally:
-                        _tls_restore(previous)
+                        _finish_node_probe(ctx, result, frames, canceled)
 
                 return probed
 
+            def make_aprobed(node_name: str, orig: Any) -> Any:
+                async def aprobed(*args: Any, **kwargs: Any) -> Any:
+                    ctx = _start_node_probe(node_name, args, kwargs)
+                    if ctx is None:
+                        result = orig(*args, **kwargs)
+                        if inspect.isawaitable(result):
+                            return await result
+                        return result
+                    result = None
+                    frames: list[dict[str, Any]] | None = None
+                    canceled = False
+                    try:
+                        result = orig(*args, **kwargs)
+                        if inspect.isawaitable(result):
+                            result = await result
+                        return result
+                    except Exception as err:
+                        frames = exception_frames(err)
+                        canceled = _is_cancelled(err)
+                        raise
+                    finally:
+                        _finish_node_probe(ctx, result, frames, canceled)
+
+                return aprobed
+
             target.invoke = make_probed(str(name), original)
-            restores.append((target, original))
+            patched_ainvoke = None
+            if callable(original_ainvoke):
+                patched_ainvoke = original_ainvoke
+                target.ainvoke = make_aprobed(str(name), original_ainvoke)
+            restores.append((target, original, patched_ainvoke))
         _probed_apps[key] = {"count": 1, "restores": restores}
 
     return probes, restore, lock
 
 
-def _unfinished_probe_node(
+def _pop_leftover_probes(
     probes: list[dict],
     lock: threading.Lock | None = None,
-) -> str | None:
+) -> list[dict]:
     if lock is not None:
         lock.acquire()
     try:
         leftover = [probe for probe in probes if probe.get("node")]
-        if not leftover:
-            return None
-        return str(leftover[-1].get("node") or "") or None
+        probes[:] = [probe for probe in probes if not probe.get("node")]
+        return leftover
     finally:
         if lock is not None:
             lock.release()
+
+
+def _probe_update(probe: dict) -> dict:
+    if probe.get("canceled"):
+        return {}
+    raw = probe.get("result")
+    if isinstance(raw, dict):
+        return raw
+    if raw is not None:
+        return {"value": raw}
+    return {}
 
 
 def _take_probe(
@@ -1023,11 +1169,27 @@ def jsonable(obj: Any) -> Any:
     return str(obj)
 
 
-def merge_state(current: dict, update: dict) -> dict:
+def merge_state(current: dict, update: dict, app: Any | None = None) -> dict:
     merged = copy.deepcopy(current)
+    channels = getattr(app, "channels", None) if app is not None else None
     for key, value in update.items():
-        if isinstance(value, list) and isinstance(merged.get(key), list):
-            merged[key] = list(merged[key]) + list(value)
+        channel = channels.get(key) if isinstance(channels, dict) else None
+        kind = type(channel).__name__ if channel is not None else None
+        existing = merged.get(key)
+        if kind == "BinaryOperatorAggregate":
+            op = getattr(channel, "operator", None)
+            if existing is None:
+                merged[key] = copy.deepcopy(value)
+            elif callable(op):
+                merged[key] = op(copy.deepcopy(existing), copy.deepcopy(value))
+            elif isinstance(existing, list) and isinstance(value, list):
+                merged[key] = list(existing) + list(value)
+            else:
+                merged[key] = copy.deepcopy(value)
+        elif kind is not None:
+            merged[key] = copy.deepcopy(value)
+        elif isinstance(value, list) and isinstance(existing, list):
+            merged[key] = list(existing) + list(value)
         else:
             merged[key] = copy.deepcopy(value)
     return merged
@@ -1270,6 +1432,52 @@ def extract_decisions(update: dict) -> list[dict]:
     return []
 
 
+def _branch_path_func(spec: Any) -> Any | None:
+    path = getattr(spec, "path", None)
+    func = getattr(path, "func", None)
+    if callable(func):
+        return func
+    if callable(path):
+        return path
+    return None
+
+
+def _literal_send_targets(func: Any, node_names: set[str]) -> list[str]:
+    if not callable(func):
+        return []
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+    except (OSError, TypeError, SyntaxError, IndentationError):
+        return []
+    known = set(node_names)
+    known.update(_SKIP_NODES)
+    found: set[str] = set()
+
+    def _const_str(node: ast.AST | None) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        return None
+
+    class Visitor(ast.NodeVisitor):
+        def visit_Call(self, node: ast.Call) -> None:
+            name = ""
+            if isinstance(node.func, ast.Name):
+                name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                name = node.func.attr
+            if name == "Send":
+                arg = _const_str(node.args[0]) if node.args else None
+                for kw in node.keywords:
+                    if kw.arg == "node":
+                        arg = _const_str(kw.value) or arg
+                if arg in known:
+                    found.add("__end__" if arg in {"END", "__end__"} else arg)
+            self.generic_visit(node)
+
+    Visitor().visit(tree)
+    return sorted(found)
+
+
 def graph_edges(app: Any) -> list[tuple[str, str]]:
     edges: list[tuple[str, str]] = []
     builder = getattr(app, "builder", None)
@@ -1277,8 +1485,9 @@ def graph_edges(app: Any) -> list[tuple[str, str]]:
         for pair in getattr(builder, "edges", ()) or ():
             if isinstance(pair, (tuple, list)) and len(pair) >= 2:
                 edges.append((str(pair[0]), str(pair[1])))
+        nodes = getattr(builder, "nodes", None)
+        node_names = {str(name) for name in nodes} if isinstance(nodes, dict) else set()
         branches = getattr(builder, "branches", None) or {}
-        send_sources: list[str] = []
         items = branches.items() if isinstance(branches, dict) else []
         for source, specs in items:
             values = specs.values() if isinstance(specs, dict) else specs or []
@@ -1289,17 +1498,10 @@ def graph_edges(app: Any) -> list[tuple[str, str]]:
                         if target is None:
                             continue
                         edges.append((str(source), str(target)))
-                else:
-                    send_sources.append(str(source))
-        nodes = getattr(builder, "nodes", None)
-        node_names = {str(name) for name in nodes} if isinstance(nodes, dict) else set()
-        incoming = {target for _, target in edges}
-        for source in send_sources:
-            for name in node_names:
-                if name == source or name in incoming:
                     continue
-                edges.append((source, name))
-                incoming.add(name)
+                for target in _literal_send_targets(_branch_path_func(spec), node_names):
+                    if target != str(source):
+                        edges.append((str(source), str(target)))
         if edges:
             return sorted(set(edges))
     try:
@@ -1835,12 +2037,16 @@ def _execute_run(
             items = [(str(key), value) for key, value in payload.items()]
         else:
             return
+        visits_in_step: list[tuple[str, dict]] = []
         for node, update in items:
             node = str(node)
             if node in _SKIP_NODES or node == "__interrupt__":
                 continue
             if not isinstance(update, dict):
                 update = {"value": update}
+            visits_in_step.append((node, update))
+        live_for_visit = live_out if isinstance(live_out, dict) and len(visits_in_step) == 1 else None
+        for node, update in visits_in_step:
             raw_events.append((node, update, ended_ms))
             step, graph_out = _build_step(
                 node=node,
@@ -1853,7 +2059,7 @@ def _execute_run(
                 completed_end=completed_end,
                 edges=edges,
                 wall0=wall0,
-                live_out=live_out,
+                live_out=live_for_visit,
                 superstep=superstep,
                 source_map=source_map,
             )
@@ -1948,12 +2154,19 @@ def _execute_run(
         elif _is_cancelled(exc):
             run_canceled = True
             flush_pending()
-            interrupted = _unfinished_probe_node(probes, probe_lock)
-            if interrupted:
-                ended_ms = _elapsed_ms(clock0)
+            leftovers = _pop_leftover_probes(probes, probe_lock)
+            emitted = False
+            for probe in leftovers:
+                node = str(probe.get("node") or "")
+                if not node:
+                    continue
+                with probe_lock:
+                    probes.append(probe)
+                canceled = bool(probe.get("canceled"))
+                ended_ms = float(probe.get("ended_ms") or _elapsed_ms(clock0))
                 step, state = _build_step(
-                    node=interrupted,
-                    update={},
+                    node=node,
+                    update=_probe_update(probe),
                     ended_ms=ended_ms,
                     state=state,
                     visits=visits,
@@ -1965,19 +2178,22 @@ def _execute_run(
                     superstep=superstep,
                     source_map=source_map,
                 )
-                step["canceled"] = True
-                step["reason"] = "canceled"
-                step["choice"] = "canceled"
+                if canceled:
+                    step["canceled"] = True
+                    step["reason"] = "canceled"
+                    step["choice"] = "canceled"
                 step["index"] = len(steps)
                 steps.append(step)
                 push({
                     "type": "log",
                     "t": ended_ms,
-                    "src": interrupted,
-                    "text": "canceled",
+                    "src": node,
+                    "text": "canceled" if canceled else f"finished ({step['elapsed_ms']}ms)",
                     "level": "info",
                 })
                 emit({"type": "step", "step": step})
+                emitted = True
+            if emitted:
                 emit({"type": "state", "state": jsonable(state)})
         else:
             run_error = _format_error(exc)
@@ -2100,7 +2316,7 @@ def iter_run_events(
         finally:
             pending.put(None)
 
-    thread = threading.Thread(target=worker, name="graphviagent-run", daemon=False)
+    thread = threading.Thread(target=worker, name="graphviagent-run", daemon=True)
     thread.start()
     try:
         while True:
@@ -2159,13 +2375,16 @@ def record_run(
 
 
 def _incoming_state(
-    step: dict, state_patch: dict | None = None, state_in: dict | None = None
+    step: dict,
+    state_patch: dict | None = None,
+    state_in: dict | None = None,
+    app: Any | None = None,
 ) -> dict:
     if state_in is not None:
         if not isinstance(state_in, dict):
             return {"value": state_in}
         return copy.deepcopy(state_in)
-    return merge_state(copy.deepcopy(step.get("state_in") or {}), state_patch or {})
+    return merge_state(copy.deepcopy(step.get("state_in") or {}), state_patch or {}, app=app)
 
 
 def _finish_replay_run(
@@ -2202,7 +2421,7 @@ def _replay_native(
     max_concurrency: int | None = None,
 ) -> dict:
     node = str(step.get("node") or "")
-    incoming_state = _incoming_state(step, state_patch, incoming)
+    incoming_state = _incoming_state(step, state_patch, incoming, app=app)
     patch = _editor_patch(step, incoming, state_patch)
     fork_id = thread_id or uuid4().hex
     config: dict[str, Any] | None = None
@@ -2262,12 +2481,11 @@ def _replay_step_approximate(
         run_error = _format_error(exc)
         update = _error_update(exc)
     finally:
-        memory_mb, memory_peak_mb = memory.snapshot()
-        memory.close()
+        memory_mb, memory_peak_mb = _memory_finish(memory)
     extra = usage.take(step["node"])
     ended_ms = _elapsed_ms(clock0)
     stored_update = _plain_update(update)
-    state_out = copy.deepcopy(state_in) if run_error else merge_state(state_in, stored_update)
+    state_out = copy.deepcopy(state_in) if run_error else merge_state(state_in, stored_update, app=app)
     new_step = {
         "step_id": f"{step['node']}#replay",
         "index": 0,
@@ -2303,7 +2521,7 @@ def _replay_step_approximate(
         mode="replay",
         from_step=str(step.get("step_id") or ""),
         approximate=True,
-        reason="no checkpointer; reducers were not applied",
+        reason="no checkpointer; graph routing was not used",
     )
 
 
@@ -2320,35 +2538,23 @@ def replay_step(
 ) -> dict:
     step = _find_step(run, step_id)
     if _can_native_replay(app, run):
-        try:
-            return _replay_native(
-                app,
-                run,
-                step,
-                continue_graph=False,
-                incoming=state_in,
-                state_patch=state_patch,
-                context=context,
-                thread_id=thread_id,
-                cancel=cancel,
-                max_concurrency=max_concurrency,
-            )
-        except Exception as exc:
-            approx = _replay_step_approximate(
-                app,
-                run,
-                step,
-                _incoming_state(step, state_patch, state_in),
-                context=context,
-                thread_id=thread_id,
-            )
-            approx["approximate_reason"] = _format_error(exc)
-            return approx
+        return _replay_native(
+            app,
+            run,
+            step,
+            continue_graph=False,
+            incoming=state_in,
+            state_patch=state_patch,
+            context=context,
+            thread_id=thread_id,
+            cancel=cancel,
+            max_concurrency=max_concurrency,
+        )
     return _replay_step_approximate(
         app,
         run,
         step,
-        _incoming_state(step, state_patch, state_in),
+        _incoming_state(step, state_patch, state_in, app=app),
         context=context,
         thread_id=thread_id,
     )
@@ -2375,6 +2581,7 @@ def _resume_approximate(
     for recorded in remaining:
         incoming = _with_recorded_payload(current, recorded)
         memory = _MemoryTrace()
+        failed = False
         try:
             with _usage_scope(recorded["node"], usage):
                 update = invoke_node(
@@ -2386,26 +2593,12 @@ def _resume_approximate(
                 )
             if not isinstance(update, dict):
                 update = {"value": update}
-        except Exception as exc:
-            run_error = _format_error(exc)
-            update = _error_update(exc)
-            memory_mb, memory_peak_mb = memory.snapshot()
-            extra = usage.take(recorded["node"])
-            raw.append(
-                (
-                    recorded["node"],
-                    incoming,
-                    update,
-                    _elapsed_ms(clock0),
-                    memory_mb,
-                    memory_peak_mb,
-                    extra,
-                )
-            )
-            memory.close()
-            break
-        memory_mb, memory_peak_mb = memory.snapshot()
-        extra = usage.take(recorded["node"])
+        except Exception as err:
+            failed = True
+            run_error = _format_error(err)
+            update = _error_update(err)
+        memory_mb, memory_peak_mb = _memory_finish(memory)
+        tokens = usage.take(recorded["node"])
         raw.append(
             (
                 recorded["node"],
@@ -2414,11 +2607,12 @@ def _resume_approximate(
                 _elapsed_ms(clock0),
                 memory_mb,
                 memory_peak_mb,
-                extra,
+                tokens,
             )
         )
-        memory.close()
-        current = merge_state(current, update)
+        if failed:
+            break
+        current = merge_state(current, update, app=app)
 
     current = copy.deepcopy(state)
     prev_end = 0.0
@@ -2429,7 +2623,7 @@ def _resume_approximate(
         state_in = copy.deepcopy(incoming)
         failed = isinstance(update, dict) and update.get("error")
         stored_update = _plain_update(update)
-        state_out = copy.deepcopy(state_in) if failed else merge_state(current, stored_update)
+        state_out = copy.deepcopy(state_in) if failed else merge_state(current, stored_update, app=app)
         started_ms = prev_end
         built = {
             "step_id": f"{node}#{visits[node]}",
@@ -2487,35 +2681,23 @@ def resume_from_step(
 ) -> dict:
     step = _find_step(run, step_id)
     if _can_native_replay(app, run):
-        try:
-            return _replay_native(
-                app,
-                run,
-                step,
-                continue_graph=True,
-                incoming=state_in,
-                state_patch=state_patch,
-                context=context,
-                thread_id=thread_id,
-                cancel=cancel,
-                max_concurrency=max_concurrency,
-            )
-        except Exception as exc:
-            approx = _resume_approximate(
-                app,
-                run,
-                step,
-                _incoming_state(step, state_patch, state_in),
-                context=context,
-                thread_id=thread_id,
-            )
-            approx["approximate_reason"] = _format_error(exc)
-            return approx
+        return _replay_native(
+            app,
+            run,
+            step,
+            continue_graph=True,
+            incoming=state_in,
+            state_patch=state_patch,
+            context=context,
+            thread_id=thread_id,
+            cancel=cancel,
+            max_concurrency=max_concurrency,
+        )
     return _resume_approximate(
         app,
         run,
         step,
-        _incoming_state(step, state_patch, state_in),
+        _incoming_state(step, state_patch, state_in, app=app),
         context=context,
         thread_id=thread_id,
     )

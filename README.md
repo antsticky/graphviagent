@@ -6,15 +6,18 @@ Local Graph-View-Agent for LangGraph. Scan `*_pipeline.py` files, record runs un
 
 Pipeline files do not import GraphVIAgent. Only runs you start from the UI or CLI are stored.
 
-## What's new in 1.4.0-dev
+## What's new in 1.4.1-dev
 
-- Run slots (`--concurrent`, default 3) are no longer the LangGraph node fan-out cap; overflow waits in a FIFO (`--queue-limit`)
-- Concurrent runs in one process stay isolated by `thread_id` (and matching `user_id`); run files are written atomically
-- Disconnect dequeues a wait and cancels a live run; leftover queued/running stubs are canceled on the next `serve`
-- Pipeline glob skips Python environments; file watch re-hashes only when size changes
-- Trace graph relayouts when you open the page, so edges are not stretched after a fresh start
+- Continue / Step keep in-memory checkpoints after a pipeline or toml reload. **Replay** still asks if the graph is outdated; Continue / Step do not — they reuse the interned checkpointer, including after a topology change. Savers for deleted / unlisted files are dropped
+- File watch picks up pipeline dirs added to toml after `serve` started. Hashing still skips same-size edits (cloud-sync `mtime` jitter); click **Run** to re-read the file
+- `POST /api/rerun` returns JSON again (like `POST /api/run`). The UI Replay buttons use `POST /api/rerun/stream`
+- Ctrl+C no longer waits out the current LLM / `sleep`. Host loopback checks real IPs, not names that start with `127.`
+- HITL resume-value box keeps your edits. Cancel on a queued Continue stores canceled. Runs board cells show canceled visits
+- Node probes still record a visit when LangGraph omits `thread_id`; async nodes (`ainvoke`) are probed too
+- Parallel `Send` visits keep their own `state_out`. A failed checkpoint fork is a failed Replay, not a silent approximate run
+- Same-host HTTPS behind a TLS reverse proxy is no longer 403. Trace **Fit** fills the pane. UI run ids stay 32 hex characters
 
-See [CHANGELOG.md](CHANGELOG.md) for 1.3.0.
+See [CHANGELOG.md](CHANGELOG.md) for 1.4.0.
 
 ## Requirements
 
@@ -118,11 +121,11 @@ graphviagent serve . --host 127.0.0.1
 graphviagent serve . --concurrent 5
 ```
 
-`--concurrent` is how many graphs can run at once (default 3). Live Run, Continue/Step, `POST /api/run`, and Replay / Replay from each take a slot. Extra work waits in a server-side FIFO (SSE heartbeats until a slot opens). `--queue-limit N` caps that wait list (default 4× concurrent); overflow is HTTP 429 `{busy, active, queued, limit, queue_limit}`. A `run_id` that is already queued or running is HTTP 409. Two browser tabs share the same slots — the client’s in-flight list is not the cap. Resume / HITL continues jump ahead of brand-new runs so a paused graph is not stuck behind other live work, but they still occupy a slot when they execute. Closing the tab dequeues a wait without starting the graph, and cancels a live run. Restarting `serve` cancels leftover queued/running stubs from a crashed process. Each in-flight run gets its own LangGraph `thread_id` (and matching `user_id`), so a shared checkpointer cannot mix state. A disconnect waits for that worker to finish after cancel; it does not free the slot while an LLM call is still running.
+`--concurrent` is how many graphs can run at once (default 3). Live Run, Continue/Step, `POST /api/run`, and Replay / Replay from each take a slot. Extra work waits in a server-side FIFO (SSE heartbeats until a slot opens). `--queue-limit N` caps that wait list (default 4× concurrent); overflow is HTTP 429 `{busy, active, queued, limit, queue_limit}`. A `run_id` that is already queued or running is HTTP 409. Two browser tabs share the same slots — the client’s in-flight list is not the cap. Resume / HITL continues jump ahead of brand-new runs so a paused graph is not stuck behind other live work, but they still occupy a slot when they execute. Closing the tab dequeues a wait without starting the graph, and cancels a live run. Restarting `serve` cancels leftover queued/running stubs from a crashed process. Each in-flight run gets its own LangGraph `thread_id` (and matching `user_id`), so a shared checkpointer cannot mix state. If a node `invoke` / `ainvoke` omits `thread_id`, probes still attach to the bound run, or to the only live run. A disconnect waits for that worker to finish after cancel; it does not free the slot while an LLM call is still running.
 
 `--concurrent` does not cap parallel nodes inside one graph. Optional `--node-concurrency N` sets LangGraph `max_concurrency` for node fan-out; if omitted, a 4th parallel node is not queued behind that cap. `GVA_CONCURRENT`, `GVA_QUEUE_LIMIT`, and `GVA_NODE_CONCURRENCY` override toml; CLI flags override the environment.
 
-The UI only accepts requests from its own origin (a page on another site cannot click Run for you). Bind stays on localhost unless you pass `--expose`:
+The UI only accepts requests from its own origin (`http` or `https`; a TLS reverse proxy on the same host is fine). A page on another site cannot click Run for you. Bind stays on localhost unless you pass `--expose`:
 
 ```bash
 graphviagent serve . --host 0.0.0.0 --expose
@@ -130,23 +133,23 @@ graphviagent serve . --host 0.0.0.0 --expose
 
 `--expose` prints a warning. Anyone who can open that URL can run your pipelines and read stored runs.
 
-New or edited `*_pipeline.py` files (and toml-listed pipelines, including files outside the serve root) refresh the sidebar on their own. You do not need to restart `serve`. A file-change panel (bottom right) shows when a pipeline appears, is modified, or its SHA256 hash changes.
+New or edited `*_pipeline.py` files (and toml-listed pipelines, including files outside the serve root) refresh the sidebar on their own. You do not need to restart `serve`. A file-change panel (bottom right) shows when a pipeline appears, is modified, or its SHA256 hash changes. Hashing is skipped when the file size did not change, so a same-size edit is invisible there until you click **Run**, which always re-reads the file.
 
 ### Trace
 
-1. Select the pipeline in the sidebar.
+1. Select the pipeline in the sidebar. Clicking it again keeps the open Trace, including a live run.
 2. Edit the JSON input (the first `EXAMPLES` item is prefilled).
 3. Click **Run**.
-4. Single-click a node to select it. Double-click to open **Node view**. Node cards show `file:line`; click to open in the editor. Failed nodes include a traceback.
+4. Single-click a node to select it. Double-click to open **Node view**. Node cards show `file:line`; click to open in the editor. Failed nodes include a traceback. Parallel `Send` visits show that visit’s `state_in` / `state_out`, not the merged superstep.
 5. Click the gutter dot on a topology card to break before that node. Breakpoints persist per pipeline. **Continue** resumes with those breakpoints; **Step** runs the next node and pauses again.
-6. Human-in-the-loop graphs (`interrupt(...)`) pause with a resume-value box. **Continue** sends that JSON (`true` to keep a draft, or `"edit this"` to replace it). Continue after a process restart fails — checkpoints are in-memory.
+6. Human-in-the-loop graphs (`interrupt(...)`) pause with a resume-value box. **Continue** sends that JSON (`true` to keep a draft, or `"edit this"` to replace it). The box keeps what you type until you Continue or a new pause starts. Editing the pipeline or toml in the same `serve` process keeps the in-memory checkpointer, so Continue / Step still work. Replay asks before using an outdated graph; Continue / Step do not — they feed that checkpoint into the newly compiled graph (right for a whitespace save, wrong if you renamed a node or changed routing). Restarting `serve`, or deleting / unlisting that pipeline file, drops those checkpoints.
 7. Filter the run list by status (all / success / paused / canceled / failed) or input text.
 8. **Export** downloads the open run as JSON. **Import** or drop a JSON file on the run list.
-9. **Runs** and **Statistics** (between Import and Delete) jump to this pipeline. **Delete run** removes the open run. Hover a JSON box and use **Copy** to copy it. **Cancel** stops an in-flight run, or abandons a paused one — stored as **canceled**, not failed.
+9. **Runs** and **Statistics** (between Import and Delete) jump to this pipeline. **Delete run** removes the open run. Hover a JSON box and use **Copy** to copy it. **Cancel** stops an in-flight run — including a Continue / Step still waiting for a slot, or a Replay — or abandons a paused one — stored as **canceled**, not failed. Closing the tab dequeues a wait without canceling a paused graph.
 
-**Replay step** runs only the selected node again. **Replay from** continues the compiled graph from that checkpoint (reducers and routing included). GraphVIAgent attaches an in-process checkpointer when the pipeline did not. Approximate replay is only when that is impossible, or the original thread is gone after a restart. Side effects will fire.
+**Replay step** runs only the selected node again. **Replay from** continues the compiled graph from that checkpoint (reducers and routing included). The UI uses `POST /api/rerun/stream` (SSE, same events as `POST /api/run/stream`), so **Cancel** and closing the tab abort them. `POST /api/rerun` still returns one JSON run when the replay finishes — same split as `POST /api/run` vs `POST /api/run/stream`. GraphVIAgent attaches an in-process checkpointer when the pipeline did not. Approximate replay is only when that is impossible. A missing original thread is seeded; a failed fork is an error, not a silent approximate run. Side effects will fire.
 
-Each run stores a SHA256 of the graph (nodes, edges, state keys, tools). If that hash no longer matches the loaded pipeline, the run is marked **outdated** and replay asks before continuing.
+Each run stores a SHA256 of the graph (nodes, edges, state keys, tools). If that hash no longer matches the loaded pipeline, the run is marked **outdated** and Replay asks before continuing. Continue / Step skip that prompt and reuse the interned checkpointer.
 
 If a node returns `messages` or tool calls, they render as a thread above the JSON tree.
 
@@ -158,11 +161,11 @@ Failed nodes stay in history and show as red.
 
 ### Compare
 
-Open **Compare**. Filter by pipeline (default **all**). When a pipeline is selected, Run A and Run B only list that pipeline’s runs. Diff input, path, per-node output, and timing. If a node ran more than once (loop or branch), each visit is aligned separately. Hover a cell and use **Copy**.
+Open **Compare**. Filter by pipeline (default **all**). When a pipeline is selected, Run A and Run B only list that pipeline’s runs. Diff input, path, per-node output, and timing. If a node ran more than once (loop or branch), each visit is aligned separately. Parallel `Send` visits compare that visit’s output, not the merged superstep. Hover a cell and use **Copy**.
 
 ### Statistics
 
-Open **Statistics** (`#/statistics/<name>`). Choose a pipeline — there is no **all** view. **Trace** and **Runs** jump to that pipeline. **Routing**, **Runtime**, and **Cost** draw the same topology as Trace. Routing shows run count, average node visits per run, and a success / failed / canceled / paused split. Runtime writes average duration on each node and a pipeline grand total / average per successful run (violet average vs orange max on the same strip as Cost / Routing). Cost writes average in/out tokens on each node, a total badge, and a pipeline grand total / average per run. Hover a color strip for a legend of color dots and labels, one per line. Click a node on Routing to see branches grouped together, with similar `reason` text collapsed into a pattern. Click a node on Runtime for min / avg / max.
+Open **Statistics** (`#/statistics/<name>`). Choose a pipeline — there is no **all** view. **Trace** and **Runs** jump to that pipeline. **Routing**, **Runtime**, and **Cost** draw the same topology as Trace. Routing shows run count, average node visits per run, and a success / failed / canceled / paused split. Runtime writes average duration on each node and a pipeline grand total / average per successful run (violet average vs orange max on the same strip as Cost / Routing). Failed, canceled, and paused visits are omitted from those times, including the node panel. Cost writes average in/out tokens on each node, a total badge, and a pipeline grand total / average per run. Hover a color strip for a legend of color dots and labels, one per line. Click a node on Routing to see branches grouped together, with similar `reason` text collapsed into a pattern. Click a node on Runtime for min / avg / max from successful visits.
 
 ## Where runs are stored
 
@@ -172,7 +175,7 @@ Runs are written under the folder you served or ran from:
 my_graphs/.graphviagent/runs/echo_pipeline/<id>.json
 ```
 
-Each file includes `schema_version` (currently `1`) and `gva_version`. Older files with no version still load. A run from a newer GraphVIAgent is refused. Add `.graphviagent/` to `.gitignore`.
+Each file is named with a 32-character hex run id (`GET` / `DELETE /api/runs/{id}` accept only that form, with optional dashes). The UI still emits that length on HTTP / older browsers where `crypto.randomUUID` is missing. Each file includes `schema_version` (currently `1`) and `gva_version`. Older files with no version still load. A run from a newer GraphVIAgent is refused. Add `.graphviagent/` to `.gitignore`.
 
 ## Pipeline contract
 
@@ -180,7 +183,7 @@ A file is viewable if it is named `*_pipeline.py` (or listed in `graphviagent.to
 
 - `build_graph()` / `get_graph()` / `create_graph()` / `__graph__`
 - compiled or `StateGraph` `GRAPH`
-- compiled `app` (`stream` and `invoke` only — a package named `app` is ignored)
+- compiled `app` (`stream`, `invoke`, and `ainvoke` — a package named `app` is ignored)
 
 Optional: `EXAMPLES = [{"label": "hello", "input": {"text": "hello"}}]` (or a bare dict). The first example prefills the Trace input.
 
@@ -226,6 +229,10 @@ graphviagent serve examples
 ```
 
 - `examples/dummy_pipeline.py` — name-length branch and a polish loop
+- `examples/parallel_pipeline.py` — parallel `Send` fan-out (wiki / news / archive)
+- `examples/tools_pipeline.py` — `ToolNode` tool calls (and a failing tool)
+- `examples/agents_pipeline.py` — multi-speaker `messages` thread
+- `examples/memory_pipeline.py` — in-process `MemorySaver` / long-term notes
 - `examples/tokens_pipeline.py` — dummy random `usage` prompt/completion on each node (Cost view)
 - `examples/echo_pipeline.py` — reverse a `text` field
 - `examples/context_pipeline.py` — `runtime.context.user_name` from `examples/graphviagent.toml`

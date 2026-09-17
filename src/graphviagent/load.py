@@ -6,6 +6,7 @@ import importlib.util
 import json
 import sys
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,12 @@ FACTORY_NAMES = ("build_graph", "get_graph", "create_graph")
 
 _load_lock = threading.Lock()
 _modules: dict[str, tuple[str, Any]] = {}
+_saver_lock = threading.Lock()
+# In-memory checkpointers keyed by resolved pipeline path. They outlive the
+# compiled-app / module cache so HITL and breakpoint Continue still work after
+# a file change, toml reload, or a failed import that was then fixed. Entries
+# for files that are no longer discovered are dropped.
+_savers: dict[str, Any] = {}
 
 
 @dataclass
@@ -45,31 +52,92 @@ def _is_state_graph(obj: Any) -> bool:
     return callable(compile_fn) and hasattr(obj, "add_node") and hasattr(obj, "add_edge")
 
 
-def _with_memory_saver(compile_fn: Any) -> tuple[Any, bool]:
-    try:
-        from langgraph.checkpoint.memory import MemorySaver
+_IN_MEMORY_SAVER_NAMES = {"MemorySaver", "InMemorySaver"}
 
-        # Cached compiles reuse this checkpointer; each run must use a distinct thread_id.
-        return compile_fn(checkpointer=MemorySaver()), True
+
+def _is_memory_saver(obj: Any) -> bool:
+    return type(obj).__name__ in _IN_MEMORY_SAVER_NAMES
+
+
+def _saver_key(path: Path) -> str:
+    return str(path.resolve())
+
+
+def _memory_saver_for(path: Path) -> Any:
+    from langgraph.checkpoint.memory import MemorySaver
+
+    key = _saver_key(path)
+    with _saver_lock:
+        saver = _savers.get(key)
+        if saver is None:
+            saver = MemorySaver()
+            _savers[key] = saver
+        return saver
+
+
+def _intern_memory_saver(path: Path, checkpointer: Any) -> Any:
+    key = _saver_key(path)
+    with _saver_lock:
+        held = _savers.get(key)
+        if held is None:
+            _savers[key] = checkpointer
+            return checkpointer
+        return held
+
+
+def retain_memory_savers(paths: Iterable[Path]) -> None:
+    keep: set[str] = set()
+    for path in paths:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        if resolved.is_file():
+            keep.add(str(resolved))
+    with _saver_lock:
+        for key in list(_savers):
+            if key not in keep:
+                _savers.pop(key, None)
+
+
+def _builder_compile(obj: Any) -> Any | None:
+    builder = getattr(obj, "builder", None)
+    compile_fn = getattr(builder, "compile", None)
+    return compile_fn if callable(compile_fn) else None
+
+
+def _with_memory_saver(compile_fn: Any, path: Path) -> tuple[Any, bool]:
+    try:
+        # Reuse the process-lifetime saver for this file; each run still needs
+        # a distinct thread_id so concurrent work does not mix checkpoints.
+        return compile_fn(checkpointer=_memory_saver_for(path)), True
     except TypeError:
         return compile_fn(), False
 
 
-def _compile_if_needed(obj: Any) -> tuple[Any, bool]:
+def _compile_if_needed(obj: Any, path: Path) -> tuple[Any, bool]:
     if _is_runnable(obj):
         checkpointer = getattr(obj, "checkpointer", None)
         if checkpointer not in (None, False):
+            if _is_memory_saver(checkpointer):
+                held = _intern_memory_saver(path, checkpointer)
+                if held is not checkpointer:
+                    compile_fn = _builder_compile(obj)
+                    if compile_fn is not None:
+                        try:
+                            return compile_fn(checkpointer=held), True
+                        except Exception:
+                            pass
             return obj, True
-        builder = getattr(obj, "builder", None)
-        compile_fn = getattr(builder, "compile", None)
-        if callable(compile_fn):
+        compile_fn = _builder_compile(obj)
+        if compile_fn is not None:
             try:
-                return _with_memory_saver(compile_fn)
+                return _with_memory_saver(compile_fn, path)
             except Exception:
                 return obj, False
         return obj, False
     if _is_state_graph(obj):
-        return _with_memory_saver(obj.compile)
+        return _with_memory_saver(obj.compile, path)
     raise TypeError("object is not a compiled graph or StateGraph")
 
 
@@ -222,7 +290,7 @@ def load_pipeline(path: Path, config: GVAConfig | None = None) -> LoadedPipeline
         loaded.module = module
         loaded.examples = normalize_examples(getattr(module, "EXAMPLES", None))
         candidate = _extract_graph(module, factory=factory)
-        loaded.app, loaded.has_checkpointer = _compile_if_needed(candidate)
+        loaded.app, loaded.has_checkpointer = _compile_if_needed(candidate, path)
         try:
             loaded.file_sha256 = file_sha256(path)
         except OSError:

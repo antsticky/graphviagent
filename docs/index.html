@@ -619,7 +619,7 @@
   <main>
     <section class="hero">
       <div>
-        <p class="kicker">Graph-View-Agent <span class="ver">1.4.0-dev</span></p>
+        <p class="kicker">Graph-View-Agent <span class="ver">1.4.1-dev</span></p>
         <h1>See your LangGraph run <em>as it happens</em>.</h1>
         <p class="lede">
           GraphVIAgent is an inspector for LangGraph. Point it at a folder of
@@ -720,7 +720,7 @@
         </article>
         <article class="af-card">
           <h3><span class="af-mark replay"></span> Replay a node, or from a node</h3>
-          <p><strong>Replay step</strong> runs only the selected node. <strong>Replay from</strong> continues from that checkpoint so routing can take the other branch. Both invoke the real function — side effects will fire. Outdated runs (graph hash changed) ask before replay.</p>
+          <p><strong>Replay step</strong> runs only the selected node. <strong>Replay from</strong> continues from that checkpoint so routing can take the other branch. Both invoke the real function — side effects will fire. Outdated runs (graph hash changed) ask before replay. <strong>Continue</strong> / <strong>Step</strong> on a paused run do not — they reuse the interned checkpointer, including after a topology change. Cancel and closing the tab abort a replay the same way as a live Run. Approximate replay is only when there is no checkpointer; a failed fork is an error.</p>
         </article>
         <article class="af-card">
           <h3><span class="af-mark board"></span> Runs board and Compare</h3>
@@ -728,23 +728,23 @@
         </article>
         <article class="af-card">
           <h3><span class="af-mark stats"></span> Statistics: Routing, Runtime, and Cost</h3>
-          <p>Same topology as Trace. Routing shows run count, average node visits, and success vs failed vs canceled. Runtime writes average duration, a pipeline grand total, and average vs longest run. Cost writes average in/out tokens, a pipeline grand total, and average per run. Hover a color strip for a dotted legend (one label per color). Colored jumps keep you on that pipeline.</p>
+          <p>Same topology as Trace. Routing shows run count, average node visits, and success vs failed vs canceled. Runtime writes average duration, a pipeline grand total, and average vs longest run — successful visits only, including the node min / avg / max panel. Cost writes average in/out tokens, a pipeline grand total, and average per run. Hover a color strip for a dotted legend (one label per color). Colored jumps keep you on that pipeline.</p>
         </article>
         <article class="af-card">
           <h3><span class="af-mark break"></span> Stop, step, and HITL</h3>
-          <p>Click the gutter dot on a topology card to break before that node. Breakpoints persist per pipeline. <strong>Continue</strong> resumes with those stops; <strong>Step</strong> runs the next node and pauses again. Graphs that call <code>interrupt(...)</code> pause with a resume-value box.</p>
+          <p>Click the gutter dot on a topology card to break before that node. Breakpoints persist per pipeline. <strong>Continue</strong> resumes with those stops; <strong>Step</strong> runs the next node and pauses again. Graphs that call <code>interrupt(...)</code> pause with a resume-value box; the box keeps what you type until Continue or a new pause. A pipeline or toml reload in the same <code>serve</code> process keeps the in-memory checkpointer; restarting <code>serve</code>, or deleting / unlisting that pipeline file, does not. Replay asks if the graph is outdated; Continue / Step do not, so a topology edit can feed an old checkpoint into the new compile.</p>
         </article>
         <article class="af-card">
           <h3><span class="af-mark cancel"></span> Queue and cancel</h3>
-          <p>Default three runs at a time (<code>--concurrent</code>); extra work waits in a FIFO (<code>--queue-limit</code>). Overflow is HTTP 429. Cancel stops a live run or a paused one, and dequeues a wait. <code>time.sleep</code> is interrupted within ~50ms. Other blocking calls still finish first.</p>
+          <p>Default three runs at a time (<code>--concurrent</code>); extra work waits in a FIFO (<code>--queue-limit</code>). Overflow is HTTP 429. Cancel stops a live run, a paused one, a Replay, or a Continue / Step still waiting for a slot. Closing the tab dequeues a wait and leaves a paused graph alone. <code>time.sleep</code> is interrupted within ~50ms. Other blocking calls still finish first.</p>
         </article>
         <article class="af-card">
           <h3><span class="af-mark hist"></span> Local history</h3>
-          <p>Each run is JSON under <code>.graphviagent/runs/&lt;pipeline&gt;/</code>. Export, import, or drop a file on the run list. Search input fields. Filter success, paused, canceled, or failed.</p>
+          <p>Each run is JSON under <code>.graphviagent/runs/&lt;pipeline&gt;/</code> named with a 32-character hex id (still that length when <code>crypto.randomUUID</code> is missing). Export, import, or drop a file on the run list. Search input fields. Filter success, paused, canceled, or failed.</p>
         </article>
         <article class="af-card">
           <h3><span class="af-mark state"></span> State you can trust</h3>
-          <p>Final state, a Memory table of who wrote and read each key, and a per-node state diff in Node view. Optional <code>decisions</code>, <code>reason</code>, and <code>choice</code> label branches on the graph.</p>
+          <p>Final state, a Memory table of who wrote and read each key, and a per-node state diff in Node view. Parallel <code>Send</code> visits keep their own <code>state_out</code>, not the merged superstep. Optional <code>decisions</code>, <code>reason</code>, and <code>choice</code> label branches on the graph.</p>
         </article>
       </div>
     </section>
@@ -799,11 +799,11 @@ def build_graph():
         <span class="step-n">3</span>
         <h3>Open the UI</h3>
         <pre>graphviagent serve . --open</pre>
-        <p>Or open <a href="http://127.0.0.1:8765">http://127.0.0.1:8765</a>. Leave the terminal running. The UI only accepts requests from its own origin. Bind stays on localhost unless you pass <code>--expose</code>:</p>
+        <p>Or open <a href="http://127.0.0.1:8765">http://127.0.0.1:8765</a>. Leave the terminal running. The UI only accepts requests from its own origin (<code>http</code> or <code>https</code>; a TLS reverse proxy on the same host is fine). Bind stays on localhost unless you pass <code>--expose</code>:</p>
         <pre>graphviagent serve . --port 9000
 graphviagent serve . --host 127.0.0.1
 graphviagent serve . --host 0.0.0.0 --expose</pre>
-        <p><code>--expose</code> prints a warning. Anyone who can open that URL can run your pipelines and read stored runs. New or edited <code>*_pipeline.py</code> files (and toml-listed pipelines, including files outside the serve root) refresh the sidebar without a restart.</p>
+        <p><code>--expose</code> prints a warning. Anyone who can open that URL can run your pipelines and read stored runs. New or edited <code>*_pipeline.py</code> files (and toml-listed pipelines, including files outside the serve root) refresh the sidebar without a restart. Same-size edits are not re-hashed until you click <strong>Run</strong>.</p>
       </article>
       <article class="step-card">
         <span class="step-n">4</span>
@@ -811,7 +811,7 @@ graphviagent serve . --host 0.0.0.0 --expose</pre>
         <ol class="run-list">
           <li>Select the pipeline in the sidebar.</li>
           <li>Edit the JSON input if you need to.</li>
-          <li>Click <strong>Run</strong>. The topology appears immediately and pulses while nodes execute.</li>
+          <li>Click <strong>Run</strong>. The topology appears immediately and pulses while nodes execute. Clicking the selected pipeline keeps that live Trace.</li>
           <li>Single-click a node to select it. Double-click to open Node view.</li>
         </ol>
       </article>
@@ -834,12 +834,12 @@ graphviagent serve . --host 0.0.0.0 --expose</pre>
         <div class="tour-copy">
           <p class="tour-kicker"><span class="tour-step">01</span> Live inspector</p>
           <h3>Trace</h3>
-          <p class="tour-lead">The graph is a map, not an unrolled column. Cards pulse while a node runs. Taken, skipped, loops, and parallel <code>Send</code> stay on one picture.</p>
+          <p class="tour-lead">The graph is a map, not an unrolled column. Cards pulse while a node runs. Taken, skipped, loops, and parallel <code>Send</code> stay on one picture. <code>Send</code> arrows go to the declared target, not every node that was missing an incoming edge.</p>
           <div class="tour-facts">
-            <div class="tour-fact"><b>Graph / Gantt / Agents</b><span>Topology, wall-clock bars, or a speaker chain when a node returns <code>messages</code>.</span></div>
-            <div class="tour-fact"><b>Steps</b><span>Visit order, duration, spark metrics. Final state, Log, Memory, and Text tree fold under it.</span></div>
+            <div class="tour-fact"><b>Graph / Gantt / Agents</b><span>Topology, wall-clock bars, or a speaker chain when a node returns <code>messages</code>. <strong>Fit</strong> scales width and height to the pane and centers the drawing.</span></div>
+            <div class="tour-fact"><b>Steps</b><span>Visit order, duration, spark metrics. Concurrent runs do not zero each other’s memory. Final state, Log, Memory, and Text tree fold under it.</span></div>
             <div class="tour-fact"><b>Stop here</b><span>Gutter dots, <strong>Continue</strong> / <strong>Step</strong>, and HITL — see <a href="#tour-break">Stop</a>.</span></div>
-            <div class="tour-fact"><b>Keep the run</b><span>Export, import, or drop JSON. Jump to <strong>Runs</strong> / <strong>Statistics</strong>. <strong>Delete run</strong> is red.</span></div>
+            <div class="tour-fact"><b>Keep the run</b><span>Export, import, or drop JSON. Clicking the selected pipeline keeps the open Trace, including a live run. Jump to <strong>Runs</strong> / <strong>Statistics</strong>. <strong>Delete run</strong> is red.</span></div>
           </div>
         </div>
         <div class="tour-viz" aria-hidden="true">
@@ -871,8 +871,8 @@ graphviagent serve . --host 0.0.0.0 --expose</pre>
           <div class="tour-facts">
             <div class="tour-fact"><b>Continue</b><span>Resumes and keeps those breakpoints. The next matching node pauses again.</span></div>
             <div class="tour-fact"><b>Step</b><span>Runs the next node, then pauses. Use it to walk the graph one visit at a time.</span></div>
-            <div class="tour-fact"><b>HITL</b><span><code>interrupt(...)</code> pauses with a resume-value box. <strong>Continue</strong> sends that JSON.</span></div>
-            <div class="tour-fact"><b>Cancel</b><span>Abandons a paused run (stored as canceled, not failed). Closing the tab does the same for a live run.</span></div>
+            <div class="tour-fact"><b>HITL</b><span><code>interrupt(...)</code> pauses with a resume-value box. <strong>Continue</strong> sends that JSON. The box keeps what you type until Continue or a new pause. A reload in the same <code>serve</code> keeps the checkpointer; Continue / Step do not ask if the graph topology changed. A restart drops it.</span></div>
+            <div class="tour-fact"><b>Cancel</b><span>Abandons a paused run, a Replay, or a queued Continue / Step (stored as canceled, not failed). Closing the tab dequeues a wait and still cancels a live run or replay.</span></div>
           </div>
         </div>
         <div class="tour-viz" aria-hidden="true">
@@ -902,10 +902,10 @@ graphviagent serve . --host 0.0.0.0 --expose</pre>
           <h3>Replay</h3>
           <p class="tour-lead"><strong>Replay step</strong> runs only the selected node. <strong>Replay from</strong> continues from that checkpoint so routing can take the other branch.</p>
           <div class="tour-facts">
-            <div class="tour-fact"><b>Real functions</b><span>Both invoke the node you wrote. Side effects fire.</span></div>
-            <div class="tour-fact"><b>Outdated runs</b><span>If the graph hash changed, replay asks before continuing.</span></div>
-            <div class="tour-fact"><b>Node view</b><span>Input, output, <code>state_in</code> vs <code>state_out</code>, tools, traceback. <strong>Call node</strong> is Replay step.</span></div>
-            <div class="tour-fact"><b>Checkpointer</b><span>Attached in-process when the pipeline did not. Approximate only if the thread is gone.</span></div>
+            <div class="tour-fact"><b>Real functions</b><span>Both invoke the node you wrote. Side effects fire. <strong>Cancel</strong> and closing the tab abort a replay like a live Run.</span></div>
+            <div class="tour-fact"><b>Outdated runs</b><span>If the graph hash changed, replay asks before continuing. Continue / Step skip that prompt and reuse the interned checkpointer.</span></div>
+            <div class="tour-fact"><b>Node view</b><span>Input, output, <code>state_in</code> vs <code>state_out</code> (each parallel <code>Send</code> visit keeps its own), tools, traceback. <strong>Call node</strong> is Replay step.</span></div>
+            <div class="tour-fact"><b>Checkpointer</b><span>Attached in-process when the pipeline did not. Approximate only with no checkpointer; a failed fork is an error, not a silent approximate run.</span></div>
           </div>
         </div>
         <div class="tour-viz" aria-hidden="true">
@@ -970,7 +970,7 @@ graphviagent serve . --host 0.0.0.0 --expose</pre>
           <p class="tour-lead">Same topology as Trace. Pick a pipeline — there is no <strong>all</strong> view. Colored jump buttons keep you on that graph.</p>
           <div class="tour-facts">
             <div class="tour-fact"><b>Routing</b><span>Run count, average visits, success / failed / canceled. Click a node for grouped <code>reason</code>s.</span></div>
-            <div class="tour-fact"><b>Runtime</b><span>Grand total, average per run, violet average vs orange longest. Click a node for min / avg / max.</span></div>
+            <div class="tour-fact"><b>Runtime</b><span>Grand total, average per run, violet average vs orange longest. Click a node for min / avg / max from successful visits.</span></div>
             <div class="tour-fact"><b>Cost</b><span>Average in/out tokens per node, pipeline totals. Tokens, not dollars.</span></div>
             <div class="tour-fact"><b>Legend</b><span>Hover a color strip for one label per color. <strong>Trace</strong> and <strong>Runs</strong> sit before the modes.</span></div>
           </div>
@@ -1040,7 +1040,7 @@ graphviagent serve . --host 0.0.0.0 --expose</pre>
           <ul>
             <li><code>build_graph()</code> / <code>get_graph()</code> / <code>create_graph()</code> / <code>__graph__</code></li>
             <li>compiled or <code>StateGraph</code> <code>GRAPH</code></li>
-            <li>compiled <code>app</code> (<code>stream</code> and <code>invoke</code> only)</li>
+            <li>compiled <code>app</code> (<code>stream</code>, <code>invoke</code>, and <code>ainvoke</code> — a package named <code>app</code> is ignored)</li>
           </ul>
           <p>Do not import GraphVIAgent in the pipeline. The viewer loads the file and records runs you start from the UI or CLI.</p>
         </article>
@@ -1066,9 +1066,10 @@ file = "decision_pipeline.py"</pre>
         <article class="topic">
           <h3>Limits</h3>
           <ul>
-            <li>Alpha: APIs, UI, and on-disk run format may change.</li>
+            <li>Alpha: APIs, UI, and on-disk run format may change. <code>POST /api/run</code> and <code>POST /api/rerun</code> return one JSON run. The live UI uses <code>POST /api/run/stream</code> and <code>POST /api/rerun/stream</code> (<code>text/event-stream</code>).</li>
             <li>Local only. Nothing is uploaded.</li>
             <li><code>logging</code> still respects the logger’s level. Root defaults to WARNING, so <code>logger.info</code> appears only if that logger is enabled for INFO.</li>
+            <li>File watch skips hashing when size is unchanged (cloud-sync <code>mtime</code> jitter). Same-size edits do not refresh the sidebar hash until you click <strong>Run</strong>.</li>
             <li>Cancel interrupts <code>time.sleep</code> quickly. Other blocking calls (network, LLM) still finish before the run stops.</li>
           </ul>
         </article>
@@ -1092,12 +1093,12 @@ file = "decision_pipeline.py"</pre>
           <p>Open the UI (default <code>127.0.0.1:8765</code>). <code>--open</code> launches a browser. <code>--host</code> and <code>--port</code> override the bind address. Binding beyond localhost requires <code>--expose</code>. <code>--concurrent N</code> is in-flight graphs (default 3); <code>--queue-limit N</code> is how many may wait; <code>--node-concurrency N</code> is LangGraph node fan-out (omitted = unlimited).</p>
         </article>
       </div>
-      <p style="margin-top:14px">With a clone of the repo you can also run <code>graphviagent serve examples</code> to browse the bundled pipelines (branch, loop, parallel <code>Send</code>, tools, agents, waits, runtime <code>context</code>, errors).</p>
+      <p style="margin-top:14px">With a clone of the repo you can also run <code>graphviagent serve examples</code> to browse the bundled pipelines (branch, loop, parallel <code>Send</code>, tools, agents, memory, waits, runtime <code>context</code>, errors).</p>
     </section>
   </main>
 
   <footer>
-    <div><span class="wordmark">GraphV<span class="ia">IA</span>gent</span> · 1.4.0-dev · MIT · @antsticky</div>
+    <div><span class="wordmark">GraphV<span class="ia">IA</span>gent</span> · 1.4.1-dev · MIT · @antsticky</div>
     <div>
       <a href="https://pypi.org/project/graphviagent/">PyPI</a>
       ·

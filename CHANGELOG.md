@@ -2,6 +2,9 @@
 
 ## 1.4.2-dev
 
+### Changed
+- Trace run list uses the same **success** label (green) as the status filter, instead of **run**
+
 ### Fixed
 - Continue / Step keep per-node visit ids (`agent#2` after `agent#1`); Replay no longer hits the earlier loop visit
 - A second start of the same `run_id` no longer deletes the in-flight stub of the request that won the slot

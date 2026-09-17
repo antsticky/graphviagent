@@ -420,6 +420,7 @@ PAGE = r"""<!DOCTYPE html>
       flex: 0 0 auto; width: auto; display: inline-block;
     }
     #history .pill.mode-run { color: #c4b5fd; background: rgba(124, 92, 255, 0.18); }
+    #history .pill.mode-success { color: #86efac; background: rgba(34, 197, 94, 0.16); }
     #history .pill.mode-replay { color: #5eead4; background: rgba(45, 212, 191, 0.16); }
     #history .pill.mode-replay_from { color: #fbbf24; background: rgba(251, 191, 36, 0.16); }
     #history .pill.mode-approximate { color: #fdba74; background: rgba(251, 146, 60, 0.18); }
@@ -2236,7 +2237,7 @@ PAGE = r"""<!DOCTYPE html>
           ? "failed"
           : run.status === "paused"
             ? "paused"
-            : (run.mode || "run");
+            : (run.mode && run.mode !== "run" ? run.mode : "success");
       return [date, kind, formatElapsed(run.elapsed_ms)].filter(Boolean).join("  ·  ");
     }
 
@@ -2804,8 +2805,8 @@ PAGE = r"""<!DOCTYPE html>
         const btn = document.createElement("button");
         btn.className = "run" + (currentRun && currentRun.id === r.id ? " active" : "");
         const mode = r.mode || "run";
-        const pill = runIsCanceled(r) ? "canceled" : r.status === "error" ? "error" : r.status === "paused" ? "paused" : r.status === "canceling" ? "canceling" : r.status === "queued" ? (r.queue_position ? "queued #" + r.queue_position : "queued") : r.status === "running" ? "running" : mode;
-        const known = { run: 1, replay: 1, replay_from: 1, error: 1, canceled: 1, canceling: 1, queued: 1, approximate: 1, paused: 1, running: 1 };
+        const pill = runIsCanceled(r) ? "canceled" : r.status === "error" ? "error" : r.status === "paused" ? "paused" : r.status === "canceling" ? "canceling" : r.status === "queued" ? (r.queue_position ? "queued #" + r.queue_position : "queued") : r.status === "running" ? "running" : (mode === "run" ? "success" : mode);
+        const known = { success: 1, run: 1, replay: 1, replay_from: 1, error: 1, canceled: 1, canceling: 1, queued: 1, approximate: 1, paused: 1, running: 1 };
         const pillClass = known[pill] ? pill : (String(pill).indexOf("queued") === 0 ? "queued" : "run");
         const outdated = isOutdated(r)
           ? '<span class="pill mode-outdated">outdated</span>'

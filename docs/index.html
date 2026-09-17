@@ -1069,7 +1069,7 @@ file = "decision_pipeline.py"</pre>
             <li>Alpha: APIs, UI, and on-disk run format may change. <code>POST /api/run</code> and <code>POST /api/rerun</code> return one JSON run. The live UI uses <code>POST /api/run/stream</code> and <code>POST /api/rerun/stream</code> (<code>text/event-stream</code>).</li>
             <li>Local only. Nothing is uploaded.</li>
             <li><code>logging</code> still respects the logger’s level. Root defaults to WARNING, so <code>logger.info</code> appears only if that logger is enabled for INFO.</li>
-            <li>File watch skips hashing when size is unchanged (cloud-sync <code>mtime</code> jitter). Same-size edits do not refresh the sidebar hash until you click <strong>Run</strong>.</li>
+            <li>File watch skips hashing when size is unchanged (cloud-sync <code>mtime</code> jitter). Same-size edits do not refresh the sidebar hash until you click <strong>Run</strong>. UI scan/change polls read the watcher snapshot; they do not re-walk the tree.</li>
             <li>Cancel interrupts <code>time.sleep</code> quickly. Other blocking calls (network, LLM) still finish before the run stops.</li>
           </ul>
         </article>

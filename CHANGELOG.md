@@ -5,6 +5,7 @@
 ### Changed
 - Trace run list uses the same **success** label (green) as the status filter, instead of **run**
 - First UI open shows a **scanning** overlay until the initial pipeline list returns (OneDrive / slow disks)
+- `/api/scan` and `/api/changes` return the watcher's snapshot; they no longer re-walk the workspace on every UI poll. Watchdog still schedules refresh on file events
 
 ### Fixed
 - Continue / Step keep per-node visit ids (`agent#2` after `agent#1`); Replay no longer hits the earlier loop visit

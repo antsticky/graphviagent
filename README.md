@@ -130,7 +130,7 @@ graphviagent serve . --host 0.0.0.0 --expose
 
 `--expose` prints a warning. Anyone who can open that URL can run your pipelines and read stored runs.
 
-New or edited `*_pipeline.py` files (and toml-listed pipelines, including files outside the serve root) refresh the sidebar on their own. You do not need to restart `serve`. A file-change panel (bottom right) shows when a pipeline appears, is modified, or its SHA256 hash changes. Hashing is skipped when the file size did not change, so a same-size edit is invisible there until you click **Run**, which always re-reads the file.
+New or edited `*_pipeline.py` files (and toml-listed pipelines, including files outside the serve root) refresh the sidebar on their own. You do not need to restart `serve`. The UI poll reads the in-memory snapshot; the tree is re-walked when the file watcher sees an event. A file-change panel (bottom right) shows when a pipeline appears, is modified, or its SHA256 hash changes. Hashing is skipped when the file size did not change, so a same-size edit is invisible there until you click **Run**, which always re-reads the file.
 
 ### Trace
 

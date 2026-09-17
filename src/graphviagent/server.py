@@ -6723,7 +6723,6 @@ class GraphVIHandler(BaseHTTPRequestHandler):
 
     def _scan_files(self) -> list[dict]:
         if self.watcher is not None:
-            self.watcher.refresh(emit=True)
             return self.watcher.files()
         return list(snapshot_files(self.workspace, self.config).values())
 
@@ -6804,7 +6803,6 @@ class GraphVIHandler(BaseHTTPRequestHandler):
             except ValueError:
                 since = 0
             if self.watcher is not None:
-                self.watcher.refresh(emit=True)
                 events = self.watcher.changes(since)
             else:
                 events = []

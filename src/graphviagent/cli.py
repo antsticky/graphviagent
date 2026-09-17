@@ -85,6 +85,7 @@ def _cmd_run(file: str, raw_input: str, config: GVAConfig) -> int:
         loaded.app,
         payload,
         has_checkpointer=loaded.has_checkpointer,
+        context=loaded.context,
     )
     saved = save_run(
         config.root,

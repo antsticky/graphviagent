@@ -339,6 +339,57 @@ def _callback_config(
     return config
 
 
+_RESERVED_CONFIG_KEYS = {"thread_id", "checkpoint_id", "checkpoint_ns"}
+
+
+def _normalize_context(raw: dict | None) -> dict[str, Any] | None:
+    if not isinstance(raw, dict) or not raw:
+        return None
+    return dict(raw)
+
+
+def _merge_legacy_context(config: dict[str, Any], context: dict[str, Any]) -> None:
+    configurable = dict(config.get("configurable") or {})
+    for key, value in context.items():
+        name = str(key)
+        if name in _RESERVED_CONFIG_KEYS or name in configurable:
+            continue
+        configurable[name] = value
+    config["configurable"] = configurable
+
+
+def _unexpected_kwarg(exc: TypeError, name: str) -> bool:
+    text = str(exc).lower()
+    return name in text and "unexpected" in text
+
+
+def _open_stream(
+    app: Any,
+    incoming: Any,
+    config: dict[str, Any],
+    stream_kwargs: dict[str, Any],
+    context: dict[str, Any] | None,
+) -> Any:
+    kwargs = dict(stream_kwargs)
+    if context:
+        try:
+            return app.stream(incoming, config, context=context, **kwargs)
+        except TypeError as exc:
+            if not _unexpected_kwarg(exc, "context"):
+                kwargs.pop("stream_mode", None)
+                try:
+                    return app.stream(incoming, config, context=context, **kwargs)
+                except TypeError as inner:
+                    if not _unexpected_kwarg(inner, "context"):
+                        raise
+            _merge_legacy_context(config, context)
+    try:
+        return app.stream(incoming, config, **kwargs)
+    except TypeError:
+        kwargs.pop("stream_mode", None)
+        return app.stream(incoming, config, **kwargs)
+
+
 @contextmanager
 def _usage_scope(node: str | None, handler: _UsageHandler | None):
     previous_node = getattr(_capture_tls, "node", None)
@@ -1257,14 +1308,28 @@ def invoke_node(
     node_name: str,
     state: dict,
     config: dict[str, Any] | None = None,
+    context: dict[str, Any] | None = None,
 ) -> dict:
     node = app.nodes[node_name]
+    ctx = _normalize_context(context)
+    call_config: dict[str, Any] | None = dict(config) if config else ({} if ctx else None)
+    if call_config is not None and ctx:
+        _merge_legacy_context(call_config, ctx)
 
     def _call(target: Any) -> Any:
-        if config is None:
+        if ctx and call_config is not None:
+            try:
+                return target.invoke(state, call_config, context=ctx)
+            except TypeError as exc:
+                if not _unexpected_kwarg(exc, "context"):
+                    try:
+                        return target.invoke(state, call_config)
+                    except TypeError:
+                        return target.invoke(state)
+        if call_config is None:
             return target.invoke(state)
         try:
-            return target.invoke(state, config)
+            return target.invoke(state, call_config)
         except TypeError:
             return target.invoke(state)
 
@@ -1654,6 +1719,7 @@ def _execute_run(
     pause: bool = False,
     resume_value: Any = None,
     use_command: bool = False,
+    context: dict[str, Any] | None = None,
 ) -> None:
     run_id = thread_id or uuid4().hex
     usage = _UsageHandler()
@@ -1663,6 +1729,7 @@ def _execute_run(
     configurable = dict(config.get("configurable") or {})
     configurable["thread_id"] = run_id
     config["configurable"] = configurable
+    runtime_context = _normalize_context(context)
     has_checkpointer = has_checkpointer or _app_has_checkpointer(app)
     state: dict = copy.deepcopy(user_input) if isinstance(user_input, dict) else {}
     steps: list[dict] = []
@@ -1805,11 +1872,9 @@ def _execute_run(
             incoming: Any = _command_resume(resume_value) if use_command else None
         else:
             incoming = user_input or {}
-        try:
-            stream = app.stream(incoming, config, **stream_kwargs)
-        except TypeError:
-            stream_kwargs.pop("stream_mode", None)
-            stream = app.stream(incoming, config, **stream_kwargs)
+        stream = _open_stream(
+            app, incoming, config, stream_kwargs, runtime_context
+        )
         for event in stream:
             if cancel is not None and getattr(cancel, "is_set", lambda: False)():
                 raise RunCancelled("cancelled")
@@ -1972,6 +2037,7 @@ def iter_run_events(
     pause: bool = False,
     resume_value: Any = None,
     use_command: bool = False,
+    context: dict[str, Any] | None = None,
 ) -> Iterator[dict]:
     pending: queue.Queue[dict | None] = queue.Queue()
 
@@ -1995,6 +2061,7 @@ def iter_run_events(
                 pause=pause,
                 resume_value=resume_value,
                 use_command=use_command,
+                context=context,
             )
         except Exception as exc:
             pending.put({"type": "error", "error": _format_error(exc)})
@@ -2026,6 +2093,7 @@ def record_run(
     pause: bool = False,
     resume_value: Any = None,
     use_command: bool = False,
+    context: dict[str, Any] | None = None,
 ) -> dict:
     run = None
     error = None
@@ -2043,6 +2111,7 @@ def record_run(
         pause=pause,
         resume_value=resume_value,
         use_command=use_command,
+        context=context,
     ):
         if event.get("type") in {"done", "paused"}:
             run = event.get("run")
@@ -2091,6 +2160,7 @@ def _replay_native(
     continue_graph: bool,
     incoming: dict | None,
     state_patch: dict | None,
+    context: dict[str, Any] | None = None,
 ) -> dict:
     node = str(step.get("node") or "")
     incoming_state = _incoming_state(step, state_patch, incoming)
@@ -2112,6 +2182,7 @@ def _replay_native(
         resume=True,
         interrupt_after=None if continue_graph else [node],
         run_config=config,
+        context=context,
     )
     return _finish_replay_run(
         recorded,
@@ -2127,6 +2198,7 @@ def _replay_step_approximate(
     run: dict,
     step: dict,
     state_in: dict,
+    context: dict[str, Any] | None = None,
 ) -> dict:
     clock0 = time.perf_counter()
     wall0 = time.time()
@@ -2135,7 +2207,11 @@ def _replay_step_approximate(
     try:
         with _usage_scope(step["node"], usage):
             update = invoke_node(
-                app, step["node"], state_in, config=_callback_config(usage)
+                app,
+                step["node"],
+                state_in,
+                config=_callback_config(usage),
+                context=context,
             )
         if not isinstance(update, dict):
             update = {"value": update}
@@ -2195,6 +2271,7 @@ def replay_step(
     step_id: str,
     state_patch: dict | None = None,
     state_in: dict | None = None,
+    context: dict[str, Any] | None = None,
 ) -> dict:
     step = _find_step(run, step_id)
     if _can_native_replay(app, run):
@@ -2206,6 +2283,7 @@ def replay_step(
                 continue_graph=False,
                 incoming=state_in,
                 state_patch=state_patch,
+                context=context,
             )
         except Exception as exc:
             approx = _replay_step_approximate(
@@ -2213,11 +2291,16 @@ def replay_step(
                 run,
                 step,
                 _incoming_state(step, state_patch, state_in),
+                context=context,
             )
             approx["approximate_reason"] = _format_error(exc)
             return approx
     return _replay_step_approximate(
-        app, run, step, _incoming_state(step, state_patch, state_in)
+        app,
+        run,
+        step,
+        _incoming_state(step, state_patch, state_in),
+        context=context,
     )
 
 
@@ -2226,6 +2309,7 @@ def _resume_approximate(
     run: dict,
     step: dict,
     state: dict,
+    context: dict[str, Any] | None = None,
 ) -> dict:
     remaining = (run.get("steps") or [])[int(step.get("index") or 0) :]
     steps: list[dict] = []
@@ -2247,6 +2331,7 @@ def _resume_approximate(
                     recorded["node"],
                     incoming,
                     config=_callback_config(usage),
+                    context=context,
                 )
             if not isinstance(update, dict):
                 update = {"value": update}
@@ -2344,6 +2429,7 @@ def resume_from_step(
     step_id: str,
     state_patch: dict | None = None,
     state_in: dict | None = None,
+    context: dict[str, Any] | None = None,
 ) -> dict:
     step = _find_step(run, step_id)
     if _can_native_replay(app, run):
@@ -2355,15 +2441,24 @@ def resume_from_step(
                 continue_graph=True,
                 incoming=state_in,
                 state_patch=state_patch,
+                context=context,
             )
         except Exception as exc:
             approx = _resume_approximate(
-                app, run, step, _incoming_state(step, state_patch, state_in)
+                app,
+                run,
+                step,
+                _incoming_state(step, state_patch, state_in),
+                context=context,
             )
             approx["approximate_reason"] = _format_error(exc)
             return approx
     return _resume_approximate(
-        app, run, step, _incoming_state(step, state_patch, state_in)
+        app,
+        run,
+        step,
+        _incoming_state(step, state_patch, state_in),
+        context=context,
     )
 
 

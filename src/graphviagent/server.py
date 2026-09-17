@@ -6171,6 +6171,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                         pause=True,
                         resume_value=payload.get("resume_value") if use_command else None,
                         use_command=use_command,
+                        context=loaded.context,
                     ):
                         kind = event.get("type")
                         if kind in {"done", "paused"}:
@@ -6202,6 +6203,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                         thread_id=run_id,
                         has_checkpointer=loaded.has_checkpointer,
                         cancel=cancel,
+                        context=loaded.context,
                     )
                     saved = save_run(
                         self.workspace,
@@ -6237,6 +6239,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                         payload["step_id"],
                         patch,
                         incoming,
+                        context=loaded.context,
                     )
                 else:
                     new_run = replay_step(
@@ -6245,6 +6248,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                         payload["step_id"],
                         patch,
                         incoming,
+                        context=loaded.context,
                     )
                 saved = save_run(
                     self.workspace,

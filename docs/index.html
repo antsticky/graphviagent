@@ -992,6 +992,7 @@ context = {}
 [pipeline.decision]
 file = "decision_pipeline.py"</pre>
           <p>With <code>[pipeline.*]</code> tables, those files are the graphs (<code>file</code> may be any <code>.py</code>, including a path outside the serve root). Those files are watched too. Without them, GraphVIAgent globs <code>*_pipeline.py</code>.</p>
+          <p><code>context</code> is LangGraph runtime context (<code>runtime.context</code> / <code>get_runtime()</code>), not graph state. It is passed on every UI, CLI, HITL resume, and replay run. Empty <code>{}</code> is omitted.</p>
         </article>
         <article class="topic">
           <h3>Privacy and storage</h3>
@@ -1028,7 +1029,7 @@ file = "decision_pipeline.py"</pre>
           <p>Open the UI (default <code>127.0.0.1:8765</code>). <code>--open</code> launches a browser. <code>--host</code> and <code>--port</code> override the bind address. Binding beyond localhost requires <code>--expose</code> (and prints a warning): the server runs your pipeline Python, and only same-origin pages may call it.</p>
         </article>
       </div>
-      <p style="margin-top:14px">With a clone of the repo you can also run <code>graphviagent serve examples</code> to browse the bundled pipelines (branch, loop, parallel <code>Send</code>, tools, agents, waits, errors).</p>
+      <p style="margin-top:14px">With a clone of the repo you can also run <code>graphviagent serve examples</code> to browse the bundled pipelines (branch, loop, parallel <code>Send</code>, tools, agents, waits, runtime <code>context</code>, errors).</p>
     </section>
   </main>
 

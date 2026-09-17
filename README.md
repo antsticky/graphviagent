@@ -197,6 +197,7 @@ file = "decision_pipeline.py"
 - `root` and `pythonpath` are resolved relative to the toml file, not the process cwd
 - `pythonpath` is inserted on `sys.path` before the pipeline runs; the file's own directory is always added too
 - `env_file` loads `KEY=VALUE` lines without overwriting variables already in the environment
+- `context` is LangGraph runtime context (`runtime.context` / `get_runtime()`), not graph state. It is passed on every UI, CLI, HITL resume, and replay run. Empty `{}` is omitted
 - If any `[pipeline.*]` tables exist, those files are the pipelines (`file` may be any `.py`, including a path outside the serve root). Optional `factory = "build_graph"`
 - If there are no `[pipeline.*]` tables, GraphVIAgent still globs `*_pipeline.py`
 
@@ -213,6 +214,7 @@ graphviagent serve examples
 - `examples/dummy_pipeline.py` — name-length branch and a polish loop
 - `examples/tokens_pipeline.py` — dummy random `usage` prompt/completion on each node (Cost view)
 - `examples/echo_pipeline.py` — reverse a `text` field
+- `examples/context_pipeline.py` — `runtime.context.user_name` from `examples/graphviagent.toml`
 - `examples/math_pipeline.py` — add or divide; `{a: 12, b: 0, op: "div"}` raises
 - `examples/ratio_pipeline.py` — part / total; `{total: 0}` raises
 - `examples/stats_pipeline.py` — mean of a list; `{values: []}` raises

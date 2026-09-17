@@ -23,7 +23,6 @@ except ImportError:  # pragma: no cover
         pass
 
 _SKIP_NODES = {"__start__", "START", "__end__", "END"}
-MAX_RUN_THREADS = 3
 _LOG_LIMIT = 500
 _capture_tls = threading.local()
 _capture_lock = threading.Lock()
@@ -324,6 +323,16 @@ class _UsageHandler(BaseCallbackHandler):
             return self._by_node.pop(
                 node, {"prompt": 0, "completion": 0, "calls": 0}
             )
+
+
+def _langgraph_run_extra(
+    max_concurrency: int | None,
+    run_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    extra = dict(run_config or {})
+    if max_concurrency is not None and "max_concurrency" not in extra:
+        extra["max_concurrency"] = max_concurrency
+    return extra
 
 
 def _callback_config(
@@ -1710,7 +1719,7 @@ def _execute_run(
     thread_id: str | None,
     has_checkpointer: bool,
     cancel: Any | None,
-    max_concurrency: int,
+    max_concurrency: int | None,
     emit: Any,
     resume: bool = False,
     interrupt_after: list[str] | None = None,
@@ -1724,7 +1733,7 @@ def _execute_run(
     run_id = thread_id or uuid4().hex
     usage = _UsageHandler()
     config: dict[str, Any] = _callback_config(
-        usage, dict(run_config or {"max_concurrency": max_concurrency})
+        usage, _langgraph_run_extra(max_concurrency, run_config)
     )
     configurable = dict(config.get("configurable") or {})
     configurable["thread_id"] = run_id
@@ -2029,7 +2038,7 @@ def iter_run_events(
     thread_id: str | None = None,
     has_checkpointer: bool = False,
     cancel: Any | None = None,
-    max_concurrency: int = MAX_RUN_THREADS,
+    max_concurrency: int | None = None,
     resume: bool = False,
     interrupt_after: list[str] | None = None,
     interrupt_before: list[str] | None = None,
@@ -2085,7 +2094,7 @@ def record_run(
     thread_id: str | None = None,
     has_checkpointer: bool = False,
     cancel: Any | None = None,
-    max_concurrency: int = MAX_RUN_THREADS,
+    max_concurrency: int | None = None,
     resume: bool = False,
     interrupt_after: list[str] | None = None,
     interrupt_before: list[str] | None = None,
@@ -2161,11 +2170,14 @@ def _replay_native(
     incoming: dict | None,
     state_patch: dict | None,
     context: dict[str, Any] | None = None,
+    thread_id: str | None = None,
+    cancel: Any | None = None,
+    max_concurrency: int | None = None,
 ) -> dict:
     node = str(step.get("node") or "")
     incoming_state = _incoming_state(step, state_patch, incoming)
     patch = _editor_patch(step, incoming, state_patch)
-    fork_id = uuid4().hex
+    fork_id = thread_id or uuid4().hex
     config: dict[str, Any] | None = None
     try:
         snapshot = _snapshot_before_step(app, run, step)
@@ -2179,6 +2191,8 @@ def _replay_native(
         run.get("input") if isinstance(run.get("input"), dict) else incoming_state,
         thread_id=fork_id,
         has_checkpointer=True,
+        cancel=cancel,
+        max_concurrency=max_concurrency,
         resume=True,
         interrupt_after=None if continue_graph else [node],
         run_config=config,
@@ -2199,6 +2213,7 @@ def _replay_step_approximate(
     step: dict,
     state_in: dict,
     context: dict[str, Any] | None = None,
+    thread_id: str | None = None,
 ) -> dict:
     clock0 = time.perf_counter()
     wall0 = time.time()
@@ -2243,7 +2258,7 @@ def _replay_step_approximate(
     _attach_error(new_step, update)
     return _finish_replay_run(
         {
-            "id": uuid4().hex,
+            "id": thread_id or uuid4().hex,
             "input": jsonable(state_in),
             "steps": [new_step],
             "result": jsonable(state_out),
@@ -2272,6 +2287,9 @@ def replay_step(
     state_patch: dict | None = None,
     state_in: dict | None = None,
     context: dict[str, Any] | None = None,
+    thread_id: str | None = None,
+    cancel: Any | None = None,
+    max_concurrency: int | None = None,
 ) -> dict:
     step = _find_step(run, step_id)
     if _can_native_replay(app, run):
@@ -2284,6 +2302,9 @@ def replay_step(
                 incoming=state_in,
                 state_patch=state_patch,
                 context=context,
+                thread_id=thread_id,
+                cancel=cancel,
+                max_concurrency=max_concurrency,
             )
         except Exception as exc:
             approx = _replay_step_approximate(
@@ -2292,6 +2313,7 @@ def replay_step(
                 step,
                 _incoming_state(step, state_patch, state_in),
                 context=context,
+                thread_id=thread_id,
             )
             approx["approximate_reason"] = _format_error(exc)
             return approx
@@ -2301,6 +2323,7 @@ def replay_step(
         step,
         _incoming_state(step, state_patch, state_in),
         context=context,
+        thread_id=thread_id,
     )
 
 
@@ -2310,6 +2333,7 @@ def _resume_approximate(
     step: dict,
     state: dict,
     context: dict[str, Any] | None = None,
+    thread_id: str | None = None,
 ) -> dict:
     remaining = (run.get("steps") or [])[int(step.get("index") or 0) :]
     steps: list[dict] = []
@@ -2401,7 +2425,7 @@ def _resume_approximate(
 
     return _finish_replay_run(
         {
-            "id": uuid4().hex,
+            "id": thread_id or uuid4().hex,
             "input": jsonable(state),
             "steps": steps,
             "result": jsonable(current),
@@ -2430,6 +2454,9 @@ def resume_from_step(
     state_patch: dict | None = None,
     state_in: dict | None = None,
     context: dict[str, Any] | None = None,
+    thread_id: str | None = None,
+    cancel: Any | None = None,
+    max_concurrency: int | None = None,
 ) -> dict:
     step = _find_step(run, step_id)
     if _can_native_replay(app, run):
@@ -2442,6 +2469,9 @@ def resume_from_step(
                 incoming=state_in,
                 state_patch=state_patch,
                 context=context,
+                thread_id=thread_id,
+                cancel=cancel,
+                max_concurrency=max_concurrency,
             )
         except Exception as exc:
             approx = _resume_approximate(
@@ -2450,6 +2480,7 @@ def resume_from_step(
                 step,
                 _incoming_state(step, state_patch, state_in),
                 context=context,
+                thread_id=thread_id,
             )
             approx["approximate_reason"] = _format_error(exc)
             return approx
@@ -2459,6 +2490,7 @@ def resume_from_step(
         step,
         _incoming_state(step, state_patch, state_in),
         context=context,
+        thread_id=thread_id,
     )
 
 

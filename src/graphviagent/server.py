@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import queue
 import threading
+import time
 import webbrowser
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -10,22 +12,36 @@ from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 from graphviagent import __version__
-from graphviagent.config import GVAConfig, activate_config, load_config
+from graphviagent.config import (
+    DEFAULT_CONCURRENT,
+    GVAConfig,
+    activate_config,
+    apply_limit_overrides,
+    effective_queue_limit,
+    load_config,
+)
 from graphviagent.discover import discover_pipelines
 from graphviagent.graph_hash import attach_graph_meta
 from graphviagent.load import LoadedPipeline, load_pipeline
-from graphviagent.record import MAX_RUN_THREADS, iter_run_events, record_run, replay_step, resume_from_step
+from graphviagent.record import iter_run_events, replay_step, resume_from_step
 from graphviagent.render import ascii_tree, unrolled_mermaid
+from graphviagent.scheduler import DuplicateRun, HEARTBEAT_S, QueueFull, RunJob, RunScheduler, SENTINEL
 from graphviagent.store import (
+    attach_run_timing,
     collect_stats,
     cancel_paused_run,
+    cancel_queue_stub,
     delete_run,
     delete_runs,
     import_run,
     list_all_runs,
     list_runs,
     load_run,
+    mark_run_started,
     merge_resume_run,
+    pipeline_has_busy_runs,
+    run_is_busy,
+    save_queued_stub,
     save_run,
 )
 from graphviagent.watch import PipelineWatcher, file_sha256, snapshot_files
@@ -215,6 +231,10 @@ PAGE = r"""<!DOCTYPE html>
       background: #a8a29e;
       animation: live-pulse 1.1s ease-in-out infinite;
     }
+    .status-dot.queued {
+      background: #38bdf8;
+      animation: live-pulse 1.1s ease-in-out infinite;
+    }
     .page { height: calc(100vh - 48px); overflow: auto; padding: 24px 28px; }
     .page[hidden], .layout[hidden] { display: none; }
     .page-inner { width: 100%; max-width: none; }
@@ -270,6 +290,10 @@ PAGE = r"""<!DOCTYPE html>
     }
     .af-bar.canceling {
       background: #a8a29e;
+      animation: live-pulse 1.1s ease-in-out infinite;
+    }
+    .af-bar.queued {
+      background: #38bdf8;
       animation: live-pulse 1.1s ease-in-out infinite;
     }
     .af-bar:hover { filter: brightness(1.15); }
@@ -739,6 +763,9 @@ PAGE = r"""<!DOCTYPE html>
     }
     #history .pill.mode-canceling, .item .pill.mode-canceling {
       color: #e7e5e4; background: rgba(168, 162, 158, 0.28);
+    }
+    #history .pill.mode-queued, .item .pill.mode-queued {
+      color: #7dd3fc; background: rgba(56, 189, 248, 0.2);
     }
     .g-body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
     .g-name { font-size: 13px; font-weight: 500; }
@@ -1450,6 +1477,7 @@ PAGE = r"""<!DOCTYPE html>
         <select id="runStatus">
           <option value="all">all</option>
           <option value="running">running</option>
+          <option value="queued">queued</option>
           <option value="ok">success</option>
           <option value="paused">paused</option>
           <option value="canceled">canceled</option>
@@ -1633,6 +1661,10 @@ PAGE = r"""<!DOCTYPE html>
     let graphViewMode = "graph";
     let inflightRuns = [];
     let pendingCancel = null;
+    let runLimit = 3;
+    let queueLimit = 12;
+    let slotActive = 0;
+    let slotQueued = 0;
     let breakpoints = {};
 
     const $ = (id) => document.getElementById(id);
@@ -1709,7 +1741,26 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function runIsPaused(run) {
-      return Boolean(run && run.paused && !run.error && !runIsCanceled(run));
+      return Boolean(
+        run &&
+        run.paused &&
+        !run.error &&
+        !runIsCanceled(run) &&
+        !runIsQueued(run) &&
+        !runIsLive(run)
+      );
+    }
+
+    function runIsQueued(run) {
+      return Boolean(run && (run.queued || run.status === "queued"));
+    }
+
+    function runIsLive(run) {
+      return Boolean(run && (run.live || run.status === "running" || run.status === "canceling"));
+    }
+
+    function runIsBusy(run) {
+      return runIsQueued(run) || runIsLive(run);
     }
 
     function formatResumeDefault(run) {
@@ -1756,13 +1807,15 @@ PAGE = r"""<!DOCTYPE html>
       const canceling = currentIsCanceling();
       btn.textContent = canceling ? "Canceling" : "Cancel";
       btn.classList.toggle("canceling", canceling);
-      btn.disabled = canceling || (!currentLiveJob() && !runIsPaused(currentRun));
+      btn.disabled = canceling || !(currentRun && currentRun.id && (
+        currentLiveJob() || runIsBusy(currentRun) || runIsPaused(currentRun)
+      ));
     }
 
     function syncPauseControls() {
       const banner = $("pauseBanner");
       const panel = $("hitlPanel");
-      const paused = runIsPaused(currentRun) && !inflightRuns.length;
+      const paused = runIsPaused(currentRun);
       const hits = paused ? hitlPayloads(currentRun) : [];
       const nxt = (currentRun && currentRun.next) || [];
       $("continueBtn").disabled = !paused;
@@ -2063,7 +2116,14 @@ PAGE = r"""<!DOCTYPE html>
 
     async function api(path, opts) {
       const res = await fetch(path, { cache: "no-store", ...(opts || {}) });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 429) {
+        throw new Error(
+          data.error ||
+          ("queue full (" + (data.queued || 0) + "/" + (data.queue_limit || queueLimit) +
+            " waiting, " + (data.active || 0) + "/" + (data.limit || runLimit) + " running)")
+        );
+      }
       if (!res.ok) throw new Error(data.error || res.statusText);
       return data;
     }
@@ -2071,7 +2131,10 @@ PAGE = r"""<!DOCTYPE html>
     function pipelineStatus(p) {
       if (pipelineIsCanceling(p)) return "canceling";
       const jobs = inflightRuns.filter((job) => p && job.fileId === p.id);
-      if (jobs.length) return "live";
+      if (jobs.some((job) => !job.queued)) return "live";
+      if (jobs.length) return "queued";
+      if (p && p.last_run && (p.last_run.status === "running" || p.last_run.status === "canceling")) return "live";
+      if (p && p.last_run && p.last_run.status === "queued") return "queued";
       if (p && p.error) return "error";
       if (p && p.last_run && p.last_run.status === "error") return "error";
       if (p && p.last_run && p.last_run.status === "canceled") return "canceled";
@@ -2082,6 +2145,7 @@ PAGE = r"""<!DOCTYPE html>
 
     function runDotClass(run) {
       if (run && (run.status === "canceling" || run.canceling)) return "canceling";
+      if (run && (run.status === "queued" || run.queued)) return "queued";
       if (run && (run.live || run.status === "running")) return "running";
       if (runIsCanceled(run) || (run && run.status === "canceled")) return "canceled";
       if (run && (run.status === "paused" || run.paused)) return "paused";
@@ -2100,6 +2164,9 @@ PAGE = r"""<!DOCTYPE html>
 
     function runHoverText(run) {
       if (run && (run.status === "canceling" || run.canceling)) return "canceling";
+      if (run && (run.status === "queued" || run.queued)) {
+        return run.queue_position ? "queued #" + run.queue_position : "queued";
+      }
       if (run && (run.live || run.status === "running")) return "running";
       const when = run.created_at ? new Date(run.created_at) : null;
       const date = when && !Number.isNaN(when.getTime())
@@ -2189,7 +2256,9 @@ PAGE = r"""<!DOCTYPE html>
             input: run.input != null ? run.input : job.input,
             created_at: run.started_at || job.started_at,
             elapsed_ms: run.elapsed_ms,
-            status: job.canceling ? "canceling" : "running",
+            status: job.canceling ? "canceling" : job.queued ? "queued" : "running",
+            queue_position: job.position,
+            queued: Boolean(job.queued),
             mode: "run",
             live: true,
             steps: run.steps || [],
@@ -2198,10 +2267,19 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function boardRunsForPipeline(p) {
-      const live = liveRunsForPipeline(p);
-      const liveIds = {};
-      live.forEach((row) => { liveIds[row.id] = true; });
-      return live.concat((p.recent || []).filter((row) => !liveIds[row.id]));
+      const byId = {};
+      (p.recent || []).forEach((row) => {
+        if (row && row.id) byId[row.id] = row;
+      });
+      inflightRuns.filter((job) => job.fileId === p.id).forEach((job) => {
+        byId[job.id] = liveHistoryRow(job);
+      });
+      return Object.keys(byId).map((id) => byId[id]).sort((a, b) => {
+        const left = a.created_at || "";
+        const right = b.created_at || "";
+        if (left === right) return 0;
+        return left < right ? 1 : -1;
+      });
     }
 
     let pipeBoardLiveTimer = 0;
@@ -2258,7 +2336,8 @@ PAGE = r"""<!DOCTYPE html>
         clear.type = "button";
         clear.className = "ghost danger";
         clear.textContent = "Clear";
-        clear.disabled = !newestFirst.length;
+        clear.disabled = !newestFirst.length || newestFirst.some((run) => runIsBusy(run));
+        clear.title = clear.disabled && newestFirst.length ? "Cancel queued or running jobs first" : "";
         clear.onclick = () => clearPipelineRuns(p).catch((e) => alert(e.message));
         actions.appendChild(lastEl);
         actions.appendChild(toTrace);
@@ -2284,7 +2363,7 @@ PAGE = r"""<!DOCTYPE html>
           bar.type = "button";
           bar.className = "af-bar " + runDotClass(run);
           const ms = Number(run.elapsed_ms) || 0;
-          const liveH = run.live || run.status === "running" || run.status === "canceling" ? 22 : 6;
+          const liveH = run.live || run.status === "running" || run.status === "canceling" || run.status === "queued" ? 22 : 6;
           bar.style.height = Math.max(liveH, Math.round((ms / maxMs) * 52)) + "px";
           bar.title = runHoverText(run);
           bar.onclick = () => openPipelineRun(p.id, run.id);
@@ -2449,17 +2528,27 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     async function openPipelineRun(pipelineId, runId) {
-      const job = inflightRuns.find((item) => item.id === runId);
       if (pipelineId !== fileId) await selectPipeline(pipelineId);
-      if (job && job.run) {
-        currentRun = job.run;
-        selectedStep = null;
-        renderRun(currentRun);
+      if (followRun(runId)) {
         showView("trace");
         return;
       }
       await openRun(runId);
       showView("trace");
+    }
+
+    async function loadMeta() {
+      try {
+        const data = await api("/api/meta");
+        const n = Number(data.concurrent);
+        if (Number.isFinite(n) && n >= 1) runLimit = Math.floor(n);
+        const q = Number(data.queue_limit);
+        if (Number.isFinite(q) && q >= 0) queueLimit = Math.floor(q);
+        else queueLimit = runLimit * 4;
+        if (Number.isFinite(Number(data.active))) slotActive = Math.max(0, Math.floor(Number(data.active)));
+        if (Number.isFinite(Number(data.queued))) slotQueued = Math.max(0, Math.floor(Number(data.queued)));
+        if (Number.isFinite(Number(data.limit)) && Number(data.limit) >= 1) runLimit = Math.floor(Number(data.limit));
+      } catch (err) {}
     }
 
     async function loadPipelines() {
@@ -2475,13 +2564,17 @@ PAGE = r"""<!DOCTYPE html>
       box.innerHTML = "";
       pipelines.forEach((p) => {
         const canceling = pipelineIsCanceling(p);
-        const live = inflightRuns.some((job) => job.fileId === p.id) && !canceling;
+        const jobs = inflightRuns.filter((job) => job.fileId === p.id);
+        const queued = jobs.length > 0 && jobs.every((job) => job.queued) && !canceling;
+        const live = jobs.some((job) => !job.queued) && !canceling;
         const btn = document.createElement("button");
         btn.className = "item" + (p.error ? " error" : "") + (p.id === fileId ? " active" : "");
+        const lastQueued = p.last_run && p.last_run.status === "queued";
+        const lastLive = p.last_run && (p.last_run.status === "running" || p.last_run.status === "canceling");
         btn.innerHTML =
           '<span class="status-dot ' + pipelineStatus(p) + '"></span> ' +
           escapeHtml(p.stem + (p.error ? " (error)" : "")) +
-          (canceling ? ' <span class="pill mode-canceling">canceling</span>' : live ? ' <span class="pill mode-running">running</span>' : "");
+          (canceling ? ' <span class="pill mode-canceling">canceling</span>' : live || lastLive ? ' <span class="pill mode-running">running</span>' : queued || lastQueued ? ' <span class="pill mode-queued">queued</span>' : "");
         btn.title = p.error || p.id;
         btn.onclick = () => selectPipeline(p.id);
         box.appendChild(btn);
@@ -2570,39 +2663,57 @@ PAGE = r"""<!DOCTYPE html>
 
     function runMatchesFilter(run) {
       const status = $("runStatus").value;
-      if (status !== "all" && run.status !== status) return false;
+      if (status === "running") {
+        if (!(runIsLive(run) || run.status === "running" || run.status === "canceling")) return false;
+      } else if (status === "queued") {
+        if (!runIsQueued(run)) return false;
+      } else if (status === "paused") {
+        if (!runIsPaused(run) && run.status !== "paused") return false;
+      } else if (status !== "all" && run.status !== status) {
+        return false;
+      }
       const q = ($("runFilter").value || "").trim().toLowerCase();
       if (!q) return true;
       if (q === "has error" || q === "error" || q === "failed") return run.status === "error";
       if (q === "canceled" || q === "cancelled" || q === "cancel") return run.status === "canceled";
+      if (q === "queued" || q === "queue") return runIsQueued(run);
       if (q === "ok" || q === "success") return run.status === "ok";
-      if (q === "paused") return run.status === "paused";
-      if (q === "running" || q === "live") return run.status === "running" || run.status === "canceling";
+      if (q === "paused") return runIsPaused(run) || run.status === "paused";
+      if (q === "running" || q === "live") return runIsLive(run) || run.status === "running" || run.status === "canceling";
       return inputSearchText(run.input).includes(q);
     }
 
-    function liveHistoryRows() {
-      return inflightRuns
-        .filter((job) => job.fileId === fileId)
-        .map((job) => {
-          const run = job.run || {};
-          return {
-            id: job.id,
-            input: run.input != null ? run.input : job.input,
-            created_at: run.started_at || job.started_at,
-            elapsed_ms: run.elapsed_ms,
-            status: job.canceling ? "canceling" : "running",
-            mode: "run",
-            live: true,
-          };
-        });
+    function liveHistoryRow(job) {
+      const run = job.run || {};
+      return {
+        id: job.id,
+        input: run.input != null ? run.input : job.input,
+        created_at: run.started_at || job.started_at,
+        elapsed_ms: run.elapsed_ms,
+        status: job.canceling ? "canceling" : job.queued ? "queued" : "running",
+        queue_position: job.position,
+        queued: Boolean(job.queued),
+        running: !job.queued,
+        mode: run.mode || "run",
+        live: !job.queued,
+        steps: run.steps || [],
+      };
     }
 
     function historyDisplayRows() {
-      const live = liveHistoryRows();
-      const liveIds = {};
-      live.forEach((row) => { liveIds[row.id] = true; });
-      return live.concat(historyRuns.filter((row) => !liveIds[row.id]));
+      const byId = {};
+      (historyRuns || []).forEach((row) => {
+        if (row && row.id) byId[row.id] = row;
+      });
+      inflightRuns.filter((job) => job.fileId === fileId).forEach((job) => {
+        byId[job.id] = liveHistoryRow(job);
+      });
+      return Object.keys(byId).map((id) => byId[id]).sort((a, b) => {
+        const left = a.created_at || "";
+        const right = b.created_at || "";
+        if (left === right) return 0;
+        return left < right ? 1 : -1;
+      });
     }
 
     function renderHistory() {
@@ -2617,9 +2728,9 @@ PAGE = r"""<!DOCTYPE html>
         const btn = document.createElement("button");
         btn.className = "run" + (currentRun && currentRun.id === r.id ? " active" : "");
         const mode = r.mode || "run";
-        const pill = runIsCanceled(r) ? "canceled" : r.status === "error" ? "error" : r.status === "paused" ? "paused" : r.status === "canceling" ? "canceling" : r.status === "running" ? "running" : mode;
-        const known = { run: 1, replay: 1, replay_from: 1, error: 1, canceled: 1, canceling: 1, approximate: 1, paused: 1, running: 1 };
-        const pillClass = known[pill] ? pill : "run";
+        const pill = runIsCanceled(r) ? "canceled" : r.status === "error" ? "error" : r.status === "paused" ? "paused" : r.status === "canceling" ? "canceling" : r.status === "queued" ? (r.queue_position ? "queued #" + r.queue_position : "queued") : r.status === "running" ? "running" : mode;
+        const known = { run: 1, replay: 1, replay_from: 1, error: 1, canceled: 1, canceling: 1, queued: 1, approximate: 1, paused: 1, running: 1 };
+        const pillClass = known[pill] ? pill : (String(pill).indexOf("queued") === 0 ? "queued" : "run");
         const outdated = isOutdated(r)
           ? '<span class="pill mode-outdated">outdated</span>'
           : "";
@@ -2638,15 +2749,19 @@ PAGE = r"""<!DOCTYPE html>
       });
     }
 
+    function followRun(id) {
+      const job = inflightRuns.find((item) => item.id === id);
+      if (!job || !job.run) return false;
+      currentRun = job.run;
+      selectedStep = null;
+      renderRun(currentRun);
+      renderHistory();
+      syncRunControls();
+      return true;
+    }
+
     function openHistoryRun(row) {
-      const job = inflightRuns.find((item) => item.id === row.id);
-      if (job && job.run) {
-        currentRun = job.run;
-        selectedStep = null;
-        renderRun(currentRun);
-        renderHistory();
-        return;
-      }
+      if (followRun(row.id)) return;
       openRun(row.id);
     }
 
@@ -2658,6 +2773,7 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     async function openRun(id) {
+      if (followRun(id)) return;
       currentRun = await api("/api/runs/" + id);
       selectedStep = null;
       renderRun(currentRun);
@@ -3285,6 +3401,8 @@ PAGE = r"""<!DOCTYPE html>
       $("replayBtn").disabled = disabled;
       $("replayFromBtn").disabled = disabled;
       $("exportBtn").disabled = !currentRun;
+      const del = $("deleteBtn");
+      if (del) del.disabled = !currentRun || runIsBusy(currentRun);
     }
 
     function selectedStepRecord() {
@@ -4260,17 +4378,22 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function syncRunControls() {
-      const n = inflightRuns.length;
-      $("runBtn").disabled = n >= 3;
+      const runningN = inflightRuns.filter((job) => !job.queued).length;
+      const queuedN = inflightRuns.filter((job) => job.queued).length;
+      const active = Math.max(slotActive, runningN);
+      const waiting = Math.max(slotQueued, queuedN);
+      const queueFull = active >= runLimit && waiting >= queueLimit;
+      $("runBtn").disabled = queueFull;
       $("runBtn").textContent = "Run";
       const live = $("runLive");
       const cancelingN = inflightRuns.filter((job) => job.canceling).length;
-      live.hidden = n === 0;
-      live.classList.toggle("canceling", cancelingN > 0 && cancelingN === n);
+      const n = inflightRuns.length;
+      live.hidden = active + waiting === 0 && n === 0;
+      live.classList.toggle("canceling", cancelingN > 0 && cancelingN === n && n > 0);
       if (n && cancelingN === n) {
-        live.textContent = n === 1 ? "Canceling" : "Canceling " + n + "/3";
+        live.textContent = n === 1 ? "Canceling" : "Canceling " + n + "/" + runLimit;
       } else {
-        live.textContent = n ? "Running " + n + "/3" : "Running";
+        live.textContent = "running " + active + "/" + runLimit + " · queued " + waiting;
       }
       syncPauseControls();
       paintPipelines();
@@ -4315,12 +4438,32 @@ PAGE = r"""<!DOCTYPE html>
       const type = event && event.type;
       const run = job.run || (job.run = { id: job.id, input: job.input, steps: [], result: {}, logs: [] });
       const viewing = viewingJob(job);
+      if (type === "ping") return;
+      if (type === "queued") {
+        job.queued = true;
+        job.position = event.position;
+        run.status = "queued";
+        run.queued = true;
+        run.queue_position = event.position;
+        if (Number.isFinite(Number(event.active))) slotActive = Math.max(0, Math.floor(Number(event.active)));
+        if (Number.isFinite(Number(event.queued))) slotQueued = Math.max(0, Math.floor(Number(event.queued)));
+        if (Number.isFinite(Number(event.limit)) && Number(event.limit) >= 1) runLimit = Math.floor(Number(event.limit));
+        if (Number.isFinite(Number(event.queue_limit)) && Number(event.queue_limit) >= 0) queueLimit = Math.floor(Number(event.queue_limit));
+        if (viewing) currentRun = run;
+        renderHistory();
+        schedulePipeBoardRefresh();
+        syncRunControls();
+        return;
+      }
       if (type === "start") {
+        job.queued = false;
+        run.status = "running";
+        run.queued = false;
         run.id = event.run_id || run.id;
         job.id = run.id;
         run.input = event.input || run.input;
         run.started_at = event.started_at;
-        if (viewing || !currentRun) currentRun = run;
+        if (viewing) currentRun = run;
         renderHistory();
         schedulePipeBoardRefresh();
         syncRunControls();
@@ -4374,9 +4517,10 @@ PAGE = r"""<!DOCTYPE html>
         if (viewing) appendLog(event, true);
         return;
       }
-      if (type === "done" || type === "paused") {
-        job.run = event.run;
-        if (job.fileId === fileId && event.run) {
+      if (type === "done" || type === "paused" || type === "canceled") {
+        job.queued = false;
+        if (event.run) job.run = event.run;
+        if (viewing && event.run) {
           currentRun = event.run;
           selectedStep = null;
           renderRun(currentRun);
@@ -4393,14 +4537,6 @@ PAGE = r"""<!DOCTYPE html>
     async function streamLive(extra) {
       extra = extra || {};
       const resume = Boolean(extra.resume);
-      if (!resume && inflightRuns.length >= 3) {
-        alert("At most 3 runs can execute at once");
-        return;
-      }
-      if (resume && inflightRuns.length) {
-        alert("A run is already in flight");
-        return;
-      }
       if (resume && !runIsPaused(currentRun)) {
         alert("Open a paused run first");
         return;
@@ -4413,8 +4549,8 @@ PAGE = r"""<!DOCTYPE html>
       const runId = resume ? currentRun.id : newRunId();
       const controller = new AbortController();
       const liveRun = resume
-        ? currentRun
-        : { id: runId, input: input, steps: [], result: {}, logs: [] };
+        ? Object.assign({}, currentRun, { status: "queued", queued: true })
+        : { id: runId, input: input, steps: [], result: {}, logs: [], status: "queued", queued: true };
       const job = {
         id: runId,
         controller: controller,
@@ -4422,6 +4558,8 @@ PAGE = r"""<!DOCTYPE html>
         input: liveRun.input,
         started_at: new Date().toISOString(),
         resume: resume,
+        queued: true,
+        position: 0,
         run: liveRun,
       };
       inflightRuns.push(job);
@@ -4474,12 +4612,19 @@ PAGE = r"""<!DOCTYPE html>
         });
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
+          if (res.status === 429) {
+            throw new Error(
+              data.error ||
+              ("queue full (" + (data.queued || 0) + "/" + (data.queue_limit || queueLimit) +
+                " waiting, " + (data.active || 0) + "/" + (data.limit || runLimit) + " running)")
+            );
+          }
           throw new Error(data.error || res.statusText);
         }
         let finished = false;
         await readSse(res, (event) => {
           handleLiveEvent(event, pendingByNode, job);
-          if (event && (event.type === "done" || event.type === "paused")) finished = true;
+          if (event && (event.type === "done" || event.type === "paused" || event.type === "canceled")) finished = true;
         });
         if (!finished && !(job.run && (job.run.error || job.run.canceled))) {
           throw new Error("run produced no result");
@@ -4488,11 +4633,13 @@ PAGE = r"""<!DOCTYPE html>
         if (err && err.name === "AbortError") return;
         throw err;
       } finally {
+        const keepId = job.run && job.run.id;
+        const watching = Boolean(currentRun && (currentRun.id === job.id || currentRun.id === keepId));
         inflightRuns = inflightRuns.filter((item) => item !== job);
         syncRunControls();
+        await loadMeta();
         await loadPipelines();
-        const keepId = job.run && job.run.id;
-        if (keepId && job.fileId === fileId) {
+        if (watching && keepId && job.fileId === fileId) {
           try {
             await openRun(keepId);
           } catch (err) {
@@ -4531,11 +4678,10 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     async function cancelRuns() {
-      const job = currentLiveJob();
-      const id = job
-        ? job.id
-        : (runIsPaused(currentRun) && currentRun.id ? currentRun.id : "");
+      const id = currentRun && currentRun.id;
       if (!id) return;
+      if (!(currentLiveJob() || runIsBusy(currentRun) || runIsPaused(currentRun))) return;
+      const job = inflightRuns.find((item) => item.id === id) || null;
       if (job && job.canceling) return;
       if (!job && (pendingCancel || (currentRun && currentRun.status === "canceling"))) return;
       if (job) job.canceling = true;
@@ -4554,7 +4700,7 @@ PAGE = r"""<!DOCTYPE html>
       }).catch(() => null);
       if (!job) {
         try {
-          await openRun(id);
+          if (currentRun && currentRun.id === id) await openRun(id);
         } finally {
           pendingCancel = null;
           syncRunControls();
@@ -4567,7 +4713,7 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function isOutdated(run) {
-      if (!run || run.live || run.status === "running" || run.status === "canceling") return false;
+      if (!run || run.live || run.status === "running" || run.status === "canceling" || run.status === "queued") return false;
       if (inflightRuns.some((job) => job.id === run.id)) return false;
       const pipe = currentPipeline();
       if (!pipe) return false;
@@ -4667,24 +4813,64 @@ PAGE = r"""<!DOCTYPE html>
       const input = readNodeInput();
       closeNodeView();
       if (!(await confirmOutdatedReplay())) return;
-      currentRun = await api("/api/rerun", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          run_id: currentRun.id,
-          step_id: selectedStep,
-          mode,
-          input,
-        }),
-      });
-      selectedStep = (currentRun.steps && currentRun.steps[0] && currentRun.steps[0].step_id) || null;
-      renderRun(currentRun);
-      await loadHistory();
-      await loadPipelines();
+      const parentId = currentRun.id;
+      const runId = newRunId();
+      const job = {
+        id: runId,
+        controller: null,
+        fileId: fileId,
+        input: currentRun.input,
+        started_at: new Date().toISOString(),
+        resume: false,
+        queued: true,
+        position: 0,
+        run: {
+          id: runId,
+          input: currentRun.input,
+          steps: [],
+          result: {},
+          logs: [],
+          status: "queued",
+          queued: true,
+          mode: mode === "resume" ? "replay_from" : "replay",
+          parent_id: parentId,
+        },
+      };
+      inflightRuns.push(job);
+      currentRun = job.run;
+      syncRunControls();
+      try {
+        const saved = await api("/api/rerun", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            run_id: parentId,
+            new_run_id: runId,
+            step_id: selectedStep,
+            mode,
+            input,
+          }),
+        });
+        job.run = saved;
+        if (currentRun && currentRun.id === runId) {
+          currentRun = saved;
+          selectedStep = (currentRun.steps && currentRun.steps[0] && currentRun.steps[0].step_id) || null;
+          renderRun(currentRun);
+        }
+      } finally {
+        inflightRuns = inflightRuns.filter((item) => item !== job);
+        syncRunControls();
+        await loadHistory();
+        await loadPipelines();
+        await loadMeta();
+      }
     }
 
     async function removeRun() {
       if (!currentRun) return;
+      if (runIsBusy(currentRun)) {
+        throw new Error("cancel the run before deleting");
+      }
       await api("/api/runs/" + currentRun.id, { method: "DELETE" });
       await loadHistory();
       await loadPipelines();
@@ -4701,7 +4887,15 @@ PAGE = r"""<!DOCTYPE html>
     async function clearPipelineRuns(p) {
       const page = $("pipelinesView");
       const top = page ? page.scrollTop : 0;
-      if (!p || !confirm("Delete all runs for " + p.stem + "?")) {
+      if (!p) {
+        if (page) page.scrollTop = top;
+        return;
+      }
+      if (boardRunsForPipeline(p).some((run) => runIsBusy(run)) || inflightRuns.some((job) => job.fileId === p.id)) {
+        if (page) page.scrollTop = top;
+        throw new Error("cancel queued or running jobs before clearing");
+      }
+      if (!confirm("Delete all runs for " + p.stem + "?")) {
         if (page) page.scrollTop = top;
         return;
       }
@@ -5837,11 +6031,22 @@ PAGE = r"""<!DOCTYPE html>
       if (!metric) return;
       bindMetricTip(el, metricTipHtml(metric));
     });
-    loadPipelines().then(() => {
+    Promise.all([loadMeta(), loadPipelines()]).then(() => {
       showView(viewFromHash());
     }).catch((e) => alert(e.message));
     setInterval(() => pollScan(), 2000);
     setInterval(() => pollChanges(), 500);
+    setInterval(() => {
+      if (document.hidden) return;
+      loadMeta().then(() => {
+        syncRunControls();
+        if (slotActive || slotQueued) {
+          const tasks = [loadPipelines()];
+          if (fileId) tasks.push(loadHistory());
+          return Promise.all(tasks);
+        }
+      }).catch(() => {});
+    }, 2000);
   </script>
 </body>
 </html>
@@ -5853,11 +6058,16 @@ class GraphVIHandler(BaseHTTPRequestHandler):
     cache: dict[str, LoadedPipeline]
     config: GVAConfig
     watcher: PipelineWatcher | None = None
-    active_runs: dict[str, threading.Event] = {}
-    run_lock = threading.Lock()
     bind_host: str = "127.0.0.1"
     bind_port: int = 8765
     loopback_only: bool = True
+    concurrent: int = DEFAULT_CONCURRENT
+    node_concurrency: int | None = None
+    queue_limit: int = DEFAULT_CONCURRENT * 4
+    cli_concurrent: int | None = None
+    cli_node_concurrency: int | None = None
+    cli_queue_limit: int | None = None
+    scheduler: RunScheduler | None = None
 
     def log_message(self, format: str, *args) -> None:
         print(f"[graphviagent] {args[0]}")
@@ -5939,40 +6149,248 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         text = str(value).replace("-", "").strip().lower()
         return text or None
 
-    def _begin_run(self, run_id: str, *aliases: object) -> threading.Event:
-        keys: list[str] = []
-        for value in (run_id, *aliases):
-            key = self._run_key(value)
-            if key and key not in keys:
-                keys.append(key)
-        if not keys:
-            raise ValueError("run_id is required")
-        with self.run_lock:
-            if len({id(event) for event in self.active_runs.values()}) >= MAX_RUN_THREADS:
-                raise RuntimeError("at most 3 runs can execute at once")
-            cancel = threading.Event()
-            for key in keys:
-                self.active_runs[key] = cancel
-            return cancel
-
-    def _end_run(self, run_id: str) -> None:
-        key = self._run_key(run_id)
-        with self.run_lock:
-            cancel = self.active_runs.get(key) if key else None
-            if cancel is None:
-                return
-            for alias, event in list(self.active_runs.items()):
-                if event is cancel:
-                    self.active_runs.pop(alias, None)
+    def _begin_run(self, run_id: str, *aliases: object) -> None:
+        sched = self.scheduler
+        if sched is None:
+            raise RuntimeError("run scheduler is not running")
+        if sched.has_job(run_id):
+            raise DuplicateRun(run_id)
+        for alias in aliases:
+            key = self._run_key(alias)
+            if key and sched.has_job(key):
+                raise DuplicateRun(run_id)
 
     def _cancel_run(self, run_id: str) -> bool:
-        key = self._run_key(run_id)
-        with self.run_lock:
-            cancel = self.active_runs.get(key) if key else None
-        if cancel is not None:
-            cancel.set()
+        sched = self.scheduler
+        if sched is not None and sched.cancel(run_id):
             return True
+        run = load_run(self.workspace, run_id)
+        if run and (run.get("queued") or run.get("running")):
+            stem = run.get("pipeline")
+            if stem:
+                return (
+                    cancel_queue_stub(
+                        self.workspace,
+                        str(stem),
+                        run_id,
+                        wait_ms=float(run.get("wait_ms") or 0),
+                        resume=bool(run.get("paused")),
+                    )
+                    is not None
+                )
         return cancel_paused_run(self.workspace, run_id) is not None
+
+    @classmethod
+    def persist_queue_cancel(cls, job: RunJob) -> None:
+        cancel_queue_stub(
+            cls.workspace,
+            job.stem,
+            job.run_id,
+            wait_ms=job.wait_ms,
+            resume=job.resume,
+        )
+
+    def _queue_position(self, run_id: object) -> int | None:
+        sched = self.scheduler
+        if sched is None or not run_id:
+            return None
+        return sched.position_of(str(run_id))
+
+    def _annotate_queue(self, run: dict) -> dict:
+        if not isinstance(run, dict):
+            return run
+        if run.get("queued") or run.get("status") == "queued":
+            pos = self._queue_position(run.get("id"))
+            if pos is not None:
+                run = dict(run)
+                run["queue_position"] = pos
+        return run
+
+    def _build_job(
+        self,
+        *,
+        loaded: LoadedPipeline,
+        payload: dict,
+        resume: bool,
+        previous: dict | None,
+        run_id: str,
+        thread_id: str,
+    ) -> RunJob:
+        use_command = resume and "resume_value" in payload
+        raw_input = (previous or {}).get("input") if previous else payload.get("input")
+        user_input = raw_input if isinstance(raw_input, dict) else {}
+        return RunJob(
+            run_id=run_id,
+            file_id=str(payload.get("file") or ""),
+            stem=loaded.stem,
+            user_input=user_input,
+            resume=resume,
+            enqueued_at=time.monotonic(),
+            thread_id=thread_id,
+            aliases=(run_id, thread_id),
+            interrupt_before=self._name_list(payload.get("interrupt_before")),
+            interrupt_after=self._name_list(payload.get("interrupt_after")),
+            resume_value=payload.get("resume_value") if use_command else None,
+            use_command=use_command,
+            previous=previous,
+            kind="resume" if resume else "run",
+        )
+
+    def _try_enqueue(
+        self,
+        job: RunJob,
+        loaded: LoadedPipeline,
+        *,
+        mode: str | None = None,
+        parent_id: str | None = None,
+        from_step: str | None = None,
+    ) -> None:
+        sched = self.scheduler
+        if sched is None:
+            raise RuntimeError("run scheduler is not running")
+        self._begin_run(job.run_id, *job.aliases)
+        snapshot = dict(job.previous) if job.previous else None
+        save_queued_stub(
+            self.workspace,
+            job.stem,
+            run_id=job.run_id,
+            user_input=job.user_input,
+            previous=job.previous,
+            graph_hash=loaded.graph_hash,
+            file_sha256=loaded.file_sha256,
+            mode=mode or job.kind,
+            parent_id=parent_id or job.source_run_id,
+            from_step=from_step or job.step_id,
+        )
+        try:
+            sched.submit(job)
+        except (QueueFull, DuplicateRun):
+            if snapshot is not None:
+                if not sched.has_job(job.run_id):
+                    save_run(self.workspace, job.stem, snapshot)
+            else:
+                delete_run(self.workspace, job.run_id)
+            raise
+
+    def _sse_pump(self, job: RunJob) -> None:
+        while True:
+            try:
+                event = job.events.get(timeout=HEARTBEAT_S)
+            except queue.Empty:
+                self._sse_data({"type": "ping"})
+                continue
+            if event is SENTINEL:
+                return
+            kind = event.get("type") if isinstance(event, dict) else None
+            if kind == "canceled":
+                saved = load_run(self.workspace, job.run_id)
+                if saved is None:
+                    saved = cancel_queue_stub(
+                        self.workspace,
+                        job.stem,
+                        job.run_id,
+                        wait_ms=float(event.get("wait_ms") or job.wait_ms or 0),
+                        resume=job.resume,
+                    )
+                if saved is not None:
+                    event = {"type": "done", "run": self._with_render(saved)}
+            self._sse_data(event)
+
+    def _drain_job(self, job: RunJob) -> dict:
+        final = None
+        error = None
+        while True:
+            try:
+                event = job.events.get(timeout=HEARTBEAT_S)
+            except queue.Empty:
+                continue
+            if event is SENTINEL:
+                break
+            if not isinstance(event, dict):
+                continue
+            kind = event.get("type")
+            if kind in {"done", "paused"}:
+                final = event.get("run")
+            elif kind == "canceled":
+                final = load_run(self.workspace, job.run_id)
+            elif kind == "error":
+                error = str(event.get("error") or "run failed")
+        if error:
+            raise RuntimeError(error)
+        if not isinstance(final, dict):
+            final = load_run(self.workspace, job.run_id)
+        if not isinstance(final, dict):
+            raise RuntimeError("run produced no result")
+        return final
+
+    @classmethod
+    def execute_job(cls, job: RunJob) -> None:
+        handler = cls.__new__(cls)
+        wait_ms = job.wait_ms
+        mark_run_started(cls.workspace, job.stem, job.run_id, wait_ms=wait_ms)
+        job.events.put({
+            "type": "start",
+            "run_id": job.run_id,
+            "input": job.user_input,
+            "wait_ms": wait_ms,
+        })
+        try:
+            loaded = handler._get_loaded(job.file_id)
+            if job.kind in {"replay", "replay_from"}:
+                source = job.previous or load_run(cls.workspace, job.source_run_id or "")
+                if source is None:
+                    raise RuntimeError("run not found")
+                replay = resume_from_step if job.kind == "replay_from" else replay_step
+                new_run = replay(
+                    loaded.app,
+                    source,
+                    job.step_id or "",
+                    job.state_patch,
+                    job.replay_input,
+                    context=loaded.context,
+                    thread_id=job.run_id,
+                    cancel=job.cancel,
+                    max_concurrency=cls.node_concurrency,
+                )
+                new_run["id"] = job.run_id
+                timed = attach_run_timing(new_run, wait_ms=wait_ms)
+                saved = handler._save_live_run(loaded, timed, None)
+                job.events.put({"type": "done", "run": handler._with_render(saved)})
+                return
+            for event in iter_run_events(
+                loaded.app,
+                job.previous.get("input") if job.previous else job.user_input,
+                thread_id=job.thread_id,
+                has_checkpointer=loaded.has_checkpointer,
+                cancel=job.cancel,
+                max_concurrency=cls.node_concurrency,
+                resume=job.resume,
+                interrupt_before=job.interrupt_before,
+                interrupt_after=job.interrupt_after,
+                pause=True,
+                resume_value=job.resume_value if job.use_command else None,
+                use_command=job.use_command,
+                context=loaded.context,
+            ):
+                kind = event.get("type")
+                if kind in {"done", "paused"}:
+                    run = attach_run_timing(event.get("run") or {}, wait_ms=wait_ms)
+                    saved = handler._save_live_run(loaded, run, job.previous)
+                    event = {"type": kind, "run": handler._with_render(saved)}
+                job.events.put(event)
+        except Exception as exc:
+            run = load_run(cls.workspace, job.run_id) or {
+                "id": job.run_id,
+                "input": job.user_input,
+                "steps": [],
+                "result": {},
+                "canceled": False,
+                "paused": False,
+            }
+            run["error"] = str(exc)
+            timed = attach_run_timing(run, wait_ms=wait_ms)
+            save_run(cls.workspace, job.stem, timed)
+            job.events.put({"type": "error", "error": str(exc)})
 
     def _read_json(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
@@ -6082,7 +6500,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         run = dict(run)
         run["mermaid"] = unrolled_mermaid(run.get("steps") or [])
         run["ascii"] = ascii_tree(run.get("pipeline") or "run", run.get("steps") or [])
-        return run
+        return self._annotate_queue(run)
 
     def do_GET(self) -> None:
         if not self._guard():
@@ -6093,6 +6511,20 @@ class GraphVIHandler(BaseHTTPRequestHandler):
             return
         if parsed.path in {"/favicon.svg", "/favicon.ico"}:
             self._send(200, FAVICON_SVG.encode(), "image/svg+xml")
+            return
+        if parsed.path == "/api/meta":
+            payload = {
+                "version": __version__,
+                "concurrent": self.concurrent,
+                "node_concurrency": self.node_concurrency,
+                "queue_limit": self.queue_limit,
+                "active": 0,
+                "queued": 0,
+                "limit": self.concurrent,
+            }
+            if self.scheduler is not None:
+                payload.update(self.scheduler.snapshot())
+            self._json(200, payload)
             return
         if parsed.path == "/api/scan":
             self._json(200, {"files": self._scan_files()})
@@ -6116,7 +6548,10 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                 file_id = self._rel_id(path)
                 loaded = self._load_listed(file_id)
                 stem = self._pipeline_stem(path)
-                runs = list_runs(self.workspace, stem, include_steps=True, limit=30)
+                runs = [
+                    self._annotate_queue(item)
+                    for item in list_runs(self.workspace, stem, include_steps=True, limit=30)
+                ]
                 items.append(
                     {
                         "id": file_id,
@@ -6135,11 +6570,27 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/runs":
             query = parse_qs(parsed.query)
             if (query.get("all") or [""])[0] in {"1", "true", "yes"}:
-                self._json(200, {"runs": list_all_runs(self.workspace, include_steps=True)})
+                self._json(
+                    200,
+                    {
+                        "runs": [
+                            self._annotate_queue(item)
+                            for item in list_all_runs(self.workspace, include_steps=True)
+                        ]
+                    },
+                )
                 return
             file_id = (query.get("file") or [""])[0]
             stem = self._stem_for_file_id(file_id)
-            self._json(200, {"runs": list_runs(self.workspace, stem, include_steps=True)})
+            self._json(
+                200,
+                {
+                    "runs": [
+                        self._annotate_queue(item)
+                        for item in list_runs(self.workspace, stem, include_steps=True)
+                    ]
+                },
+            )
             return
         if parsed.path.startswith("/api/runs/"):
             run_id = parsed.path.rsplit("/", 1)[-1]
@@ -6170,11 +6621,24 @@ class GraphVIHandler(BaseHTTPRequestHandler):
             if not file_id:
                 self._json(400, {"error": "file is required"})
                 return
-            count = delete_runs(self.workspace, self._stem_for_file_id(file_id))
+            stem = self._stem_for_file_id(file_id)
+            if (self.scheduler is not None and self.scheduler.has_job_for(stem=stem, file_id=file_id)) or pipeline_has_busy_runs(
+                self.workspace, stem
+            ):
+                self._json(409, {"error": "cancel queued or running jobs before clearing"})
+                return
+            count = delete_runs(self.workspace, stem)
             self._json(200, {"ok": True, "deleted": count})
             return
         if parsed.path.startswith("/api/runs/"):
             run_id = parsed.path.rsplit("/", 1)[-1]
+            run = load_run(self.workspace, run_id)
+            if run is None:
+                self._json(404, {"error": "run not found"})
+                return
+            if (self.scheduler is not None and self.scheduler.has_job(run_id)) or run_is_busy(run):
+                self._json(409, {"error": "cancel the run before deleting"})
+                return
             ok = delete_run(self.workspace, run_id)
             self._json(200 if ok else 404, {"ok": ok})
             return
@@ -6203,72 +6667,62 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                     if previous is None:
                         self._json(404, {"error": "run not found"})
                         return
+                    if previous.get("queued") or previous.get("running"):
+                        if self.scheduler is not None and self.scheduler.has_job(client_run_id):
+                            raise DuplicateRun(client_run_id)
+                        previous = dict(previous)
+                        previous["queued"] = False
+                        previous["running"] = False
                     if not previous.get("paused"):
                         raise ValueError("run is not paused")
                     thread = previous.get("thread_id") or previous.get("id")
                     if not thread:
                         raise RuntimeError("paused run has no thread_id")
                     thread_id = str(thread)
-                cancel = self._begin_run(client_run_id, thread_id)
+                job = self._build_job(
+                    loaded=loaded,
+                    payload=payload,
+                    resume=resume,
+                    previous=previous,
+                    run_id=client_run_id,
+                    thread_id=thread_id,
+                )
+                self._try_enqueue(job, loaded)
                 started = False
                 try:
                     self._sse_begin()
                     started = True
-                    use_command = resume and "resume_value" in payload
-                    for event in iter_run_events(
-                        loaded.app,
-                        previous.get("input") if previous else (payload.get("input") or {}),
-                        thread_id=thread_id,
-                        has_checkpointer=loaded.has_checkpointer,
-                        cancel=cancel,
-                        resume=resume,
-                        interrupt_before=self._name_list(payload.get("interrupt_before")),
-                        interrupt_after=self._name_list(payload.get("interrupt_after")),
-                        pause=True,
-                        resume_value=payload.get("resume_value") if use_command else None,
-                        use_command=use_command,
-                        context=loaded.context,
-                    ):
-                        kind = event.get("type")
-                        if kind in {"done", "paused"}:
-                            run = event.get("run") or {}
-                            saved = self._save_live_run(loaded, run, previous)
-                            event = {"type": kind, "run": self._with_render(saved)}
-                        self._sse_data(event)
-                except (BrokenPipeError, ConnectionResetError):
+                    self._sse_pump(job)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                     self._cancel_run(client_run_id)
                 except Exception as exc:
                     if started:
                         try:
                             self._sse_data({"type": "error", "error": str(exc)})
                         except Exception:
-                            pass
+                            self._cancel_run(client_run_id)
                     else:
+                        self._cancel_run(client_run_id)
                         raise
-                finally:
-                    self._end_run(client_run_id)
                 return
             if parsed.path == "/api/run":
                 loaded = self._get_loaded(payload["file"])
                 run_id = self._normalize_run_id(payload.get("run_id")) or uuid4().hex
-                cancel = self._begin_run(run_id)
+                job = self._build_job(
+                    loaded=loaded,
+                    payload=payload,
+                    resume=False,
+                    previous=None,
+                    run_id=run_id,
+                    thread_id=run_id,
+                )
+                self._try_enqueue(job, loaded)
                 try:
-                    run = record_run(
-                        loaded.app,
-                        payload.get("input") or {},
-                        thread_id=run_id,
-                        has_checkpointer=loaded.has_checkpointer,
-                        cancel=cancel,
-                        context=loaded.context,
-                    )
-                    saved = save_run(
-                        self.workspace,
-                        loaded.stem,
-                        attach_graph_meta(run, loaded.graph, loaded.graph_hash, loaded.file_sha256),
-                    )
+                    saved = self._drain_job(job)
                     self._json(200, self._with_render(saved))
-                finally:
-                    self._end_run(run_id)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    self._cancel_run(run_id)
+                    raise
                 return
             if parsed.path == "/api/rerun":
                 run = load_run(self.workspace, payload["run_id"])
@@ -6282,35 +6736,40 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                 ]
                 if not matches:
                     raise RuntimeError(f"pipeline {run['pipeline']} not found")
-                loaded = self._get_loaded(self._rel_id(matches[0]))
+                file_id = self._rel_id(matches[0])
+                loaded = self._get_loaded(file_id)
                 mode = payload.get("mode") or "replay"
+                kind = "replay_from" if mode == "resume" else "replay"
                 patch = payload.get("state_patch") or None
                 incoming = payload.get("input")
                 if incoming is not None and not isinstance(incoming, dict):
                     raise ValueError("input must be a JSON object")
-                if mode == "resume":
-                    new_run = resume_from_step(
-                        loaded.app,
-                        run,
-                        payload["step_id"],
-                        patch,
-                        incoming,
-                        context=loaded.context,
-                    )
-                else:
-                    new_run = replay_step(
-                        loaded.app,
-                        run,
-                        payload["step_id"],
-                        patch,
-                        incoming,
-                        context=loaded.context,
-                    )
-                saved = save_run(
-                    self.workspace,
-                    loaded.stem,
-                    attach_graph_meta(new_run, loaded.graph, loaded.graph_hash, loaded.file_sha256),
+                new_id = self._normalize_run_id(payload.get("new_run_id")) or uuid4().hex
+                raw_input = run.get("input")
+                job = RunJob(
+                    run_id=new_id,
+                    file_id=file_id,
+                    stem=loaded.stem,
+                    user_input=raw_input if isinstance(raw_input, dict) else {},
+                    resume=False,
+                    enqueued_at=time.monotonic(),
+                    thread_id=new_id,
+                    aliases=(new_id,),
+                    previous=None,
+                    kind=kind,
+                    step_id=str(payload["step_id"]),
+                    state_patch=patch if isinstance(patch, dict) else None,
+                    replay_input=incoming if isinstance(incoming, dict) else None,
+                    source_run_id=str(run.get("id") or ""),
                 )
+                self._try_enqueue(
+                    job,
+                    loaded,
+                    mode=kind,
+                    parent_id=str(run.get("id") or ""),
+                    from_step=str(payload["step_id"]),
+                )
+                saved = self._drain_job(job)
                 self._json(200, self._with_render(saved))
                 return
             if parsed.path == "/api/import":
@@ -6324,6 +6783,10 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                 self._json(200, self._with_render(saved))
                 return
             self._json(404, {"error": "not found"})
+        except QueueFull as exc:
+            self._json(429, {"error": str(exc), **exc.payload()})
+        except DuplicateRun as exc:
+            self._json(409, {"error": str(exc)})
         except Exception as exc:
             self._json(400, {"error": str(exc)})
 
@@ -6335,6 +6798,9 @@ def serve(
     open_browser: bool = False,
     config: GVAConfig | None = None,
     expose: bool = False,
+    cli_concurrent: int | None = None,
+    cli_node_concurrency: int | None = None,
+    cli_queue_limit: int | None = None,
 ) -> None:
     if is_public_bind(host) and not expose:
         raise ValueError(
@@ -6344,6 +6810,12 @@ def serve(
     if config is None:
         config = load_config(workspace)
         activate_config(config)
+        apply_limit_overrides(
+            config,
+            concurrent=cli_concurrent,
+            node_concurrency=cli_node_concurrency,
+            queue_limit=cli_queue_limit,
+        )
     workspace = config.root
     handler = partial(GraphVIHandler)
     GraphVIHandler.workspace = workspace
@@ -6352,14 +6824,29 @@ def serve(
     GraphVIHandler.bind_host = host
     GraphVIHandler.bind_port = port
     GraphVIHandler.loopback_only = not is_public_bind(host)
+    GraphVIHandler.cli_concurrent = cli_concurrent
+    GraphVIHandler.cli_node_concurrency = cli_node_concurrency
+    GraphVIHandler.cli_queue_limit = cli_queue_limit
+    GraphVIHandler.concurrent = config.concurrent
+    GraphVIHandler.node_concurrency = config.node_concurrency
+    GraphVIHandler.queue_limit = effective_queue_limit(config)
 
     def invalidate(file_ids: list[str]) -> None:
         for file_id in file_ids:
             GraphVIHandler.cache.pop(file_id, None)
 
     def on_config(updated: GVAConfig) -> None:
+        apply_limit_overrides(
+            updated,
+            concurrent=GraphVIHandler.cli_concurrent,
+            node_concurrency=GraphVIHandler.cli_node_concurrency,
+            queue_limit=GraphVIHandler.cli_queue_limit,
+        )
         GraphVIHandler.config = updated
         GraphVIHandler.workspace = updated.root
+        GraphVIHandler.concurrent = updated.concurrent
+        GraphVIHandler.node_concurrency = updated.node_concurrency
+        GraphVIHandler.queue_limit = effective_queue_limit(updated)
         GraphVIHandler.cache.clear()
 
     watcher = PipelineWatcher(
@@ -6370,9 +6857,23 @@ def serve(
     )
     watcher.start()
     GraphVIHandler.watcher = watcher
+    scheduler = RunScheduler(
+        concurrent_fn=lambda: GraphVIHandler.concurrent,
+        queue_limit_fn=lambda: GraphVIHandler.queue_limit,
+        execute_fn=GraphVIHandler.execute_job,
+        persist_cancel=GraphVIHandler.persist_queue_cancel,
+    )
+    GraphVIHandler.scheduler = scheduler
+    scheduler.start()
     server = ThreadingHTTPServer((host, port), handler)
     url = f"http://{host}:{port}"
-    print(f"GraphVIAgent {__version__}  {url}  workspace={workspace}", flush=True)
+    extras = f"concurrent={config.concurrent}  queue_limit={GraphVIHandler.queue_limit}"
+    if config.node_concurrency is not None:
+        extras += f"  node_concurrency={config.node_concurrency}"
+    print(
+        f"GraphVIAgent {__version__}  {url}  workspace={workspace}  {extras}",
+        flush=True,
+    )
     if is_public_bind(host):
         print(
             "WARNING: reachable on the network. Anyone who can open this URL "
@@ -6386,5 +6887,7 @@ def serve(
     try:
         server.serve_forever()
     finally:
+        scheduler.stop()
+        GraphVIHandler.scheduler = None
         watcher.stop()
         GraphVIHandler.watcher = None

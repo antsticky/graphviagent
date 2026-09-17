@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from graphviagent import __version__
-from graphviagent.config import GVAConfig, activate_config, load_config
+from graphviagent.config import GVAConfig, activate_config, apply_limit_overrides, load_config
 from graphviagent.discover import discover_pipelines
 from graphviagent.graph_hash import attach_graph_meta
 from graphviagent.load import load_pipeline
@@ -21,6 +21,10 @@ def _workspace(path_arg: str) -> GVAConfig:
         raise SystemExit(f"path not found: {start}")
     config = load_config(start)
     activate_config(config)
+    try:
+        apply_limit_overrides(config)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     return config
 
 
@@ -85,6 +89,7 @@ def _cmd_run(file: str, raw_input: str, config: GVAConfig) -> int:
         loaded.app,
         payload,
         has_checkpointer=loaded.has_checkpointer,
+        max_concurrency=config.node_concurrency,
         context=loaded.context,
     )
     saved = save_run(
@@ -118,6 +123,27 @@ def main(argv: list[str] | None = None) -> None:
     serve_p.add_argument("--port", type=int, default=8765)
     serve_p.add_argument("--open", action="store_true", help="open the UI in a browser")
     serve_p.add_argument(
+        "--concurrent",
+        type=int,
+        metavar="N",
+        default=None,
+        help="max in-flight UI runs (default 3)",
+    )
+    serve_p.add_argument(
+        "--node-concurrency",
+        type=int,
+        metavar="N",
+        default=None,
+        help="LangGraph max_concurrency for node fan-out (default: unlimited)",
+    )
+    serve_p.add_argument(
+        "--queue-limit",
+        type=int,
+        metavar="N",
+        default=None,
+        help="max waiting runs (default: 4× concurrent)",
+    )
+    serve_p.add_argument(
         "--expose",
         action="store_true",
         help="allow --host beyond localhost (reachable on the network)",
@@ -135,6 +161,15 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "serve":
         config = _workspace(args.path)
         try:
+            apply_limit_overrides(
+                config,
+                concurrent=args.concurrent,
+                node_concurrency=args.node_concurrency,
+                queue_limit=args.queue_limit,
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        try:
             serve(
                 config.root,
                 host=args.host,
@@ -142,6 +177,9 @@ def main(argv: list[str] | None = None) -> None:
                 open_browser=args.open,
                 config=config,
                 expose=args.expose,
+                cli_concurrent=args.concurrent,
+                cli_node_concurrency=args.node_concurrency,
+                cli_queue_limit=args.queue_limit,
             )
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
@@ -153,6 +191,10 @@ def main(argv: list[str] | None = None) -> None:
             start = raw.resolve()
         config = load_config(start)
         activate_config(config)
+        try:
+            apply_limit_overrides(config)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         raise SystemExit(_cmd_run(args.file, args.input, config))
 
     config = _workspace(args.path)

@@ -2,8 +2,17 @@
 
 ## 1.3.0-dev
 
+### Added
+- Run-slot limit is `--concurrent` / `concurrent` in `graphviagent.toml` / `GVA_CONCURRENT` (default 3). Every graph execution takes a slot: live Run, Continue/Step, `POST /api/run`, and Replay / Replay from. Overflow waits in a server-side FIFO (`--queue-limit` / `queue_limit` / `GVA_QUEUE_LIMIT`, default 4× concurrent). Resume / HITL jumps ahead of new runs so a paused run is not stuck behind other live work. LangGraph node fan-out is separate (`--node-concurrency` / `node_concurrency` / `GVA_NODE_CONCURRENCY`; omitted = unlimited). Slots and the queue live on the server (`GET /api/meta`); two browser tabs share them.
+
 ### Fixed
 - Cancel shows **Canceling** on the button and pipeline until the run actually stops
+- A 4th Run is queued instead of rejected; a full queue returns HTTP 429 with `{active, queued, limit, queue_limit}`
+- Closing the tab cancels a queued wait without starting the graph
+- A second start of the same `run_id` is refused (HTTP 409) instead of overwriting the first run’s cancel flag
+- Continue / Step stay available while other graphs are live; they still take a server slot (or join the queue)
+- Trace follows the run you opened: finishing another job does not replace the view; History / Runs clicks keep the live SSE
+- Clear / Delete refuse while a pipeline or run is queued or running
 - Pipeline glob no longer descends into Python environments (`.venv` / `venv`, `pyvenv.cfg`, conda prefixes, tox / pixi / direnv)
 - File watch re-hashes pipeline files only when size changes, so cloud-sync `mtime` jitter does not re-read them
 - Parallel `Send` nodes keep probe timing, print/log capture, token attribution, and cancellable `time.sleep` when LangGraph runs them on a worker thread; multiple visits of the same node in one superstep are recorded separately

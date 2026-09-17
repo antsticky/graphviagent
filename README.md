@@ -8,6 +8,7 @@ Pipeline files do not import GraphVIAgent. Only runs you start from the UI or CL
 
 ## What's new in 1.3.0-dev
 
+- Run slots (`--concurrent`, default 3) are no longer the LangGraph node fan-out cap
 - Parallel `Send` nodes keep timing, logs, tokens, and cancellable `time.sleep` on worker threads
 - `graphviagent.toml` `context` is passed into runs as LangGraph runtime context
 - Routing strip counts paused with success / failed / canceled. Runtime average vs longest uses successful runs only
@@ -114,7 +115,12 @@ graphviagent serve . --open
 ```bash
 graphviagent serve . --port 9000
 graphviagent serve . --host 127.0.0.1
+graphviagent serve . --concurrent 5
 ```
+
+`--concurrent` is how many graphs can run at once (default 3). Live Run, Continue/Step, `POST /api/run`, and Replay / Replay from each take a slot. Extra work waits in a server-side FIFO (SSE heartbeats until a slot opens). `--queue-limit N` caps that wait list (default 4× concurrent); overflow is HTTP 429. Two browser tabs share the same slots — the client’s in-flight list is not the cap. Resume / HITL continues jump ahead of brand-new runs so a paused graph is not stuck behind other live work, but they still occupy a slot when they execute. Closing the tab cancels a queued wait without starting the graph.
+
+`--concurrent` does not cap parallel nodes inside one graph. Optional `--node-concurrency N` sets LangGraph `max_concurrency` for node fan-out; if omitted, a 4th parallel node is not queued behind that cap. `GVA_CONCURRENT`, `GVA_QUEUE_LIMIT`, and `GVA_NODE_CONCURRENCY` override toml; CLI flags override the environment.
 
 The UI only accepts requests from its own origin (a page on another site cannot click Run for you). Bind stays on localhost unless you pass `--expose`:
 
@@ -191,6 +197,9 @@ root = "."
 pythonpath = ["."]
 env_file = ".env"
 context = {}
+concurrent = 3
+# node_concurrency = 8
+# queue_limit = 12
 
 [pipeline.decision]
 file = "decision_pipeline.py"
@@ -199,6 +208,9 @@ file = "decision_pipeline.py"
 - `root` and `pythonpath` are resolved relative to the toml file, not the process cwd
 - `pythonpath` is inserted on `sys.path` before the pipeline runs; the file's own directory is always added too
 - `env_file` loads `KEY=VALUE` lines without overwriting variables already in the environment
+- `concurrent` is the max in-flight UI runs (default 3). `GVA_CONCURRENT` and `graphviagent serve --concurrent` override it
+- `queue_limit` is how many runs may wait for a slot (default `4 × concurrent`). `GVA_QUEUE_LIMIT` and `--queue-limit` override it. A full queue returns 429
+- `node_concurrency` is LangGraph’s per-run node fan-out cap. Omit it (the default) so parallel `Send` nodes are not serialized. `GVA_NODE_CONCURRENCY` and `--node-concurrency` override it
 - `context` is LangGraph runtime context (`runtime.context` / `get_runtime()`), not graph state. It is passed on every UI, CLI, HITL resume, and replay run. Empty `{}` is omitted
 - If any `[pipeline.*]` tables exist, those files are the pipelines (`file` may be any `.py`, including a path outside the serve root). Optional `factory = "build_graph"`
 - If there are no `[pipeline.*]` tables, GraphVIAgent still globs `*_pipeline.py`, skipping Python environments (`.venv` / `venv`, `pyvenv.cfg`, `conda-meta`, tox / pixi / direnv caches) instead of walking them

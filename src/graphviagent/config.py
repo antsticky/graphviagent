@@ -17,6 +17,50 @@ class PipelineSpec:
     factory: str | None = None
 
 
+DEFAULT_CONCURRENT = 3
+QUEUE_LIMIT_FACTOR = 4
+
+
+def parse_limit(raw: object, *, name: str, minimum: int = 1) -> int:
+    try:
+        if isinstance(raw, bool):
+            raise TypeError
+        value = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer >= {minimum}") from exc
+    if value < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    return value
+
+
+def apply_limit_overrides(
+    config: GVAConfig,
+    *,
+    concurrent: int | None = None,
+    node_concurrency: int | None = None,
+    queue_limit: int | None = None,
+) -> GVAConfig:
+    if concurrent is not None:
+        config.concurrent = parse_limit(concurrent, name="--concurrent")
+    else:
+        raw = os.environ.get("GVA_CONCURRENT")
+        if raw not in (None, ""):
+            config.concurrent = parse_limit(raw, name="GVA_CONCURRENT")
+    if node_concurrency is not None:
+        config.node_concurrency = parse_limit(node_concurrency, name="--node-concurrency")
+    else:
+        raw = os.environ.get("GVA_NODE_CONCURRENCY")
+        if raw not in (None, ""):
+            config.node_concurrency = parse_limit(raw, name="GVA_NODE_CONCURRENCY")
+    if queue_limit is not None:
+        config.queue_limit = parse_limit(queue_limit, name="--queue-limit", minimum=0)
+    else:
+        raw = os.environ.get("GVA_QUEUE_LIMIT")
+        if raw not in (None, ""):
+            config.queue_limit = parse_limit(raw, name="GVA_QUEUE_LIMIT", minimum=0)
+    return config
+
+
 @dataclass
 class GVAConfig:
     root: Path
@@ -25,6 +69,9 @@ class GVAConfig:
     env_file: Path | None = None
     context: dict[str, Any] = field(default_factory=dict)
     pipelines: dict[str, PipelineSpec] = field(default_factory=dict)
+    concurrent: int = DEFAULT_CONCURRENT
+    node_concurrency: int | None = None
+    queue_limit: int | None = None
 
     def factory_for(self, path: Path) -> str | None:
         path = path.resolve()
@@ -86,6 +133,12 @@ def apply_pythonpath(entries: list[Path]) -> None:
             sys.path.insert(0, directory)
 
 
+def effective_queue_limit(config: GVAConfig) -> int:
+    if config.queue_limit is not None:
+        return config.queue_limit
+    return config.concurrent * QUEUE_LIMIT_FACTOR
+
+
 def activate_config(config: GVAConfig) -> None:
     apply_pythonpath(config.pythonpath)
     if config.env_file is not None:
@@ -136,6 +189,25 @@ def load_config(start: Path) -> GVAConfig:
                 factory=str(factory) if factory else None,
             )
 
+    raw_concurrent = data.get("concurrent")
+    concurrent = (
+        parse_limit(raw_concurrent, name="concurrent")
+        if raw_concurrent is not None
+        else DEFAULT_CONCURRENT
+    )
+    raw_node = data.get("node_concurrency")
+    node_concurrency = (
+        parse_limit(raw_node, name="node_concurrency")
+        if raw_node not in (None, "")
+        else None
+    )
+    raw_queue = data.get("queue_limit")
+    queue_limit = (
+        parse_limit(raw_queue, name="queue_limit", minimum=0)
+        if raw_queue not in (None, "")
+        else None
+    )
+
     return GVAConfig(
         root=root,
         path=toml_path,
@@ -143,4 +215,7 @@ def load_config(start: Path) -> GVAConfig:
         env_file=env_file,
         context=context,
         pipelines=pipelines,
+        concurrent=concurrent,
+        node_concurrency=node_concurrency,
+        queue_limit=queue_limit,
     )

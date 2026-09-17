@@ -51,11 +51,23 @@ def run_is_canceled(data: dict | None) -> bool:
     return err in _CANCELED_ERRORS
 
 
+def run_is_busy(data: dict | None) -> bool:
+    if not isinstance(data, dict):
+        return False
+    if data.get("queued") or data.get("running"):
+        return True
+    return run_status_of(data) in {"queued", "running"}
+
+
 def run_status_of(data: dict | None) -> str:
     if run_is_canceled(data):
         return "canceled"
     if isinstance(data, dict) and data.get("error"):
         return "error"
+    if isinstance(data, dict) and data.get("queued"):
+        return "queued"
+    if isinstance(data, dict) and data.get("running"):
+        return "running"
     if isinstance(data, dict) and data.get("paused"):
         return "paused"
     return "ok"
@@ -89,6 +101,131 @@ def save_run(workspace: Path, stem: str, run: dict) -> dict:
     dest = pipeline_dir(workspace, stem) / f"{run['id']}.json"
     dest.write_text(json.dumps(run, indent=2), encoding="utf-8")
     return run
+
+
+def _append_run_log(run: dict, text: str, *, t: object = 0) -> None:
+    logs = [dict(item) for item in (run.get("logs") or []) if isinstance(item, dict)]
+    logs.append({"t": t, "src": "run", "text": text, "level": "info"})
+    run["logs"] = logs
+
+
+def _trace_run(run_id: object, message: str) -> None:
+    print(f"[graphviagent] {run_id}  {message}", flush=True)
+
+
+def save_queued_stub(
+    workspace: Path,
+    stem: str,
+    *,
+    run_id: str,
+    user_input: dict | None,
+    previous: dict | None = None,
+    graph_hash: str | None = None,
+    file_sha256: str | None = None,
+    mode: str | None = None,
+    parent_id: str | None = None,
+    from_step: str | None = None,
+) -> dict:
+    if previous:
+        run = dict(previous)
+    else:
+        run = {
+            "id": run_id,
+            "input": user_input or {},
+            "steps": [],
+            "result": {},
+            "canceled": False,
+            "paused": False,
+            "error": None,
+        }
+    run["id"] = run_id
+    run["queued"] = True
+    run["running"] = False
+    run["pipeline"] = stem
+    if graph_hash:
+        run["graph_hash"] = graph_hash
+    if file_sha256:
+        run["file_sha256"] = file_sha256
+    if mode:
+        run["mode"] = mode
+    if parent_id:
+        run["parent_id"] = parent_id
+    if from_step:
+        run["from_step"] = from_step
+    _append_run_log(run, "queued")
+    saved = save_run(workspace, stem, run)
+    _trace_run(run_id, "queued")
+    return saved
+
+
+def mark_run_started(workspace: Path, stem: str, run_id: str, *, wait_ms: float) -> dict | None:
+    run = load_run(workspace, run_id)
+    if run is None:
+        return None
+    run["queued"] = False
+    run["running"] = True
+    run["wait_ms"] = wait_ms
+    _append_run_log(run, f"running  wait_ms={wait_ms}", t=wait_ms)
+    saved = save_run(workspace, stem, run)
+    _trace_run(run_id, f"running  wait_ms={wait_ms}")
+    return saved
+
+
+def attach_run_timing(run: dict, *, wait_ms: float) -> dict:
+    out = dict(run)
+    out["queued"] = False
+    out["running"] = False
+    out["wait_ms"] = wait_ms
+    out["run_ms"] = out.get("elapsed_ms") or 0
+    status = (
+        "canceled"
+        if run_is_canceled(out)
+        else "paused"
+        if out.get("paused")
+        else "error"
+        if out.get("error")
+        else "done"
+    )
+    _append_run_log(
+        out,
+        f"{status}  wait_ms={wait_ms}  run_ms={out['run_ms']}",
+        t=out.get("elapsed_ms") or wait_ms,
+    )
+    _trace_run(out.get("id"), f"{status}  wait_ms={wait_ms}  run_ms={out['run_ms']}")
+    return out
+
+
+def cancel_queue_stub(
+    workspace: Path,
+    stem: str,
+    run_id: str,
+    *,
+    wait_ms: float,
+    resume: bool,
+) -> dict | None:
+    run = load_run(workspace, run_id)
+    if run is None:
+        return None
+    run["queued"] = False
+    run["running"] = False
+    run["wait_ms"] = wait_ms
+    run["run_ms"] = 0
+    if resume:
+        run["paused"] = True
+        run["canceled"] = False
+        _append_run_log(run, f"left queue  wait_ms={wait_ms}", t=wait_ms)
+        saved = save_run(workspace, stem, run)
+        _trace_run(run_id, f"left queue  wait_ms={wait_ms}")
+        return saved
+    run["canceled"] = True
+    run["paused"] = False
+    run["error"] = None
+    run["next"] = []
+    run["interrupts"] = []
+    _append_run_log(run, f"canceled  wait_ms={wait_ms}  run_ms=0", t=wait_ms)
+    saved = save_run(workspace, stem, run)
+    _trace_run(run_id, f"canceled  wait_ms={wait_ms}  run_ms=0")
+    return saved
 
 
 def cancel_paused_run(workspace: Path, run_id: str) -> dict | None:
@@ -149,6 +286,10 @@ def list_runs(
             "status": run_status_of(data),
             "paused": bool(data.get("paused")) and not run_is_canceled(data),
             "canceled": run_is_canceled(data),
+            "queued": bool(data.get("queued")),
+            "running": bool(data.get("running")),
+            "wait_ms": data.get("wait_ms"),
+            "run_ms": data.get("run_ms"),
             "next": data.get("next") or [],
             "graph_hash": data.get("graph_hash"),
             "file_sha256": data.get("file_sha256"),
@@ -169,6 +310,13 @@ def list_runs(
     if limit is not None:
         return runs[:limit]
     return runs
+
+
+def pipeline_has_busy_runs(workspace: Path, stem: str) -> bool:
+    for item in list_runs(workspace, stem):
+        if item.get("queued") or item.get("running") or item.get("status") in {"queued", "running"}:
+            return True
+    return False
 
 
 def load_run(workspace: Path, run_id: str) -> dict | None:
@@ -478,6 +626,8 @@ def collect_stats(workspace: Path, stem: str | None = None) -> dict:
         bucket["elapsed_max"] = max(prev_max, ms)
 
     for data in _iter_run_dicts(workspace, stem):
+        if data.get("queued") or data.get("running"):
+            continue
         pipe = str(data.get("pipeline") or "unknown")
         steps = [step for step in (data.get("steps") or []) if isinstance(step, dict)]
         prompt = 0

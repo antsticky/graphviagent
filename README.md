@@ -6,15 +6,15 @@ Local Graph-View-Agent for LangGraph. Scan `*_pipeline.py` files, record runs un
 
 Pipeline files do not import GraphVIAgent. Only runs you start from the UI or CLI are stored.
 
-## What's new in 1.4.2-dev
+## What's new in 1.4.3-dev
 
-- Continue / Step keep per-node visit ids after a pause in a loop (`agent#2`, not a second `agent#1`), so Replay hits the visit you selected
-- A second start of the same `run_id` no longer deletes the in-flight stub of the request that won the slot
-- `graphviagent run` records HITL / breakpoint pauses as **paused** (exit 1), not a successful truncated run
-- **Step** runs every paused `next` node (parallel `Send`), not only the first
-- Token maps keep a billed `0` (`input_tokens: 0` is not replaced by `prompt`)
+- First UI open shows a **scanning** overlay until the pipeline list returns (OneDrive / slow disks)
+- Scan/change polls read the watcher snapshot; a walk still runs if it is older than 45s
+- Trace history loads 40 runs, then the next page when you scroll
+- Cancel stays **Canceling** (red, spinner) with a red **canceling** pill until the run stops
+- Queued pills are **queued** only (no `#1`); a history click still opens the saved run
 
-See [CHANGELOG.md](CHANGELOG.md) for 1.4.1.
+See [CHANGELOG.md](CHANGELOG.md) for 1.4.2.
 
 ## Requirements
 
@@ -130,7 +130,7 @@ graphviagent serve . --host 0.0.0.0 --expose
 
 `--expose` prints a warning. Anyone who can open that URL can run your pipelines and read stored runs.
 
-New or edited `*_pipeline.py` files (and toml-listed pipelines, including files outside the serve root) refresh the sidebar on their own. You do not need to restart `serve`. The UI poll reads the in-memory snapshot; the tree is re-walked when the file watcher sees an event. A file-change panel (bottom right) shows when a pipeline appears, is modified, or its SHA256 hash changes. Hashing is skipped when the file size did not change, so a same-size edit is invisible there until you click **Run**, which always re-reads the file.
+New or edited `*_pipeline.py` files (and toml-listed pipelines, including files outside the serve root) refresh the sidebar on their own. You do not need to restart `serve`. The UI poll reads the in-memory snapshot; the tree is re-walked when the file watcher sees an event, and at most every 45s if an event was missed. A file-change panel (bottom right) shows when a pipeline appears, is modified, or its SHA256 hash changes. Hashing is skipped when the file size did not change, so a same-size edit is invisible there until you click **Run**, which always re-reads the file.
 
 ### Trace
 
@@ -140,7 +140,7 @@ New or edited `*_pipeline.py` files (and toml-listed pipelines, including files 
 4. Single-click a node to select it. Double-click to open **Node view**. Node cards show `file:line`; click to open in the editor. Failed nodes include a traceback. Parallel `Send` visits show that visit’s `state_in` / `state_out`, not the merged superstep.
 5. Click the gutter dot on a topology card to break before that node. Breakpoints persist per pipeline. **Continue** resumes with those breakpoints; **Step** runs the pending node(s) — all of them if several are next — and pauses again.
 6. Human-in-the-loop graphs (`interrupt(...)`) pause with a resume-value box. **Continue** sends that JSON (`true` to keep a draft, or `"edit this"` to replace it). The box keeps what you type until you Continue or a new pause starts. Editing the pipeline or toml in the same `serve` process keeps the in-memory checkpointer, so Continue / Step still work. Replay asks before using an outdated graph; Continue / Step do not — they feed that checkpoint into the newly compiled graph (right for a whitespace save, wrong if you renamed a node or changed routing). Restarting `serve`, or deleting / unlisting that pipeline file, drops those checkpoints.
-7. Filter the run list by status (all / success / paused / canceled / failed) or input text.
+7. Filter the run list by status (all / success / paused / canceled / failed) or input text. The list loads 40 runs, then the next page when you scroll to the bottom.
 8. **Export** downloads the open run as JSON. **Import** or drop a JSON file on the run list.
 9. **Runs** and **Statistics** (between Import and Delete) jump to this pipeline. **Delete run** removes the open run. Hover a JSON box and use **Copy** to copy it. **Cancel** stops an in-flight run — including a Continue / Step still waiting for a slot, or a Replay — or abandons a paused one — stored as **canceled**, not failed. Closing the tab dequeues a wait without canceling a paused graph.
 

@@ -2427,6 +2427,17 @@ def _finish_replay_run(
     return recorded
 
 
+def _missing_replay_thread(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return (
+        "checkpoint not found" in text
+        or "missing thread" in text
+        or "process restart" in text
+        or "no thread_id" in text
+        or "no checkpoint before" in text
+    )
+
+
 def _replay_native(
     app: Any,
     run: dict,
@@ -2450,7 +2461,9 @@ def _replay_native(
         config = _fork_thread(app, snapshot, fork_id)
         if patch:
             app.update_state(config, patch)
-    except Exception:
+    except Exception as exc:
+        if not _missing_replay_thread(exc):
+            raise
         config = _seed_before_step(app, node, incoming_state, thread_id=fork_id)
     recorded = record_run(
         app,

@@ -260,7 +260,7 @@ PAGE = r"""<!DOCTYPE html>
       animation: live-pulse 1.1s ease-in-out infinite;
     }
     .status-dot.canceling {
-      background: #a8a29e;
+      background: #f07178;
       animation: live-pulse 1.1s ease-in-out infinite;
     }
     .status-dot.queued {
@@ -321,7 +321,7 @@ PAGE = r"""<!DOCTYPE html>
       animation: live-pulse 1.1s ease-in-out infinite;
     }
     .af-bar.canceling {
-      background: #a8a29e;
+      background: #f07178;
       animation: live-pulse 1.1s ease-in-out infinite;
     }
     .af-bar.queued {
@@ -370,6 +370,10 @@ PAGE = r"""<!DOCTYPE html>
       background: var(--accent);
       animation: live-pulse 1.1s ease-in-out infinite;
     }
+    .af-mark.canceling {
+      background: #dc2626;
+      animation: live-pulse 1.1s ease-in-out infinite;
+    }
     .af-mark.skip {
       background: transparent; color: #d97706; border: 1px solid #d97706;
     }
@@ -387,9 +391,12 @@ PAGE = r"""<!DOCTYPE html>
       background: var(--raised);
       border-right: 1px solid var(--line);
       padding: 12px;
-      overflow: auto;
+      overflow: hidden;
       min-height: 0;
+      display: flex;
+      flex-direction: column;
     }
+    #pipelines { overflow: auto; max-height: 30vh; flex: 0 1 auto; }
     main {
       padding: 16px 18px;
       overflow: auto;
@@ -471,8 +478,14 @@ PAGE = r"""<!DOCTYPE html>
     button.cancel:hover { background: #2a1518; }
     button.cancel:disabled:hover { background: transparent; }
     button.cancel.canceling:disabled {
-      opacity: 1; cursor: wait; color: #e7e5e4; border-color: #57534e;
+      opacity: 1; cursor: wait; color: #fca5a5; border-color: #7f1d1d;
     }
+    .btn-spin {
+      width: 12px; height: 12px; margin-left: 8px; flex: 0 0 auto;
+      border: 2px solid currentColor; border-right-color: transparent;
+      border-radius: 99px; animation: btn-spin 0.7s linear infinite;
+    }
+    @keyframes btn-spin { to { transform: rotate(360deg); } }
     button.ghost.danger, button.danger {
       border: 1px solid #7f1d1d; color: #fca5a5; background: transparent;
     }
@@ -499,8 +512,8 @@ PAGE = r"""<!DOCTYPE html>
       content: ""; width: 8px; height: 8px; border-radius: 99px;
       background: var(--accent); animation: live-pulse 1.1s ease-in-out infinite;
     }
-    .run-live.canceling { color: #d6d3d1; }
-    .run-live.canceling::before { background: #a8a29e; }
+    .run-live.canceling { color: #fca5a5; }
+    .run-live.canceling::before { background: #f07178; }
     @keyframes live-pulse {
       0%, 100% { opacity: 1; }
       50% { opacity: 0.35; }
@@ -791,7 +804,7 @@ PAGE = r"""<!DOCTYPE html>
       color: #c4b5fd; background: rgba(124, 92, 255, 0.22);
     }
     #history .pill.mode-canceling, .item .pill.mode-canceling {
-      color: #e7e5e4; background: rgba(168, 162, 158, 0.28);
+      color: #fca5a5; background: rgba(240, 113, 120, 0.18);
     }
     #history .pill.mode-queued, .item .pill.mode-queued {
       color: #7dd3fc; background: rgba(56, 189, 248, 0.2);
@@ -1016,14 +1029,21 @@ PAGE = r"""<!DOCTYPE html>
       font: 500 11px Inter, sans-serif;
     }
     .chip:hover, .chip.active { border-color: var(--accent); color: #c4b5fd; }
-    .hist-tools { display: flex; gap: 6px; margin: 0 0 8px; }
+    aside h2 { flex: 0 0 auto; }
+    .hist-tools { display: flex; gap: 6px; margin: 0 0 8px; flex: 0 0 auto; }
     .hist-tools input, .hist-tools select {
       width: 100%; height: 28px; border-radius: 7px; border: 1px solid var(--line);
       background: var(--panel); color: var(--ink); font: 12px Inter, sans-serif; padding: 0 8px;
     }
     .hist-tools select { width: 88px; flex: 0 0 88px; }
-    .history-box { min-height: 80px; border-radius: 8px; }
+    .history-box { min-height: 80px; border-radius: 8px; flex: 1; overflow: auto; }
     .history-box.drop { outline: 1px dashed var(--accent); background: var(--accent-dim); }
+    .hist-more {
+      display: flex; align-items: center; justify-content: center;
+      gap: 2px; min-height: 28px; padding: 8px 0 4px;
+      color: var(--muted); font-size: 12px; font-weight: 500;
+    }
+    .hist-more:empty { min-height: 1px; padding: 0; }
     .thread { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
     .bubble {
       border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: #141418;
@@ -1445,16 +1465,16 @@ PAGE = r"""<!DOCTYPE html>
       font-size: 13px; font-weight: 500;
     }
     #bootScan[hidden] { display: none !important; }
-    #bootScan .boot-scan-dots {
+    .boot-scan-dots {
       display: inline-flex; gap: 4px; margin-left: 6px; align-items: flex-end;
     }
-    #bootScan .boot-scan-dots i {
+    .boot-scan-dots i {
       width: 5px; height: 5px; border-radius: 99px;
       background: var(--muted);
       animation: boot-dot 0.9s ease-in-out infinite;
     }
-    #bootScan .boot-scan-dots i:nth-child(2) { animation-delay: 0.15s; }
-    #bootScan .boot-scan-dots i:nth-child(3) { animation-delay: 0.3s; }
+    .boot-scan-dots i:nth-child(2) { animation-delay: 0.15s; }
+    .boot-scan-dots i:nth-child(3) { animation-delay: 0.3s; }
     @keyframes boot-dot {
       0%, 70%, 100% { transform: translateY(0); opacity: 0.35; }
       35% { transform: translateY(-5px); opacity: 1; }
@@ -1702,6 +1722,13 @@ PAGE = r"""<!DOCTYPE html>
     let nodeViewMode = "all";
     let currentView = "trace";
     let historyRuns = [];
+    const HISTORY_PAGE = 40;
+    let historyHasMore = false;
+    let historyLoading = false;
+    let historyMoreLoading = false;
+    let historyGen = 0;
+    let historyMoreObs = null;
+    let openSeq = 0;
     let scanKey = "";
     let scanFiles = [];
     let changeSeq = 0;
@@ -1855,11 +1882,14 @@ PAGE = r"""<!DOCTYPE html>
       return inflightRuns.find((job) => currentRun && job.id === currentRun.id) || null;
     }
 
+    function runIsCanceling(run) {
+      if (!run || !run.id) return false;
+      if (inflightRuns.some((job) => job.id === run.id && job.canceling)) return true;
+      return Boolean(pendingCancel && pendingCancel.runId === run.id);
+    }
+
     function currentIsCanceling() {
-      const job = currentLiveJob();
-      if (job && job.canceling) return true;
-      if (currentRun && currentRun.status === "canceling") return true;
-      return Boolean(pendingCancel && currentRun && pendingCancel.runId === currentRun.id);
+      return runIsCanceling(currentRun);
     }
 
     function pipelineIsCanceling(p) {
@@ -1873,11 +1903,15 @@ PAGE = r"""<!DOCTYPE html>
       const btn = $("cancelBtn");
       if (!btn) return;
       const canceling = currentIsCanceling();
-      btn.textContent = canceling ? "Canceling" : "Cancel";
       btn.classList.toggle("canceling", canceling);
       btn.disabled = canceling || !(currentRun && currentRun.id && (
         currentLiveJob() || runIsBusy(currentRun) || runIsPaused(currentRun)
       ));
+      if (canceling) {
+        btn.innerHTML = 'Canceling<span class="btn-spin" aria-hidden="true"></span>';
+      } else {
+        btn.textContent = "Cancel";
+      }
     }
 
     function syncPauseControls() {
@@ -2227,7 +2261,7 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function runDotClass(run) {
-      if (run && (run.status === "canceling" || run.canceling)) return "canceling";
+      if (runIsCanceling(run)) return "canceling";
       if (run && (run.status === "queued" || run.queued)) return "queued";
       if (run && (run.live || run.status === "running")) return "running";
       if (runIsCanceled(run) || (run && run.status === "canceled")) return "canceled";
@@ -2246,9 +2280,9 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function runHoverText(run) {
-      if (run && (run.status === "canceling" || run.canceling)) return "canceling";
+      if (runIsCanceling(run)) return "canceling";
       if (run && (run.status === "queued" || run.queued)) {
-        return run.queue_position ? "queued #" + run.queue_position : "queued";
+        return "queued";
       }
       if (run && (run.live || run.status === "running")) return "running";
       const when = run.created_at ? new Date(run.created_at) : null;
@@ -2817,19 +2851,80 @@ PAGE = r"""<!DOCTYPE html>
       });
     }
 
+    function historyFilterActive() {
+      return $("runStatus").value !== "all" || Boolean(($("runFilter").value || "").trim());
+    }
+
+    function unbindHistoryMore() {
+      if (!historyMoreObs) return;
+      historyMoreObs.disconnect();
+      historyMoreObs = null;
+    }
+
+    function historyBusy() {
+      return historyLoading || historyMoreLoading;
+    }
+
+    function historyLoaderHtml() {
+      return '<div id="historyMore" class="hist-more" aria-live="polite"' +
+        (historyBusy() ? ' aria-busy="true"' : "") + ">" +
+        (historyBusy()
+          ? 'loading<span class="boot-scan-dots" aria-hidden="true"><i></i><i></i><i></i></span>'
+          : "") +
+        "</div>";
+    }
+
+    function bindHistoryMore() {
+      unbindHistoryMore();
+      const el = $("historyMore");
+      if (!el || !window.IntersectionObserver) return;
+      historyMoreObs = new IntersectionObserver((entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) loadMoreHistory();
+      }, { root: $("history"), rootMargin: "120px" });
+      historyMoreObs.observe(el);
+    }
+
+    function mountHistoryMore(box) {
+      if (!(historyHasMore || historyBusy())) {
+        unbindHistoryMore();
+        return;
+      }
+      box.insertAdjacentHTML("beforeend", historyLoaderHtml());
+      bindHistoryMore();
+    }
+
+    function maybeFillFilter() {
+      if (!fileId || historyBusy() || !historyHasMore) return;
+      if (!historyFilterActive()) return;
+      if (historyDisplayRows().filter(runMatchesFilter).length) return;
+      loadMoreHistory();
+    }
+
     function renderHistory() {
       const box = $("history");
+      unbindHistoryMore();
       if (!fileId) { box.textContent = "Select a pipeline"; return; }
       const listed = historyDisplayRows();
       const rows = listed.filter(runMatchesFilter);
-      if (!listed.length) { box.innerHTML = '<p class="empty">No runs — drop a JSON file to import</p>'; return; }
-      if (!rows.length) { box.innerHTML = '<p class="empty">No runs match</p>'; return; }
+      if (!listed.length && !historyBusy()) {
+        box.innerHTML = '<p class="empty">No runs — drop a JSON file to import</p>';
+        return;
+      }
+      if (!rows.length && !historyHasMore && !historyBusy()) {
+        box.innerHTML = '<p class="empty">No runs match</p>';
+        return;
+      }
       box.innerHTML = "";
+      if (!rows.length) {
+        box.innerHTML = '<p class="empty">' + (historyBusy() ? "" : "No runs match") + "</p>";
+        mountHistoryMore(box);
+        return;
+      }
       rows.forEach((r) => {
         const btn = document.createElement("button");
         btn.className = "run" + (currentRun && currentRun.id === r.id ? " active" : "");
         const mode = r.mode || "run";
-        const pill = runIsCanceled(r) ? "canceled" : r.status === "error" ? "error" : r.status === "paused" ? "paused" : r.status === "canceling" ? "canceling" : r.status === "queued" ? (r.queue_position ? "queued #" + r.queue_position : "queued") : r.status === "running" ? "running" : (mode === "run" ? "success" : mode);
+        const pill = runIsCanceling(r) ? "canceling" : runIsCanceled(r) ? "canceled" : r.status === "error" ? "error" : r.status === "paused" ? "paused" : r.status === "queued" ? "queued" : r.status === "running" ? "running" : (mode === "run" ? "success" : mode);
         const known = { success: 1, run: 1, replay: 1, replay_from: 1, error: 1, canceled: 1, canceling: 1, queued: 1, approximate: 1, paused: 1, running: 1 };
         const pillClass = known[pill] ? pill : (String(pill).indexOf("queued") === 0 ? "queued" : "run");
         const outdated = isOutdated(r)
@@ -2850,11 +2945,13 @@ PAGE = r"""<!DOCTYPE html>
         btn.onclick = () => openHistoryRun(r);
         box.appendChild(btn);
       });
+      mountHistoryMore(box);
     }
 
     function followRun(id) {
       const job = inflightRuns.find((item) => item.id === id);
       if (!job || !job.run) return false;
+      openSeq += 1;
       currentRun = job.run;
       selectedStep = null;
       renderRun(currentRun);
@@ -2865,22 +2962,116 @@ PAGE = r"""<!DOCTYPE html>
 
     function openHistoryRun(row) {
       if (followRun(row.id)) return;
-      openRun(row.id);
+      openRun(row.id).catch((e) => alert(e.message));
     }
 
-    async function loadHistory() {
-      if (!fileId) { historyRuns = []; renderHistory(); return; }
-      const { runs } = await api("/api/runs?file=" + encodeURIComponent(fileId));
-      historyRuns = runs;
-      renderHistory();
+    function historyPageUrl(offset) {
+      return "/api/runs?file=" + encodeURIComponent(fileId) +
+        "&limit=" + HISTORY_PAGE + "&offset=" + offset;
+    }
+
+    function sortHistoryRuns() {
+      historyRuns.sort((a, b) => {
+        const left = (a && a.created_at) || "";
+        const right = (b && b.created_at) || "";
+        if (left === right) return 0;
+        return left < right ? 1 : -1;
+      });
+    }
+
+    async function loadMoreHistory() {
+      if (!fileId || historyBusy() || !historyHasMore) return;
+      const gen = historyGen;
+      const offset = historyRuns.length;
+      historyMoreLoading = true;
+      const more = $("historyMore");
+      if (more) {
+        more.setAttribute("aria-busy", "true");
+        more.innerHTML = 'loading<span class="boot-scan-dots" aria-hidden="true"><i></i><i></i><i></i></span>';
+      }
+      try {
+        const data = await api(historyPageUrl(offset));
+        if (gen !== historyGen) return;
+        const seen = new Set(historyRuns.map((row) => row && row.id).filter(Boolean));
+        (data.runs || []).forEach((row) => {
+          if (row && row.id && !seen.has(row.id)) {
+            seen.add(row.id);
+            historyRuns.push(row);
+          }
+        });
+        historyHasMore = Boolean(data.has_more);
+      } catch (err) {
+      } finally {
+        if (gen !== historyGen) return;
+        historyMoreLoading = false;
+        renderHistory();
+        maybeFillFilter();
+      }
+    }
+
+    async function loadHistory(reset) {
+      if (!fileId) {
+        historyGen += 1;
+        historyRuns = [];
+        historyHasMore = false;
+        historyLoading = false;
+        historyMoreLoading = false;
+        unbindHistoryMore();
+        renderHistory();
+        return;
+      }
+      const replace = reset !== false;
+      if (replace) {
+        historyGen += 1;
+        historyRuns = [];
+        historyHasMore = true;
+        historyLoading = true;
+        historyMoreLoading = false;
+        renderHistory();
+      }
+      const gen = historyGen;
+      try {
+        const data = await api(historyPageUrl(0));
+        if (gen !== historyGen) return;
+        const incoming = data.runs || [];
+        if (replace) {
+          historyRuns = incoming;
+        } else {
+          const byId = {};
+          incoming.forEach((row) => {
+            if (row && row.id) byId[row.id] = row;
+          });
+          historyRuns.forEach((row) => {
+            if (row && row.id && !byId[row.id]) byId[row.id] = row;
+          });
+          historyRuns = Object.keys(byId).map((id) => byId[id]);
+          sortHistoryRuns();
+        }
+        if (replace) historyHasMore = Boolean(data.has_more);
+        else if (data.has_more === false && incoming.length < HISTORY_PAGE) historyHasMore = false;
+      } catch (err) {
+        if (replace && gen === historyGen) {
+          historyRuns = [];
+          historyHasMore = false;
+        }
+        throw err;
+      } finally {
+        if (gen !== historyGen) return;
+        if (replace) historyLoading = false;
+        renderHistory();
+        maybeFillFilter();
+      }
     }
 
     async function openRun(id) {
       if (followRun(id)) return;
-      currentRun = await api("/api/runs/" + id);
+      const seq = ++openSeq;
+      const run = await api("/api/runs/" + id);
+      if (seq !== openSeq) return;
+      currentRun = run;
       selectedStep = null;
       renderRun(currentRun);
-      await loadHistory();
+      renderHistory();
     }
 
     function jsonHint(value) {
@@ -4765,14 +4956,11 @@ PAGE = r"""<!DOCTYPE html>
         syncRunControls();
         await loadMeta();
         await loadPipelines();
+        await loadHistory();
         if (watching && keepId && job.fileId === fileId) {
           try {
             await openRun(keepId);
-          } catch (err) {
-            await loadHistory();
-          }
-        } else {
-          await loadHistory();
+          } catch (err) {}
         }
       }
     }
@@ -4794,6 +4982,7 @@ PAGE = r"""<!DOCTYPE html>
       const liveRun = resume
         ? Object.assign({}, currentRun, { status: "queued", queued: true })
         : { id: runId, input: input, steps: [], result: {}, logs: [], status: "queued", queued: true };
+      delete liveRun.canceling;
       const job = {
         id: runId,
         controller: controller,
@@ -4881,15 +5070,9 @@ PAGE = r"""<!DOCTYPE html>
       if (!(currentLiveJob() || runIsBusy(currentRun) || runIsPaused(currentRun))) return;
       const job = inflightRuns.find((item) => item.id === id) || null;
       if (job && job.canceling) return;
-      if (!job && (pendingCancel || (currentRun && currentRun.status === "canceling"))) return;
+      if (!job && pendingCancel && pendingCancel.runId === id) return;
       if (job) job.canceling = true;
-      else {
-        pendingCancel = { runId: id, fileId: fileId };
-        currentRun = Object.assign({}, currentRun, { status: "canceling" });
-        historyRuns = historyRuns.map((row) => (
-          row.id === id ? Object.assign({}, row, { status: "canceling" }) : row
-        ));
-      }
+      else pendingCancel = { runId: id, fileId: fileId };
       syncRunControls();
       await fetch("/api/run/cancel", {
         method: "POST",
@@ -4900,7 +5083,7 @@ PAGE = r"""<!DOCTYPE html>
         try {
           if (currentRun && currentRun.id === id) await openRun(id);
         } finally {
-          pendingCancel = null;
+          if (pendingCancel && pendingCancel.runId === id) pendingCancel = null;
           syncRunControls();
         }
       }
@@ -4911,7 +5094,7 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function isOutdated(run) {
-      if (!run || run.live || run.status === "running" || run.status === "canceling" || run.status === "queued") return false;
+      if (!run || run.live || runIsCanceling(run) || run.status === "running" || run.status === "queued") return false;
       if (inflightRuns.some((job) => job.id === run.id)) return false;
       const pipe = currentPipeline();
       if (!pipe) return false;
@@ -6107,9 +6290,9 @@ PAGE = r"""<!DOCTYPE html>
       if (file) importFromFile(file).catch((e) => alert(e.message));
     };
     $("deleteBtn").onclick = () => removeRun().catch((e) => alert(e.message));
-    $("runFilter").oninput = () => renderHistory();
-    $("runFilter").onsearch = () => renderHistory();
-    $("runStatus").onchange = () => renderHistory();
+    $("runFilter").oninput = () => { renderHistory(); maybeFillFilter(); };
+    $("runFilter").onsearch = () => { renderHistory(); maybeFillFilter(); };
+    $("runStatus").onchange = () => { renderHistory(); maybeFillFilter(); };
     $("cmpPipe").onchange = () => applyCompareFilter().catch((e) => alert(e.message));
     $("cmpA").onchange = () => renderCompare().catch((e) => alert(e.message));
     $("cmpB").onchange = () => renderCompare().catch((e) => alert(e.message));
@@ -6261,7 +6444,7 @@ PAGE = r"""<!DOCTYPE html>
         syncRunControls();
         if (slotActive || slotQueued) {
           const tasks = [loadPipelines()];
-          if (fileId) tasks.push(loadHistory());
+          if (fileId) tasks.push(loadHistory(false));
           return Promise.all(tasks);
         }
       }).catch(() => {});
@@ -6721,8 +6904,49 @@ class GraphVIHandler(BaseHTTPRequestHandler):
     def _known_stems(self) -> list[str]:
         return [self._pipeline_stem(path) for path in self._pipelines()]
 
+    def _query_int(self, query: dict, name: str) -> int | None:
+        raw = (query.get(name) or [""])[0]
+        if raw in ("", None):
+            return None
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return None
+
+    def _page_runs(
+        self,
+        stem: str,
+        *,
+        include_steps: bool,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[dict], bool]:
+        if limit is None:
+            page = [
+                self._annotate_queue(item)
+                for item in list_runs(
+                    self.workspace,
+                    stem,
+                    include_steps=include_steps,
+                    offset=offset,
+                )
+            ]
+            return page, False
+        raw = [
+            self._annotate_queue(item)
+            for item in list_runs(
+                self.workspace,
+                stem,
+                include_steps=include_steps,
+                limit=limit + 1,
+                offset=offset,
+            )
+        ]
+        return raw[:limit], len(raw) > limit
+
     def _scan_files(self) -> list[dict]:
         if self.watcher is not None:
+            self.watcher.maybe_refresh()
             return self.watcher.files()
         return list(snapshot_files(self.workspace, self.config).values())
 
@@ -6803,6 +7027,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
             except ValueError:
                 since = 0
             if self.watcher is not None:
+                self.watcher.maybe_refresh()
                 events = self.watcher.changes(since)
             else:
                 events = []
@@ -6848,15 +7073,15 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                 return
             file_id = (query.get("file") or [""])[0]
             stem = self._stem_for_file_id(file_id)
-            self._json(
-                200,
-                {
-                    "runs": [
-                        self._annotate_queue(item)
-                        for item in list_runs(self.workspace, stem, include_steps=True)
-                    ]
-                },
+            limit = self._query_int(query, "limit")
+            offset = self._query_int(query, "offset") or 0
+            runs, has_more = self._page_runs(
+                stem,
+                include_steps=limit is None,
+                limit=limit,
+                offset=offset,
             )
+            self._json(200, {"runs": runs, "has_more": has_more})
             return
         if parsed.path.startswith("/api/runs/"):
             try:

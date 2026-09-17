@@ -619,7 +619,7 @@
   <main>
     <section class="hero">
       <div>
-        <p class="kicker">Graph-View-Agent <span class="ver">1.4.2-dev</span></p>
+        <p class="kicker">Graph-View-Agent <span class="ver">1.4.3-dev</span></p>
         <h1>See your LangGraph run <em>as it happens</em>.</h1>
         <p class="lede">
           GraphVIAgent is an inspector for LangGraph. Point it at a folder of
@@ -740,7 +740,7 @@
         </article>
         <article class="af-card">
           <h3><span class="af-mark hist"></span> Local history</h3>
-          <p>Each run is JSON under <code>.graphviagent/runs/&lt;pipeline&gt;/</code> named with a 32-character hex id (still that length when <code>crypto.randomUUID</code> is missing). Export, import, or drop a file on the run list. Search input fields. Filter success, paused, canceled, or failed.</p>
+          <p>Each run is JSON under <code>.graphviagent/runs/&lt;pipeline&gt;/</code> named with a 32-character hex id (still that length when <code>crypto.randomUUID</code> is missing). Export, import, or drop a file on the run list. Search input fields. Filter success, paused, canceled, or failed. Trace loads 40 runs, then the next page when you scroll the list.</p>
         </article>
         <article class="af-card">
           <h3><span class="af-mark state"></span> State you can trust</h3>
@@ -1069,7 +1069,7 @@ file = "decision_pipeline.py"</pre>
             <li>Alpha: APIs, UI, and on-disk run format may change. <code>POST /api/run</code> and <code>POST /api/rerun</code> return one JSON run. The live UI uses <code>POST /api/run/stream</code> and <code>POST /api/rerun/stream</code> (<code>text/event-stream</code>).</li>
             <li>Local only. Nothing is uploaded.</li>
             <li><code>logging</code> still respects the logger’s level. Root defaults to WARNING, so <code>logger.info</code> appears only if that logger is enabled for INFO.</li>
-            <li>File watch skips hashing when size is unchanged (cloud-sync <code>mtime</code> jitter). Same-size edits do not refresh the sidebar hash until you click <strong>Run</strong>. UI scan/change polls read the watcher snapshot; they do not re-walk the tree.</li>
+            <li>File watch skips hashing when size is unchanged (cloud-sync <code>mtime</code> jitter). Same-size edits do not refresh the sidebar hash until you click <strong>Run</strong>. UI scan/change polls read the watcher snapshot; they re-walk at most every 45s if watchdog missed an event.</li>
             <li>Cancel interrupts <code>time.sleep</code> quickly. Other blocking calls (network, LLM) still finish before the run stops.</li>
           </ul>
         </article>
@@ -1098,7 +1098,7 @@ file = "decision_pipeline.py"</pre>
   </main>
 
   <footer>
-    <div><span class="wordmark">GraphV<span class="ia">IA</span>gent</span> · 1.4.2-dev · MIT · @antsticky</div>
+    <div><span class="wordmark">GraphV<span class="ia">IA</span>gent</span> · 1.4.3-dev · MIT · @antsticky</div>
     <div>
       <a href="https://pypi.org/project/graphviagent/">PyPI</a>
       ·

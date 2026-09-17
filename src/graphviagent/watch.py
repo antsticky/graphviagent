@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from graphviagent.discover import discover_pipelines, path_is_skipped
 
 _DEBOUNCE_S = 0.2
 _EVENT_CAP = 200
+_STALE_REFRESH_S = 45
 
 
 def _is_pipeline_name(name: str) -> bool:
@@ -115,6 +117,7 @@ class PipelineWatcher:
         self._observer: Observer | None = None
         self._handler: _DebouncedHandler | None = None
         self._watches: dict[str, Any] = {}
+        self._last_refresh: float | None = None
 
     def watches(self, path: Path) -> bool:
         if path.name == CONFIG_NAME:
@@ -224,7 +227,18 @@ class PipelineWatcher:
             self._timer.daemon = True
             self._timer.start()
 
+    def maybe_refresh(self, max_age: float = _STALE_REFRESH_S) -> None:
+        now = time.monotonic()
+        with self._lock:
+            last = self._last_refresh
+            if last is not None and (now - last) < max_age:
+                return
+            self._last_refresh = now
+        self.refresh(emit=True)
+
     def refresh(self, emit: bool = True) -> None:
+        with self._lock:
+            self._last_refresh = time.monotonic()
         reloaded = self._reload_config()
         self._sync_watch_folders()
         with self._lock:

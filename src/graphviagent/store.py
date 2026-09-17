@@ -376,6 +376,7 @@ def list_runs(
     *,
     include_steps: bool = False,
     limit: int | None = None,
+    offset: int = 0,
 ) -> list[dict]:
     folder = store_root(workspace) / stem
     if not folder.is_dir():
@@ -422,9 +423,10 @@ def list_runs(
             ]
         runs.append(item)
     runs.sort(key=lambda entry: entry.get("created_at") or "", reverse=True)
-    if limit is not None:
-        return runs[:limit]
-    return runs
+    start = max(0, offset)
+    if limit is None:
+        return runs[start:]
+    return runs[start : start + max(0, limit)]
 
 
 def pipeline_has_busy_runs(workspace: Path, stem: str) -> bool:

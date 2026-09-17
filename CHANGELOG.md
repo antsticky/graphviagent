@@ -1,11 +1,23 @@
 # Changelog
 
-## 1.4.2-dev
+## 1.4.3-dev
 
 ### Changed
 - Trace run list uses the same **success** label (green) as the status filter, instead of **run**
 - First UI open shows a **scanning** overlay until the initial pipeline list returns (OneDrive / slow disks)
-- `/api/scan` and `/api/changes` return the watcher's snapshot; they no longer re-walk the workspace on every UI poll. Watchdog still schedules refresh on file events
+- `/api/scan` and `/api/changes` return the watcher's snapshot; they no longer re-walk the workspace on every UI poll. Watchdog still schedules refresh on file events. A walk still runs if the snapshot is older than 45s, so a missed inotify / ReadDirectoryChanges event is not silent forever
+- Trace history loads 40 runs, then the next page when you scroll (`GET /api/runs?limit=&offset=`, `has_more`)
+- Cancel keeps **Canceling** (red, spinner) and a red **canceling** pill until the run actually stops
+- Queued history pills are **queued** only (no `#1` / `#2`); the toolbar still shows how many are waiting
+
+### Fixed
+- Canceling is only the in-flight job flag, so a Run / history click still opens the saved run
+- Trace history paging no longer dies when a live poll overlaps a scroll fetch (`has_more` follows the server; page-in has its own lock)
+- Replay seeds only when the original thread is gone; a failed checkpoint fork is stored as a failed replay
+- Cancel on a paused run no longer blocks Cancel on a different paused run (`pendingCancel` is per `runId`)
+- Fast history clicks keep the last selection; a slower `GET /api/runs/{id}` does not replace Trace
+
+## 1.4.2
 
 ### Fixed
 - Continue / Step keep per-node visit ids (`agent#2` after `agent#1`); Replay no longer hits the earlier loop visit

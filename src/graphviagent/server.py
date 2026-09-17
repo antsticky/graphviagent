@@ -211,6 +211,10 @@ PAGE = r"""<!DOCTYPE html>
       background: var(--accent);
       animation: live-pulse 1.1s ease-in-out infinite;
     }
+    .status-dot.canceling {
+      background: #a8a29e;
+      animation: live-pulse 1.1s ease-in-out infinite;
+    }
     .page { height: calc(100vh - 48px); overflow: auto; padding: 24px 28px; }
     .page[hidden], .layout[hidden] { display: none; }
     .page-inner { width: 100%; max-width: none; }
@@ -262,6 +266,10 @@ PAGE = r"""<!DOCTYPE html>
     .af-bar.paused { background: #fbbf24; }
     .af-bar.running {
       background: var(--accent);
+      animation: live-pulse 1.1s ease-in-out infinite;
+    }
+    .af-bar.canceling {
+      background: #a8a29e;
       animation: live-pulse 1.1s ease-in-out infinite;
     }
     .af-bar:hover { filter: brightness(1.15); }
@@ -405,6 +413,9 @@ PAGE = r"""<!DOCTYPE html>
     button.cancel { border-color: #7f1d1d; color: #fca5a5; }
     button.cancel:hover { background: #2a1518; }
     button.cancel:disabled:hover { background: transparent; }
+    button.cancel.canceling:disabled {
+      opacity: 1; cursor: wait; color: #e7e5e4; border-color: #57534e;
+    }
     button.ghost.danger, button.danger {
       border: 1px solid #7f1d1d; color: #fca5a5; background: transparent;
     }
@@ -431,6 +442,8 @@ PAGE = r"""<!DOCTYPE html>
       content: ""; width: 8px; height: 8px; border-radius: 99px;
       background: var(--accent); animation: live-pulse 1.1s ease-in-out infinite;
     }
+    .run-live.canceling { color: #d6d3d1; }
+    .run-live.canceling::before { background: #a8a29e; }
     @keyframes live-pulse {
       0%, 100% { opacity: 1; }
       50% { opacity: 0.35; }
@@ -723,6 +736,9 @@ PAGE = r"""<!DOCTYPE html>
     #history .pill.mode-paused { color: #fbbf24; background: rgba(251, 191, 36, 0.16); }
     #history .pill.mode-running, .item .pill.mode-running {
       color: #c4b5fd; background: rgba(124, 92, 255, 0.22);
+    }
+    #history .pill.mode-canceling, .item .pill.mode-canceling {
+      color: #e7e5e4; background: rgba(168, 162, 158, 0.28);
     }
     .g-body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
     .g-name { font-size: 13px; font-weight: 500; }
@@ -1616,6 +1632,7 @@ PAGE = r"""<!DOCTYPE html>
     let graphPanY = 0;
     let graphViewMode = "graph";
     let inflightRuns = [];
+    let pendingCancel = null;
     let breakpoints = {};
 
     const $ = (id) => document.getElementById(id);
@@ -1719,6 +1736,29 @@ PAGE = r"""<!DOCTYPE html>
       return inflightRuns.find((job) => currentRun && job.id === currentRun.id) || null;
     }
 
+    function currentIsCanceling() {
+      const job = currentLiveJob();
+      if (job && job.canceling) return true;
+      if (currentRun && currentRun.status === "canceling") return true;
+      return Boolean(pendingCancel && currentRun && pendingCancel.runId === currentRun.id);
+    }
+
+    function pipelineIsCanceling(p) {
+      if (!p) return false;
+      const jobs = inflightRuns.filter((job) => job.fileId === p.id);
+      if (jobs.length) return jobs.every((job) => job.canceling);
+      return Boolean(pendingCancel && pendingCancel.fileId === p.id);
+    }
+
+    function syncCancelButton() {
+      const btn = $("cancelBtn");
+      if (!btn) return;
+      const canceling = currentIsCanceling();
+      btn.textContent = canceling ? "Canceling" : "Cancel";
+      btn.classList.toggle("canceling", canceling);
+      btn.disabled = canceling || (!currentLiveJob() && !runIsPaused(currentRun));
+    }
+
     function syncPauseControls() {
       const banner = $("pauseBanner");
       const panel = $("hitlPanel");
@@ -1727,7 +1767,7 @@ PAGE = r"""<!DOCTYPE html>
       const nxt = (currentRun && currentRun.next) || [];
       $("continueBtn").disabled = !paused;
       $("stepBtn").disabled = !paused || !nxt.length || hits.length > 0;
-      $("cancelBtn").disabled = !currentLiveJob() && !runIsPaused(currentRun);
+      syncCancelButton();
       if (!paused) {
         if (banner) banner.hidden = true;
         if (panel) panel.hidden = true;
@@ -2029,7 +2069,9 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function pipelineStatus(p) {
-      if (p && inflightRuns.some((job) => job.fileId === p.id)) return "live";
+      if (pipelineIsCanceling(p)) return "canceling";
+      const jobs = inflightRuns.filter((job) => p && job.fileId === p.id);
+      if (jobs.length) return "live";
       if (p && p.error) return "error";
       if (p && p.last_run && p.last_run.status === "error") return "error";
       if (p && p.last_run && p.last_run.status === "canceled") return "canceled";
@@ -2039,6 +2081,7 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function runDotClass(run) {
+      if (run && (run.status === "canceling" || run.canceling)) return "canceling";
       if (run && (run.live || run.status === "running")) return "running";
       if (runIsCanceled(run) || (run && run.status === "canceled")) return "canceled";
       if (run && (run.status === "paused" || run.paused)) return "paused";
@@ -2056,6 +2099,7 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function runHoverText(run) {
+      if (run && (run.status === "canceling" || run.canceling)) return "canceling";
       if (run && (run.live || run.status === "running")) return "running";
       const when = run.created_at ? new Date(run.created_at) : null;
       const date = when && !Number.isNaN(when.getTime())
@@ -2145,7 +2189,7 @@ PAGE = r"""<!DOCTYPE html>
             input: run.input != null ? run.input : job.input,
             created_at: run.started_at || job.started_at,
             elapsed_ms: run.elapsed_ms,
-            status: "running",
+            status: job.canceling ? "canceling" : "running",
             mode: "run",
             live: true,
             steps: run.steps || [],
@@ -2240,7 +2284,7 @@ PAGE = r"""<!DOCTYPE html>
           bar.type = "button";
           bar.className = "af-bar " + runDotClass(run);
           const ms = Number(run.elapsed_ms) || 0;
-          const liveH = run.live || run.status === "running" ? 22 : 6;
+          const liveH = run.live || run.status === "running" || run.status === "canceling" ? 22 : 6;
           bar.style.height = Math.max(liveH, Math.round((ms / maxMs) * 52)) + "px";
           bar.title = runHoverText(run);
           bar.onclick = () => openPipelineRun(p.id, run.id);
@@ -2430,13 +2474,14 @@ PAGE = r"""<!DOCTYPE html>
       const box = $("pipelines");
       box.innerHTML = "";
       pipelines.forEach((p) => {
-        const live = inflightRuns.some((job) => job.fileId === p.id);
+        const canceling = pipelineIsCanceling(p);
+        const live = inflightRuns.some((job) => job.fileId === p.id) && !canceling;
         const btn = document.createElement("button");
         btn.className = "item" + (p.error ? " error" : "") + (p.id === fileId ? " active" : "");
         btn.innerHTML =
           '<span class="status-dot ' + pipelineStatus(p) + '"></span> ' +
           escapeHtml(p.stem + (p.error ? " (error)" : "")) +
-          (live ? ' <span class="pill mode-running">running</span>' : "");
+          (canceling ? ' <span class="pill mode-canceling">canceling</span>' : live ? ' <span class="pill mode-running">running</span>' : "");
         btn.title = p.error || p.id;
         btn.onclick = () => selectPipeline(p.id);
         box.appendChild(btn);
@@ -2532,7 +2577,7 @@ PAGE = r"""<!DOCTYPE html>
       if (q === "canceled" || q === "cancelled" || q === "cancel") return run.status === "canceled";
       if (q === "ok" || q === "success") return run.status === "ok";
       if (q === "paused") return run.status === "paused";
-      if (q === "running" || q === "live") return run.status === "running";
+      if (q === "running" || q === "live") return run.status === "running" || run.status === "canceling";
       return inputSearchText(run.input).includes(q);
     }
 
@@ -2546,7 +2591,7 @@ PAGE = r"""<!DOCTYPE html>
             input: run.input != null ? run.input : job.input,
             created_at: run.started_at || job.started_at,
             elapsed_ms: run.elapsed_ms,
-            status: "running",
+            status: job.canceling ? "canceling" : "running",
             mode: "run",
             live: true,
           };
@@ -2572,8 +2617,8 @@ PAGE = r"""<!DOCTYPE html>
         const btn = document.createElement("button");
         btn.className = "run" + (currentRun && currentRun.id === r.id ? " active" : "");
         const mode = r.mode || "run";
-        const pill = runIsCanceled(r) ? "canceled" : r.status === "error" ? "error" : r.status === "paused" ? "paused" : r.status === "running" ? "running" : mode;
-        const known = { run: 1, replay: 1, replay_from: 1, error: 1, canceled: 1, approximate: 1, paused: 1, running: 1 };
+        const pill = runIsCanceled(r) ? "canceled" : r.status === "error" ? "error" : r.status === "paused" ? "paused" : r.status === "canceling" ? "canceling" : r.status === "running" ? "running" : mode;
+        const known = { run: 1, replay: 1, replay_from: 1, error: 1, canceled: 1, canceling: 1, approximate: 1, paused: 1, running: 1 };
         const pillClass = known[pill] ? pill : "run";
         const outdated = isOutdated(r)
           ? '<span class="pill mode-outdated">outdated</span>'
@@ -4218,10 +4263,15 @@ PAGE = r"""<!DOCTYPE html>
       const n = inflightRuns.length;
       $("runBtn").disabled = n >= 3;
       $("runBtn").textContent = "Run";
-      $("cancelBtn").disabled = !currentLiveJob() && !runIsPaused(currentRun);
       const live = $("runLive");
+      const cancelingN = inflightRuns.filter((job) => job.canceling).length;
       live.hidden = n === 0;
-      live.textContent = n ? "Running " + n + "/3" : "Running";
+      live.classList.toggle("canceling", cancelingN > 0 && cancelingN === n);
+      if (n && cancelingN === n) {
+        live.textContent = n === 1 ? "Canceling" : "Canceling " + n + "/3";
+      } else {
+        live.textContent = n ? "Running " + n + "/3" : "Running";
+      }
       syncPauseControls();
       paintPipelines();
       renderHistory();
@@ -4486,12 +4536,30 @@ PAGE = r"""<!DOCTYPE html>
         ? job.id
         : (runIsPaused(currentRun) && currentRun.id ? currentRun.id : "");
       if (!id) return;
+      if (job && job.canceling) return;
+      if (!job && (pendingCancel || (currentRun && currentRun.status === "canceling"))) return;
+      if (job) job.canceling = true;
+      else {
+        pendingCancel = { runId: id, fileId: fileId };
+        currentRun = Object.assign({}, currentRun, { status: "canceling" });
+        historyRuns = historyRuns.map((row) => (
+          row.id === id ? Object.assign({}, row, { status: "canceling" }) : row
+        ));
+      }
+      syncRunControls();
       await fetch("/api/run/cancel", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ run_id: id }),
       }).catch(() => null);
-      if (!job) await openRun(id);
+      if (!job) {
+        try {
+          await openRun(id);
+        } finally {
+          pendingCancel = null;
+          syncRunControls();
+        }
+      }
     }
 
     function currentPipeline() {
@@ -4499,7 +4567,7 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function isOutdated(run) {
-      if (!run || run.live || run.status === "running") return false;
+      if (!run || run.live || run.status === "running" || run.status === "canceling") return false;
       if (inflightRuns.some((job) => job.id === run.id)) return false;
       const pipe = currentPipeline();
       if (!pipe) return false;

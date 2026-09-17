@@ -5,6 +5,13 @@
 ### Added
 - Run-slot limit is `--concurrent` / `concurrent` in `graphviagent.toml` / `GVA_CONCURRENT` (default 3). Every graph execution takes a slot: live Run, Continue/Step, `POST /api/run`, and Replay / Replay from. Overflow waits in a server-side FIFO (`--queue-limit` / `queue_limit` / `GVA_QUEUE_LIMIT`, default 4× concurrent). Resume / HITL jumps ahead of new runs so a paused run is not stuck behind other live work. LangGraph node fan-out is separate (`--node-concurrency` / `node_concurrency` / `GVA_NODE_CONCURRENCY`; omitted = unlimited). Slots and the queue live on the server (`GET /api/meta`); two browser tabs share them.
 
+### Changed
+- Concurrent runs in one process are keyed only by LangGraph `thread_id` (a missing id is not inferred from “the only capture”). `user_id` is set to that same id so a shared `MemorySaver` / store cannot mix long-term memory across runs
+- Node probes stay installed for the compiled app (refcount), but each run has its own probe bucket, logs, and cancel via capture lookup
+- Process-global stdout/stderr and `time.sleep` patches resolve the current run through TLS / `thread_id`, so queued and running workers do not leak logs or cancel
+- `save_run` writes to a temp file and `os.replace`s it; list/load skip unreadable JSON and hidden temp files
+- Graph workers are non-daemon and joined after cancel, so disconnecting cannot free a slot while an LLM call is still running
+
 ### Fixed
 - Cancel shows **Canceling** on the button and pipeline until the run actually stops
 - A 4th Run is queued instead of rejected; a full queue returns HTTP 429 with `{active, queued, limit, queue_limit}`

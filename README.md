@@ -9,6 +9,7 @@ Pipeline files do not import GraphVIAgent. Only runs you start from the UI or CL
 ## What's new in 1.3.0-dev
 
 - Run slots (`--concurrent`, default 3) are no longer the LangGraph node fan-out cap
+- Concurrent runs in one process stay isolated by `thread_id` (and matching `user_id`); run files are written atomically
 - Parallel `Send` nodes keep timing, logs, tokens, and cancellable `time.sleep` on worker threads
 - `graphviagent.toml` `context` is passed into runs as LangGraph runtime context
 - Routing strip counts paused with success / failed / canceled. Runtime average vs longest uses successful runs only
@@ -118,7 +119,7 @@ graphviagent serve . --host 127.0.0.1
 graphviagent serve . --concurrent 5
 ```
 
-`--concurrent` is how many graphs can run at once (default 3). Live Run, Continue/Step, `POST /api/run`, and Replay / Replay from each take a slot. Extra work waits in a server-side FIFO (SSE heartbeats until a slot opens). `--queue-limit N` caps that wait list (default 4× concurrent); overflow is HTTP 429. Two browser tabs share the same slots — the client’s in-flight list is not the cap. Resume / HITL continues jump ahead of brand-new runs so a paused graph is not stuck behind other live work, but they still occupy a slot when they execute. Closing the tab cancels a queued wait without starting the graph.
+`--concurrent` is how many graphs can run at once (default 3). Live Run, Continue/Step, `POST /api/run`, and Replay / Replay from each take a slot. Extra work waits in a server-side FIFO (SSE heartbeats until a slot opens). `--queue-limit N` caps that wait list (default 4× concurrent); overflow is HTTP 429. Two browser tabs share the same slots — the client’s in-flight list is not the cap. Resume / HITL continues jump ahead of brand-new runs so a paused graph is not stuck behind other live work, but they still occupy a slot when they execute. Closing the tab cancels a queued wait without starting the graph. Each in-flight run gets its own LangGraph `thread_id` (and matching `user_id`), so a shared checkpointer cannot mix state. A disconnect waits for that worker to finish after cancel; it does not free the slot while an LLM call is still running.
 
 `--concurrent` does not cap parallel nodes inside one graph. Optional `--node-concurrency N` sets LangGraph `max_concurrency` for node fan-out; if omitted, a 4th parallel node is not queued behind that cap. `GVA_CONCURRENT`, `GVA_QUEUE_LIMIT`, and `GVA_NODE_CONCURRENCY` override toml; CLI flags override the environment.
 

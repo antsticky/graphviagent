@@ -30,6 +30,8 @@ _capture_depth = 0
 _probe_guard = threading.Lock()
 _probed_apps: dict[int, dict[str, Any]] = {}
 _TLS_FIELDS = (
+    "capture",
+    "thread_id",
     "cancel",
     "emit",
     "probes",
@@ -45,6 +47,7 @@ _TLS_FIELDS = (
 class _RunCapture:
     """Per-run hooks shared with LangGraph worker threads (not thread-local)."""
 
+    thread_id: str = ""
     cancel: Any = None
     emit: Any = None
     probes: list | None = None
@@ -88,14 +91,18 @@ def _unregister_run_capture(thread_id: str | None) -> None:
 
 
 def _lookup_run_capture(thread_id: str | None) -> _RunCapture | None:
+    if not thread_id:
+        return None
     with _run_captures_lock:
-        if thread_id:
-            found = _run_captures.get(str(thread_id))
-            if found is not None:
-                return found
-        if len(_run_captures) == 1:
-            return next(iter(_run_captures.values()))
-    return None
+        return _run_captures.get(str(thread_id))
+
+
+def _active_capture() -> _RunCapture | None:
+    tid = getattr(_capture_tls, "thread_id", None)
+    if not tid:
+        capture = getattr(_capture_tls, "capture", None)
+        tid = getattr(capture, "thread_id", None) if capture is not None else None
+    return _lookup_run_capture(str(tid) if tid else None)
 
 
 def _tls_snapshot() -> dict[str, Any]:
@@ -110,7 +117,11 @@ def _tls_restore(previous: dict[str, Any]) -> None:
 def _tls_bind_capture(capture: _RunCapture | None) -> dict[str, Any]:
     previous = _tls_snapshot()
     if capture is None:
+        for name in _TLS_FIELDS:
+            setattr(_capture_tls, name, None)
         return previous
+    _capture_tls.capture = capture
+    _capture_tls.thread_id = capture.thread_id
     _capture_tls.cancel = capture.cancel
     _capture_tls.emit = capture.emit
     _capture_tls.probes = capture.probes
@@ -118,7 +129,10 @@ def _tls_bind_capture(capture: _RunCapture | None) -> dict[str, Any]:
     _capture_tls.clock0 = capture.clock0
     _capture_tls.usage = capture.usage
     _capture_tls.on_stdio = capture.on_stdio
+    _capture_tls.node = None
     return previous
+
+
 _time_sleep = time.sleep
 _sleep_depth = 0
 _capture_stdout: Any = None
@@ -348,7 +362,17 @@ def _callback_config(
     return config
 
 
-_RESERVED_CONFIG_KEYS = {"thread_id", "checkpoint_id", "checkpoint_ns"}
+_RESERVED_CONFIG_KEYS = {"thread_id", "checkpoint_id", "checkpoint_ns", "user_id"}
+
+
+def _thread_config(thread_id: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    configurable = {"thread_id": str(thread_id), "user_id": str(thread_id)}
+    if extra:
+        for key, value in extra.items():
+            if key in {"thread_id", "user_id"}:
+                continue
+            configurable[str(key)] = value
+    return {"configurable": configurable}
 
 
 def _normalize_context(raw: dict | None) -> dict[str, Any] | None:
@@ -649,7 +673,8 @@ class _CaptureStream:
             written = len(text)
         if getattr(_capture_tls, "in_logging", 0):
             return written if isinstance(written, int) else len(text)
-        hook = getattr(_capture_tls, "on_stdio", None)
+        capture = _active_capture()
+        hook = capture.on_stdio if capture is not None else None
         if hook is not None:
             for line in text.splitlines():
                 if line.strip():
@@ -705,7 +730,8 @@ def _cancellable_sleep(seconds: object = 0) -> None:
         total = 0.0
     if total <= 0:
         return
-    cancel = getattr(_capture_tls, "cancel", None)
+    capture = _active_capture()
+    cancel = capture.cancel if capture is not None else None
     if cancel is None:
         _time_sleep(total)
         return
@@ -741,7 +767,8 @@ class _RunLogHandler(logging.Handler):
         self.setFormatter(logging.Formatter("%(message)s"))
 
     def emit(self, record: logging.LogRecord) -> None:
-        emit = getattr(_capture_tls, "emit", None)
+        capture = _active_capture()
+        emit = capture.emit if capture is not None else None
         if emit is None:
             return
         try:
@@ -750,7 +777,7 @@ class _RunLogHandler(logging.Handler):
                 text = text + "\n" + self.formatter.formatException(record.exc_info)
         except Exception:
             text = str(getattr(record, "msg", "") or "")
-        clock0 = getattr(_capture_tls, "clock0", None)
+        clock0 = capture.clock0 if capture is not None else None
         now = round((time.perf_counter() - clock0) * 1000, 2) if clock0 else 0
         node = getattr(_capture_tls, "node", None)
         emit(
@@ -784,7 +811,8 @@ def _patch_logging_handle() -> None:
 
 
 def _tls_cancel_set() -> bool:
-    cancel = getattr(_capture_tls, "cancel", None)
+    capture = _active_capture()
+    cancel = capture.cancel if capture is not None else None
     return cancel is not None and getattr(cancel, "is_set", lambda: False)()
 
 
@@ -796,13 +824,6 @@ def _install_node_probes(
 ) -> tuple[list[dict], Any, threading.Lock]:
     probes: list[dict] = []
     lock = threading.Lock()
-    _capture_tls.cancel = cancel
-    _capture_tls.probes = probes
-    _capture_tls.probe_lock = lock
-    if clock0 is not None:
-        _capture_tls.clock0 = clock0
-    if emit:
-        _capture_tls.emit = emit
     nodes = getattr(app, "nodes", None)
     if not isinstance(nodes, dict):
         return probes, lambda: None, lock
@@ -1414,11 +1435,11 @@ def _fork_thread(app: Any, snapshot: Any, new_thread_id: str) -> dict[str, Any]:
     ns = ((getattr(snapshot, "config", None) or {}).get("configurable") or {}).get(
         "checkpoint_ns"
     ) or ""
-    dest = {"configurable": {"thread_id": new_thread_id, "checkpoint_ns": ns}}
+    dest = _thread_config(new_thread_id, {"checkpoint_ns": ns})
     checkpoint = tup.checkpoint
     versions = checkpoint.get("channel_versions") if isinstance(checkpoint, dict) else {}
     put(dest, checkpoint, tup.metadata, versions or {})
-    return {"configurable": {"thread_id": new_thread_id}}
+    return _thread_config(new_thread_id)
 
 
 def _snapshot_before_step(app: Any, run: dict, step: dict) -> Any:
@@ -1428,7 +1449,7 @@ def _snapshot_before_step(app: Any, run: dict, step: dict) -> Any:
     getter = getattr(app, "get_state_history", None)
     if not callable(getter):
         raise RuntimeError("graph has no get_state_history")
-    hist = list(getter({"configurable": {"thread_id": thread_id}}))
+    hist = list(getter(_thread_config(thread_id)))
     parent = step.get("checkpoint_parent_id")
     if parent:
         for snap in hist:
@@ -1467,7 +1488,7 @@ def _seed_before_step(
     *,
     thread_id: str,
 ) -> dict[str, Any]:
-    config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    config: dict[str, Any] = _thread_config(thread_id)
     payload = state if isinstance(state, dict) else {"value": state}
     pred = _predecessor_node(app, node)
     last_error: BaseException | None = None
@@ -1737,6 +1758,7 @@ def _execute_run(
     )
     configurable = dict(config.get("configurable") or {})
     configurable["thread_id"] = run_id
+    configurable["user_id"] = run_id
     config["configurable"] = configurable
     runtime_context = _normalize_context(context)
     has_checkpointer = has_checkpointer or _app_has_checkpointer(app)
@@ -1779,6 +1801,7 @@ def _execute_run(
         app, clock0, cancel=cancel, emit=push
     )
     capture = _RunCapture(
+        thread_id=run_id,
         cancel=cancel,
         emit=push,
         probes=probes,
@@ -2077,14 +2100,18 @@ def iter_run_events(
         finally:
             pending.put(None)
 
-    thread = threading.Thread(target=worker, name="graphviagent-run", daemon=True)
+    thread = threading.Thread(target=worker, name="graphviagent-run", daemon=False)
     thread.start()
-    while True:
-        item = pending.get()
-        if item is None:
-            break
-        yield item
-    thread.join(timeout=1)
+    try:
+        while True:
+            item = pending.get()
+            if item is None:
+                break
+            yield item
+    finally:
+        if thread.is_alive() and cancel is not None:
+            cancel.set()
+        thread.join()
 
 
 def record_run(

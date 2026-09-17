@@ -110,6 +110,7 @@ class RunScheduler:
         self._active: dict[str, RunJob] = {}
         self._stopped = threading.Event()
         self._thread: threading.Thread | None = None
+        self._workers: dict[str, threading.Thread] = {}
 
     def start(self) -> None:
         if self._thread is not None:
@@ -133,6 +134,10 @@ class RunScheduler:
         self._thread = None
         if thread is not None:
             thread.join(timeout=2)
+        with self._lock:
+            workers = list(self._workers.values())
+        for worker in workers:
+            worker.join()
 
     def snapshot(self) -> dict[str, int]:
         with self._lock:
@@ -253,8 +258,10 @@ class RunScheduler:
                 self._active[job.run_id] = job
                 self._broadcast_positions()
             thread = threading.Thread(
-                target=self._run, args=(job,), name=f"gva-run-{job.run_id[:8]}", daemon=True
+                target=self._run, args=(job,), name=f"gva-run-{job.run_id[:8]}", daemon=False
             )
+            with self._lock:
+                self._workers[job.run_id] = thread
             thread.start()
 
     def _run(self, job: RunJob) -> None:
@@ -270,6 +277,7 @@ class RunScheduler:
             job.events.put(SENTINEL)
             with self._cond:
                 self._active.pop(job.run_id, None)
+                self._workers.pop(job.run_id, None)
                 self._cond.notify_all()
 
     def _finish_cancel(self, job: RunJob, *, started: bool, emit_sentinel: bool = True) -> None:

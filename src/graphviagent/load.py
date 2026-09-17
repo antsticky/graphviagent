@@ -49,6 +49,7 @@ def _with_memory_saver(compile_fn: Any) -> tuple[Any, bool]:
     try:
         from langgraph.checkpoint.memory import MemorySaver
 
+        # Cached compiles reuse this checkpointer; each run must use a distinct thread_id.
         return compile_fn(checkpointer=MemorySaver()), True
     except TypeError:
         return compile_fn(), False

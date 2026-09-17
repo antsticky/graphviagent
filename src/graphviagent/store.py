@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,12 +96,48 @@ def migrate_run(run: dict) -> dict:
     return out
 
 
+def _write_text_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.stem}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _read_run_file(path: Path) -> dict | None:
+    if path.name.startswith("."):
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        return migrate_run(data)
+    except ValueError:
+        return None
+
+
 def save_run(workspace: Path, stem: str, run: dict) -> dict:
     now = datetime.now(timezone.utc).isoformat()
     run = migrate_run({**run, "pipeline": stem, "created_at": run.get("created_at") or now})
     run["gva_version"] = _gva_version()
     dest = pipeline_dir(workspace, stem) / f"{run['id']}.json"
-    dest.write_text(json.dumps(run, indent=2), encoding="utf-8")
+    _write_text_atomic(dest, json.dumps(run, indent=2))
     return run
 
 
@@ -263,15 +301,8 @@ def list_runs(
         return []
     runs: list[dict] = []
     for path in folder.glob("*.json"):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        try:
-            data = migrate_run(data)
-        except ValueError:
+        data = _read_run_file(path)
+        if data is None:
             continue
         item = {
             "id": data.get("id") or path.stem,
@@ -324,12 +355,9 @@ def load_run(workspace: Path, run_id: str) -> dict | None:
     if not root.is_dir() or not run_id:
         return None
     for path in root.glob(f"*/{run_id}.json"):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        if isinstance(data, dict):
-            return migrate_run(data)
+        data = _read_run_file(path)
+        if data is not None:
+            return data
     return None
 
 
@@ -543,15 +571,8 @@ def _iter_run_dicts(workspace: Path, stem: str | None = None):
         if not folder.is_dir():
             continue
         for path in folder.glob("*.json"):
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                continue
-            if not isinstance(data, dict):
-                continue
-            try:
-                data = migrate_run(data)
-            except ValueError:
+            data = _read_run_file(path)
+            if data is None:
                 continue
             if not data.get("pipeline"):
                 data["pipeline"] = folder.name

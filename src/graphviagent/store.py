@@ -266,6 +266,35 @@ def cancel_queue_stub(
     return saved
 
 
+def abandon_busy_runs(workspace: Path) -> int:
+    stale = [
+        data
+        for data in _iter_run_dicts(workspace)
+        if data.get("queued") or data.get("running")
+    ]
+    count = 0
+    for data in stale:
+        stem = str(data.get("pipeline") or "")
+        run_id = str(data.get("id") or "")
+        if not stem or not run_id:
+            continue
+        try:
+            wait_ms = float(data.get("wait_ms") or 0)
+        except (TypeError, ValueError):
+            wait_ms = 0.0
+        running = bool(data.get("running"))
+        resume = (not running) and bool(data.get("paused"))
+        if cancel_queue_stub(
+            workspace,
+            stem,
+            run_id,
+            wait_ms=wait_ms,
+            resume=resume,
+        ):
+            count += 1
+    return count
+
+
 def cancel_paused_run(workspace: Path, run_id: str) -> dict | None:
     run = load_run(workspace, run_id)
     if run is None or run_is_canceled(run) or run.get("error") or not run.get("paused"):

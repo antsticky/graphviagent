@@ -15,7 +15,10 @@ HEARTBEAT_S = 2.0
 class DuplicateRun(Exception):
     def __init__(self, run_id: str) -> None:
         self.run_id = run_id
-        super().__init__(f"run {run_id} is already queued or running")
+        super().__init__(f"run {run_id} is already active")
+
+    def payload(self) -> dict[str, object]:
+        return {"run_id": self.run_id, "active": True}
 
 
 class QueueFull(Exception):
@@ -28,8 +31,9 @@ class QueueFull(Exception):
             f"queue full ({queued}/{queue_limit} waiting, {active}/{limit} running)"
         )
 
-    def payload(self) -> dict[str, int]:
+    def payload(self) -> dict[str, int | bool]:
         return {
+            "busy": True,
             "active": self.active,
             "queued": self.queued,
             "limit": self.limit,
@@ -174,6 +178,13 @@ class RunScheduler:
         with self._lock:
             if any(job.matches(run_id) for job in self._waiting):
                 return True
+            return any(job.matches(run_id) for job in self._active.values())
+
+    def is_queued(self, run_id: str) -> bool:
+        return self.position_of(run_id) is not None
+
+    def is_active(self, run_id: str) -> bool:
+        with self._lock:
             return any(job.matches(run_id) for job in self._active.values())
 
     def has_job_for(self, *, stem: str | None = None, file_id: str | None = None) -> bool:

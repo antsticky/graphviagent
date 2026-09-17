@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import queue
 import threading
@@ -27,6 +28,7 @@ from graphviagent.record import iter_run_events, replay_step, resume_from_step
 from graphviagent.render import ascii_tree, unrolled_mermaid
 from graphviagent.scheduler import DuplicateRun, HEARTBEAT_S, QueueFull, RunJob, RunScheduler, SENTINEL
 from graphviagent.store import (
+    abandon_busy_runs,
     attach_run_timing,
     collect_stats,
     cancel_paused_run,
@@ -48,6 +50,15 @@ from graphviagent.watch import PipelineWatcher, file_sha256, snapshot_files
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1"}
 _WILDCARD_BINDS = {"0.0.0.0", "::", "::0", "*", ""}
+_DISCONNECT_ERRNOS = {errno.EPIPE, errno.ECONNRESET, errno.ECONNABORTED}
+
+
+def is_disconnect(exc: BaseException) -> bool:
+    if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+        return True
+    return isinstance(exc, OSError) and exc.errno in _DISCONNECT_ERRNOS
+
+
 _MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 
 
@@ -2123,6 +2134,9 @@ PAGE = r"""<!DOCTYPE html>
           ("queue full (" + (data.queued || 0) + "/" + (data.queue_limit || queueLimit) +
             " waiting, " + (data.active || 0) + "/" + (data.limit || runLimit) + " running)")
         );
+      }
+      if (res.status === 409) {
+        throw new Error(data.error || "that run_id is already active");
       }
       if (!res.ok) throw new Error(data.error || res.statusText);
       return data;
@@ -4619,6 +4633,9 @@ PAGE = r"""<!DOCTYPE html>
                 " waiting, " + (data.active || 0) + "/" + (data.limit || runLimit) + " running)")
             );
           }
+          if (res.status === 409) {
+            throw new Error(data.error || "that run_id is already active");
+          }
           throw new Error(data.error || res.statusText);
         }
         let finished = false;
@@ -6103,6 +6120,11 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
         self.close_connection = True
+        self._sse_comment("ok")
+
+    def _sse_comment(self, text: str = "ping") -> None:
+        self.wfile.write(f": {text}\n\n".encode())
+        self.wfile.flush()
 
     def _sse_data(self, payload: dict) -> None:
         body = f"data: {json.dumps(payload, default=str)}\n\n".encode()
@@ -6179,6 +6201,26 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                     is not None
                 )
         return cancel_paused_run(self.workspace, run_id) is not None
+
+    def _disconnect_run(self, run_id: str) -> None:
+        sched = self.scheduler
+        if sched is not None and sched.is_queued(run_id):
+            sched.cancel(run_id)
+            return
+        if sched is not None and sched.is_active(run_id):
+            sched.cancel(run_id)
+            return
+        run = load_run(self.workspace, run_id)
+        if run and (run.get("queued") or run.get("running")):
+            stem = run.get("pipeline")
+            if stem:
+                cancel_queue_stub(
+                    self.workspace,
+                    str(stem),
+                    run_id,
+                    wait_ms=float(run.get("wait_ms") or 0),
+                    resume=bool(run.get("paused")) and not run.get("running"),
+                )
 
     @classmethod
     def persist_queue_cancel(cls, job: RunJob) -> None:
@@ -6277,7 +6319,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
             try:
                 event = job.events.get(timeout=HEARTBEAT_S)
             except queue.Empty:
-                self._sse_data({"type": "ping"})
+                self._sse_comment("ping")
                 continue
             if event is SENTINEL:
                 return
@@ -6693,14 +6735,17 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                     self._sse_begin()
                     started = True
                     self._sse_pump(job)
-                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                    self._cancel_run(client_run_id)
                 except Exception as exc:
-                    if started:
+                    if is_disconnect(exc):
+                        self._disconnect_run(client_run_id)
+                    elif started:
                         try:
                             self._sse_data({"type": "error", "error": str(exc)})
-                        except Exception:
-                            self._cancel_run(client_run_id)
+                        except Exception as inner:
+                            if is_disconnect(inner):
+                                self._disconnect_run(client_run_id)
+                            else:
+                                self._cancel_run(client_run_id)
                     else:
                         self._cancel_run(client_run_id)
                         raise
@@ -6720,7 +6765,10 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                 try:
                     saved = self._drain_job(job)
                     self._json(200, self._with_render(saved))
-                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                except Exception as exc:
+                    if is_disconnect(exc):
+                        self._disconnect_run(run_id)
+                        return
                     self._cancel_run(run_id)
                     raise
                 return
@@ -6769,8 +6817,15 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                     parent_id=str(run.get("id") or ""),
                     from_step=str(payload["step_id"]),
                 )
-                saved = self._drain_job(job)
-                self._json(200, self._with_render(saved))
+                try:
+                    saved = self._drain_job(job)
+                    self._json(200, self._with_render(saved))
+                except Exception as exc:
+                    if is_disconnect(exc):
+                        self._disconnect_run(new_id)
+                        return
+                    self._cancel_run(new_id)
+                    raise
                 return
             if parsed.path == "/api/import":
                 fallback = self._stem_for_file_id(str(payload.get("file") or ""))
@@ -6786,8 +6841,10 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         except QueueFull as exc:
             self._json(429, {"error": str(exc), **exc.payload()})
         except DuplicateRun as exc:
-            self._json(409, {"error": str(exc)})
+            self._json(409, {"error": str(exc), **exc.payload()})
         except Exception as exc:
+            if is_disconnect(exc):
+                return
             self._json(400, {"error": str(exc)})
 
 
@@ -6830,6 +6887,13 @@ def serve(
     GraphVIHandler.concurrent = config.concurrent
     GraphVIHandler.node_concurrency = config.node_concurrency
     GraphVIHandler.queue_limit = effective_queue_limit(config)
+    leftover = abandon_busy_runs(workspace)
+    if leftover:
+        print(
+            f"[graphviagent] canceled {leftover} leftover queued/running run(s) "
+            "from a previous process",
+            flush=True,
+        )
 
     def invalidate(file_ids: list[str]) -> None:
         for file_id in file_ids:

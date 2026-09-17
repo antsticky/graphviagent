@@ -11,12 +11,15 @@
 - Process-global stdout/stderr and `time.sleep` patches resolve the current run through TLS / `thread_id`, so queued and running workers do not leak logs or cancel
 - `save_run` writes to a temp file and `os.replace`s it; list/load skip unreadable JSON and hidden temp files
 - Graph workers are non-daemon and joined after cancel, so disconnecting cannot free a slot while an LLM call is still running
+- Closing a tab dequeues a waiting run and still cancels a live one; a paused or finished run is left alone
+- Leftover `queued` / `running` stubs from a crashed process are canceled on the next `serve` so they do not look runnable
+- SSE queue waits send comment heartbeats (`: ping`) so proxies do not drop the connection
 
 ### Fixed
 - Cancel shows **Canceling** on the button and pipeline until the run actually stops
-- A 4th Run is queued instead of rejected; a full queue returns HTTP 429 with `{active, queued, limit, queue_limit}`
-- Closing the tab cancels a queued wait without starting the graph
-- A second start of the same `run_id` is refused (HTTP 409) instead of overwriting the first run’s cancel flag
+- A 4th Run is queued instead of rejected; a full queue returns HTTP 429 `{busy, active, queued, limit, queue_limit}`, not a generic 400
+- Closing the tab dequeues a queued wait without starting the graph
+- A second start of the same `run_id` is refused (HTTP 409 `{active, run_id}`), not HTTP 400
 - Continue / Step stay available while other graphs are live; they still take a server slot (or join the queue)
 - Trace follows the run you opened: finishing another job does not replace the view; History / Runs clicks keep the live SSE
 - Clear / Delete refuse while a pipeline or run is queued or running

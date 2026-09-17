@@ -1436,10 +1436,34 @@ PAGE = r"""<!DOCTYPE html>
     .warn ul { margin: 0 0 14px; padding-left: 18px; color: var(--ink); }
     .warn li { margin: 3px 0; font-size: 12px; }
     .warn-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    #bootScan {
+      position: fixed; inset: 0; z-index: 80;
+      display: flex; align-items: center; justify-content: center;
+      gap: 2px;
+      background: var(--bg);
+      color: var(--muted);
+      font-size: 13px; font-weight: 500;
+    }
+    #bootScan[hidden] { display: none !important; }
+    #bootScan .boot-scan-dots {
+      display: inline-flex; gap: 4px; margin-left: 6px; align-items: flex-end;
+    }
+    #bootScan .boot-scan-dots i {
+      width: 5px; height: 5px; border-radius: 99px;
+      background: var(--muted);
+      animation: boot-dot 0.9s ease-in-out infinite;
+    }
+    #bootScan .boot-scan-dots i:nth-child(2) { animation-delay: 0.15s; }
+    #bootScan .boot-scan-dots i:nth-child(3) { animation-delay: 0.3s; }
+    @keyframes boot-dot {
+      0%, 70%, 100% { transform: translateY(0); opacity: 0.35; }
+      35% { transform: translateY(-5px); opacity: 1; }
+    }
     @media (max-width: 900px) { .layout, .grid, .io, .cmp-pickers, .cmp-grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
+  <div id="bootScan" aria-busy="true" aria-live="polite">scanning<span class="boot-scan-dots" aria-hidden="true"><i></i><i></i><i></i></span></div>
   <header>
     <div class="brand">
       <span class="mark">GVA</span> GraphVIAgent
@@ -6216,11 +6240,19 @@ PAGE = r"""<!DOCTYPE html>
       if (!metric) return;
       bindMetricTip(el, metricTipHtml(metric));
     });
+    function hideBootScan() {
+      const el = $("bootScan");
+      if (el) el.hidden = true;
+    }
     Promise.all([loadMeta(), loadPipelines()]).then(async () => {
+      hideBootScan();
       showView(viewFromHash());
       if (!fileId && pipelines.length) await selectPipeline(pipelines[0].id);
       else scheduleTraceGraphLayout();
-    }).catch((e) => alert(e.message));
+    }).catch((e) => {
+      hideBootScan();
+      alert(e.message);
+    });
     setInterval(() => pollScan(), 2000);
     setInterval(() => pollChanges(), 500);
     setInterval(() => {

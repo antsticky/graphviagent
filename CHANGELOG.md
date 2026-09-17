@@ -4,6 +4,7 @@
 
 ### Changed
 - Trace run list uses the same **success** label (green) as the status filter, instead of **run**
+- First UI open shows a **scanning** overlay until the initial pipeline list returns (OneDrive / slow disks)
 
 ### Fixed
 - Continue / Step keep per-node visit ids (`agent#2` after `agent#1`); Replay no longer hits the earlier loop visit

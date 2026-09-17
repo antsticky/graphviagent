@@ -28,7 +28,7 @@ from graphviagent.store import (
     merge_resume_run,
     save_run,
 )
-from graphviagent.watch import PipelineWatcher, file_sha256
+from graphviagent.watch import PipelineWatcher, file_sha256, snapshot_files
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1"}
 _WILDCARD_BINDS = {"0.0.0.0", "::", "::0", "*", ""}
@@ -1601,6 +1601,7 @@ PAGE = r"""<!DOCTYPE html>
     let currentView = "trace";
     let historyRuns = [];
     let scanKey = "";
+    let scanFiles = [];
     let changeSeq = 0;
     let fileChangeEvents = [];
     let compareRuns = [];
@@ -5518,20 +5519,23 @@ PAGE = r"""<!DOCTYPE html>
       if (document.hidden) return;
       try {
         const data = await api("/api/scan");
-        const next = JSON.stringify(data.files || []);
+        const files = data.files || [];
+        const next = files.map((item) => item.id + ":" + (item.sha256 || "")).join("|");
         if (!scanKey) {
           scanKey = next;
+          scanFiles = files;
           return;
         }
         if (next === scanKey) return;
-        const prev = JSON.parse(scanKey);
+        const prev = scanFiles;
         scanKey = next;
-        const changed = (data.files || []).filter((item) => {
+        scanFiles = files;
+        const changed = files.filter((item) => {
           const before = prev.find((old) => old.id === item.id);
-          return !before || before.sha256 !== item.sha256 || before.mtime !== item.mtime;
+          return !before || before.sha256 !== item.sha256;
         }).map((item) => item.id);
         prev.forEach((old) => {
-          if (!(data.files || []).some((item) => item.id === old.id)) changed.push(old.id);
+          if (!files.some((item) => item.id === old.id)) changed.push(old.id);
         });
         await refreshAfterFileChange(changed);
       } catch (err) {}
@@ -5967,23 +5971,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         if self.watcher is not None:
             self.watcher.refresh(emit=True)
             return self.watcher.files()
-        items = []
-        for path in self._pipelines():
-            try:
-                resolved = path.resolve()
-                sha = file_sha256(resolved)
-                mtime = resolved.stat().st_mtime
-            except OSError:
-                continue
-            items.append(
-                {
-                    "id": self._rel_id(resolved),
-                    "stem": self._pipeline_stem(resolved),
-                    "mtime": mtime,
-                    "sha256": sha,
-                }
-            )
-        return items
+        return list(snapshot_files(self.workspace, self.config).values())
 
     def _cached_pipeline(self, file_id: str) -> LoadedPipeline:
         path = self._resolve_file_id(file_id)

@@ -201,7 +201,7 @@ file = "decision_pipeline.py"
 - `env_file` loads `KEY=VALUE` lines without overwriting variables already in the environment
 - `context` is LangGraph runtime context (`runtime.context` / `get_runtime()`), not graph state. It is passed on every UI, CLI, HITL resume, and replay run. Empty `{}` is omitted
 - If any `[pipeline.*]` tables exist, those files are the pipelines (`file` may be any `.py`, including a path outside the serve root). Optional `factory = "build_graph"`
-- If there are no `[pipeline.*]` tables, GraphVIAgent still globs `*_pipeline.py`
+- If there are no `[pipeline.*]` tables, GraphVIAgent still globs `*_pipeline.py`, skipping Python environments (`.venv` / `venv`, `pyvenv.cfg`, `conda-meta`, tox / pixi / direnv caches) instead of walking them
 
 `graphviagent serve /path/to/proj` uses that project's toml even when cwd is elsewhere.
 

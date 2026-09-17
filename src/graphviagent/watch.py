@@ -10,14 +10,10 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 from graphviagent.config import CONFIG_NAME, GVAConfig, activate_config, load_config
-from graphviagent.discover import SKIP_DIRS, discover_pipelines
+from graphviagent.discover import discover_pipelines, path_is_skipped
 
 _DEBOUNCE_S = 0.2
 _EVENT_CAP = 200
-
-
-def _skipped(path: Path) -> bool:
-    return any(part in SKIP_DIRS or part.endswith(".egg-info") for part in path.parts)
 
 
 def _is_pipeline_name(name: str) -> bool:
@@ -33,25 +29,36 @@ def file_sha256(path: Path) -> str:
 def snapshot_files(
     workspace: Path,
     config: GVAConfig | None = None,
+    previous: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     workspace = workspace.resolve()
+    prev = previous or {}
     items: dict[str, dict[str, Any]] = {}
     for path in discover_pipelines(workspace, config):
         try:
             resolved = path.resolve()
             stat = resolved.stat()
-            sha = file_sha256(resolved)
         except OSError:
             continue
         try:
             rel = resolved.relative_to(workspace).as_posix()
         except ValueError:
             rel = resolved.as_posix()
+        size = stat.st_size
+        before = prev.get(rel)
+        if before is not None and before.get("size") == size and before.get("sha256"):
+            sha = before["sha256"]
+        else:
+            try:
+                sha = file_sha256(resolved)
+            except OSError:
+                continue
         stem = config.stem_for(resolved) if config is not None else resolved.stem
         items[rel] = {
             "id": rel,
             "stem": stem,
             "mtime": stat.st_mtime,
+            "size": size,
             "sha256": sha,
         }
     return items
@@ -61,16 +68,19 @@ class _DebouncedHandler(FileSystemEventHandler):
     def __init__(self, watcher: PipelineWatcher) -> None:
         self.watcher = watcher
 
+    def _skipped(self, path: Path) -> bool:
+        return path_is_skipped(path, self.watcher.workspace)
+
     def on_any_event(self, event: FileSystemEvent) -> None:
         paths = [Path(event.src_path)]
         dest = getattr(event, "dest_path", None)
         if dest:
             paths.append(Path(dest))
         if event.is_directory:
-            if any(not _skipped(path) for path in paths):
+            if any(not self._skipped(path) for path in paths):
                 self.watcher.schedule_refresh()
             return
-        if any(not _skipped(path) and self.watcher.watches(path) for path in paths):
+        if any(not self._skipped(path) and self.watcher.watches(path) for path in paths):
             self.watcher.schedule_refresh()
 
 
@@ -87,11 +97,16 @@ class PipelineWatcher:
         self._on_config = on_config
         self._config = config
         self._toml_mtime: float | None = None
+        self._toml_size: int | None = None
         if config is not None and config.path is not None:
             try:
-                self._toml_mtime = config.path.stat().st_mtime
+                stat = config.path.stat()
             except OSError:
                 self._toml_mtime = None
+                self._toml_size = None
+            else:
+                self._toml_mtime = stat.st_mtime
+                self._toml_size = stat.st_size
         self._lock = threading.Lock()
         self._seq = 0
         self._files: dict[str, dict[str, Any]] = {}
@@ -172,7 +187,9 @@ class PipelineWatcher:
 
     def refresh(self, emit: bool = True) -> None:
         reloaded = self._reload_config()
-        nxt = snapshot_files(self.workspace, self._config)
+        with self._lock:
+            prev = self._files
+        nxt = snapshot_files(self.workspace, self._config, previous=prev)
         changed: list[str] = []
         with self._lock:
             prev = self._files
@@ -203,15 +220,19 @@ class PipelineWatcher:
         if toml_path is None:
             return False
         try:
-            mtime = toml_path.stat().st_mtime
+            stat = toml_path.stat()
         except OSError:
             return False
-        if self._toml_mtime is not None and mtime == self._toml_mtime:
+        size = stat.st_size
+        mtime = stat.st_mtime
+        if self._toml_size is not None and size == self._toml_size:
+            self._toml_mtime = mtime
             return False
         config = load_config(self.workspace)
         activate_config(config)
         self._config = config
         self._toml_mtime = mtime
+        self._toml_size = size
         self.workspace = config.root
         if self._on_config is not None:
             self._on_config(config)
@@ -223,7 +244,7 @@ class PipelineWatcher:
             if before is None:
                 self._push("added", item, None)
                 continue
-            if before.get("mtime") != item.get("mtime"):
+            if before.get("size") != item.get("size"):
                 self._push("modified", item, before)
             if before.get("sha256") != item.get("sha256"):
                 self._push("hash_changed", item, before)
@@ -244,6 +265,7 @@ class PipelineWatcher:
             "id": item["id"],
             "stem": item["stem"],
             "mtime": item.get("mtime"),
+            "size": item.get("size"),
             "sha256": item.get("sha256"),
             "prev_sha256": None if before is None else before.get("sha256"),
         }

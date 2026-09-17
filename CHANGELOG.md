@@ -3,6 +3,8 @@
 ## 1.3.0-dev
 
 ### Fixed
+- Pipeline glob no longer descends into Python environments (`.venv` / `venv`, `pyvenv.cfg`, conda prefixes, tox / pixi / direnv)
+- File watch re-hashes pipeline files only when size changes, so cloud-sync `mtime` jitter does not re-read them
 - Parallel `Send` nodes keep probe timing, print/log capture, token attribution, and cancellable `time.sleep` when LangGraph runs them on a worker thread; multiple visits of the same node in one superstep are recorded separately
 - `graphviagent.toml` `context` is passed into `stream` / replay / CLI runs as LangGraph runtime context (legacy graphs still see it on `config["configurable"]`; empty `{}` is omitted)
 - Routing color strip includes paused (amber) so it matches the grand total; caption and legend say **success**, not ok

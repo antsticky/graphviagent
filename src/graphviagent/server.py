@@ -2525,6 +2525,7 @@ PAGE = r"""<!DOCTYPE html>
       if (currentView === "runs") renderPipeBoard();
       if (currentView === "compare") loadCompare().catch((e) => alert(e.message));
       if (currentView === "statistics") loadStats().catch((e) => alert(e.message));
+      if (currentView === "trace") scheduleTraceGraphLayout();
       let hash = "#/" + currentView;
       if (currentView === "runs" && runsFocusStem) hash += "/" + encodeURIComponent(runsFocusStem);
       if (location.hash !== hash) location.hash = hash;
@@ -2570,7 +2571,6 @@ PAGE = r"""<!DOCTYPE html>
       paintPipelines();
       if (currentView === "runs") renderPipeBoard();
       if (fileId) renderExampleChips();
-      if (!fileId && pipelines.length) selectPipeline(pipelines[0].id);
     }
 
     function paintPipelines() {
@@ -3752,8 +3752,14 @@ PAGE = r"""<!DOCTYPE html>
         flow.insertBefore(svg, flow.firstChild);
       }
       svg.innerHTML = "";
-      const width = Math.max(1, flow.clientWidth || flow.scrollWidth);
-      const height = Math.max(1, flow.clientHeight || flow.scrollHeight);
+      const width = Math.max(0, flow.clientWidth || flow.scrollWidth);
+      const height = Math.max(0, flow.clientHeight || flow.scrollHeight);
+      const sample = flow.querySelector("[data-node]");
+      if (width < 8 || height < 8) return;
+      if (sample) {
+        const rect = sample.getBoundingClientRect();
+        if (rect.width < 2 && rect.height < 2) return;
+      }
       svg.setAttribute("width", String(width));
       svg.setAttribute("height", String(height));
       svg.setAttribute("viewBox", "0 0 " + width + " " + height);
@@ -3859,7 +3865,7 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     function graphPartsRect(flow) {
-      const parts = flow.querySelectorAll(".g-cap, .g-card, .g-line, .g-skip, .gantt-head, .gantt-row, .gantt-bar, .topo-svg");
+      const parts = flow.querySelectorAll(".g-cap, .g-card, .g-line, .g-skip, .gantt-head, .gantt-row, .gantt-bar");
       if (!parts.length) return flow.getBoundingClientRect();
       let left = Infinity;
       let top = Infinity;
@@ -3879,6 +3885,7 @@ PAGE = r"""<!DOCTYPE html>
       const box = $("diagram");
       const flow = box && box.querySelector(".gflow");
       if (!box || !flow) return;
+      if (box.clientWidth < 8 || box.clientHeight < 8) return;
       graphPanX = 0;
       graphPanY = 0;
       graphZoom = 1;
@@ -3897,6 +3904,23 @@ PAGE = r"""<!DOCTYPE html>
       graphPanX += (boxRect.left + boxRect.width / 2) - (graphRect.left + graphRect.width / 2);
       graphPanY += (boxRect.top + boxRect.height / 2) - (graphRect.top + graphRect.height / 2);
       applyGraphZoom();
+    }
+
+    function relayoutTraceGraph() {
+      if (currentView !== "trace") return;
+      const view = $("traceView");
+      const box = $("diagram");
+      if (!view || view.hidden || !box || box.clientWidth < 8 || box.clientHeight < 8) return;
+      const flow = box.querySelector(".gflow");
+      if (!flow) return;
+      if (flow.classList.contains("topo")) fitGraphZoom();
+      else applyGraphZoom();
+    }
+
+    function scheduleTraceGraphLayout() {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(relayoutTraceGraph);
+      });
     }
 
     function mountGraph(target, flow) {
@@ -6029,10 +6053,34 @@ PAGE = r"""<!DOCTYPE html>
     });
     let pipeResizeTimer = 0;
     window.addEventListener("resize", () => {
-      if (currentView !== "runs") return;
-      clearTimeout(pipeResizeTimer);
-      pipeResizeTimer = setTimeout(renderPipeBoard, 120);
+      if (currentView === "runs") {
+        clearTimeout(pipeResizeTimer);
+        pipeResizeTimer = setTimeout(renderPipeBoard, 120);
+        return;
+      }
+      if (currentView === "trace") {
+        clearTimeout(pipeResizeTimer);
+        pipeResizeTimer = setTimeout(relayoutTraceGraph, 120);
+      }
     });
+    const diagram = $("diagram");
+    if (diagram && window.ResizeObserver) {
+      let diagramResizeTimer = 0;
+      let diagramW = 0;
+      let diagramH = 0;
+      new ResizeObserver((entries) => {
+        if (currentView !== "trace") return;
+        const rect = entries[0] && entries[0].contentRect;
+        const width = rect ? rect.width : diagram.clientWidth;
+        const height = rect ? rect.height : diagram.clientHeight;
+        if (width < 8 || height < 8) return;
+        if (Math.abs(width - diagramW) < 1 && Math.abs(height - diagramH) < 1) return;
+        diagramW = width;
+        diagramH = height;
+        clearTimeout(diagramResizeTimer);
+        diagramResizeTimer = setTimeout(relayoutTraceGraph, 50);
+      }).observe(diagram);
+    }
     $("fcClear").onclick = () => {
       fileChangeEvents = [];
       renderFileChanges();
@@ -6048,8 +6096,10 @@ PAGE = r"""<!DOCTYPE html>
       if (!metric) return;
       bindMetricTip(el, metricTipHtml(metric));
     });
-    Promise.all([loadMeta(), loadPipelines()]).then(() => {
+    Promise.all([loadMeta(), loadPipelines()]).then(async () => {
       showView(viewFromHash());
+      if (!fileId && pipelines.length) await selectPipeline(pipelines[0].id);
+      else scheduleTraceGraphLayout();
     }).catch((e) => alert(e.message));
     setInterval(() => pollScan(), 2000);
     setInterval(() => pollChanges(), 500);

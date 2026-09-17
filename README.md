@@ -6,16 +6,15 @@ Local Graph-View-Agent for LangGraph. Scan `*_pipeline.py` files, record runs un
 
 Pipeline files do not import GraphVIAgent. Only runs you start from the UI or CLI are stored.
 
-## What's new in 1.3.0-dev
+## What's new in 1.4.0-dev
 
-- Run slots (`--concurrent`, default 3) are no longer the LangGraph node fan-out cap
+- Run slots (`--concurrent`, default 3) are no longer the LangGraph node fan-out cap; overflow waits in a FIFO (`--queue-limit`)
 - Concurrent runs in one process stay isolated by `thread_id` (and matching `user_id`); run files are written atomically
-- Parallel `Send` nodes keep timing, logs, tokens, and cancellable `time.sleep` on worker threads
-- `graphviagent.toml` `context` is passed into runs as LangGraph runtime context
-- Routing strip counts paused with success / failed / canceled. Runtime average vs longest uses successful runs only
-- Cancel mid-node keeps that visit’s timing; Routing shows **canceled**, not END
+- Disconnect dequeues a wait and cancels a live run; leftover queued/running stubs are canceled on the next `serve`
+- Pipeline glob skips Python environments; file watch re-hashes only when size changes
+- Trace graph relayouts when you open the page, so edges are not stretched after a fresh start
 
-See [CHANGELOG.md](CHANGELOG.md) for 1.2.0.
+See [CHANGELOG.md](CHANGELOG.md) for 1.3.0.
 
 ## Requirements
 

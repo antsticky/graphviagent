@@ -246,6 +246,7 @@
     .af-mark.replay { background: #fbbf24; }
     .af-mark.board { background: #22c55e; }
     .af-mark.cancel { background: #f07178; }
+    .af-mark.break { background: #fb7185; }
     .af-mark.hist { background: #c4b5fd; }
     .af-mark.state { background: #818cf8; }
     pre, .code {
@@ -361,6 +362,7 @@
       background: rgba(0, 0, 0, 0.32);
     }
     .tour-chip.trace { background: rgba(249, 115, 22, 0.16); border-color: #9a3412; color: #fdba74; }
+    .tour-chip.break { background: rgba(251, 113, 133, 0.16); border-color: #9f1239; color: #fda4af; }
     .tour-chip.replay { background: rgba(251, 191, 36, 0.14); border-color: #854d0e; color: #fde68a; }
     .tour-chip.runs { background: rgba(6, 182, 212, 0.16); border-color: #155e75; color: #a5f3fc; }
     .tour-chip.stats { background: rgba(192, 132, 252, 0.16); border-color: #6b21a8; color: #e9d5ff; }
@@ -400,6 +402,12 @@
     }
     .tour-card.trace::before { background: #f97316; }
     .tour-card.trace:hover { border-color: #9a3412; }
+    .tour-card.break {
+      --tour-glow: rgba(251, 113, 133, 0.18);
+      border-color: #3a1820; background: linear-gradient(180deg, #1d1418, #141418);
+    }
+    .tour-card.break::before { background: #fb7185; }
+    .tour-card.break:hover { border-color: #9f1239; }
     .tour-card.replay {
       --tour-glow: rgba(251, 191, 36, 0.18);
       border-color: #3a2e12; background: linear-gradient(180deg, #1d1a12, #141418);
@@ -436,6 +444,7 @@
       letter-spacing: 0; background: rgba(0, 0, 0, 0.35); color: inherit;
     }
     .tour-card.trace .tour-kicker { color: #fdba74; }
+    .tour-card.break .tour-kicker { color: #fda4af; }
     .tour-card.replay .tour-kicker { color: #fde68a; }
     .tour-card.runs .tour-kicker { color: #67e8f9; }
     .tour-card.stats .tour-kicker { color: #e9d5ff; }
@@ -506,6 +515,22 @@
       animation: viz-pulse 1.2s ease-in-out infinite;
     }
     .viz-node.live .dot { background: #22c55e; animation: live-dot 1.4s ease-out infinite; }
+    .viz-node .bp {
+      width: 8px; height: 8px; border-radius: 99px; flex: 0 0 8px;
+      border: 2px solid #fb7185; background: transparent;
+    }
+    .viz-node .bp.on { background: #fb7185; }
+    .viz-node.paused { border-color: #fb7185; color: #fda4af; }
+    .viz-toolbar {
+      display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap;
+    }
+    .viz-toolbar span {
+      padding: 5px 9px; border-radius: 7px; font-size: 11px; font-weight: 600;
+      border: 1px solid #3a3a44; color: var(--muted);
+    }
+    .viz-toolbar span.on {
+      border-color: #9f1239; color: #fda4af; background: rgba(251, 113, 133, 0.12);
+    }
     @keyframes viz-pulse {
       0%, 100% { box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.18); }
       50% { box-shadow: 0 0 0 7px rgba(249, 115, 22, 0.06); }
@@ -594,7 +619,7 @@
   <main>
     <section class="hero">
       <div>
-        <p class="kicker">Graph-View-Agent <span class="ver">1.3.0</span></p>
+        <p class="kicker">Graph-View-Agent <span class="ver">1.4.0-dev</span></p>
         <h1>See your LangGraph run <em>as it happens</em>.</h1>
         <p class="lede">
           GraphVIAgent is an inspector for LangGraph. Point it at a folder of
@@ -706,8 +731,12 @@
           <p>Same topology as Trace. Routing shows run count, average node visits, and success vs failed vs canceled. Runtime writes average duration, a pipeline grand total, and average vs longest run. Cost writes average in/out tokens, a pipeline grand total, and average per run. Hover a color strip for a dotted legend (one label per color). Colored jumps keep you on that pipeline.</p>
         </article>
         <article class="af-card">
-          <h3><span class="af-mark cancel"></span> Cancel, three at a time</h3>
-          <p>Up to three runs can execute together. Cancel stops an in-flight run or a paused one. <code>time.sleep</code> is interrupted within ~50ms. Other blocking calls still finish first. History keeps failed and canceled runs as separate statuses.</p>
+          <h3><span class="af-mark break"></span> Stop, step, and HITL</h3>
+          <p>Click the gutter dot on a topology card to break before that node. Breakpoints persist per pipeline. <strong>Continue</strong> resumes with those stops; <strong>Step</strong> runs the next node and pauses again. Graphs that call <code>interrupt(...)</code> pause with a resume-value box.</p>
+        </article>
+        <article class="af-card">
+          <h3><span class="af-mark cancel"></span> Queue and cancel</h3>
+          <p>Default three runs at a time (<code>--concurrent</code>); extra work waits in a FIFO (<code>--queue-limit</code>). Overflow is HTTP 429. Cancel stops a live run or a paused one, and dequeues a wait. <code>time.sleep</code> is interrupted within ~50ms. Other blocking calls still finish first.</p>
         </article>
         <article class="af-card">
           <h3><span class="af-mark hist"></span> Local history</h3>
@@ -791,13 +820,14 @@ graphviagent serve . --host 0.0.0.0 --expose</pre>
     <section id="manual">
       <h2>Manual</h2>
       <p class="sell">How Trace, replay, the board, and Compare work once you are in the UI.</p>
-      <p class="sell-sub">Four rooms, one pipeline. Jump Trace, Runs, Statistics, and Compare without losing the graph.</p>
+      <p class="sell-sub">Four rooms, one pipeline. Jump Trace, Runs, Statistics, and Compare without losing the graph. Breakpoints live on Trace.</p>
       <div class="tour-chips">
         <a class="tour-chip trace" href="#tour-trace"><span class="n">01</span> Trace</a>
-        <a class="tour-chip replay" href="#tour-replay"><span class="n">02</span> Replay</a>
-        <a class="tour-chip runs" href="#tour-runs"><span class="n">03</span> Runs</a>
-        <a class="tour-chip stats" href="#tour-stats"><span class="n">04</span> Statistics</a>
-        <a class="tour-chip compare" href="#tour-compare"><span class="n">05</span> Compare</a>
+        <a class="tour-chip break" href="#tour-break"><span class="n">02</span> Stop</a>
+        <a class="tour-chip replay" href="#tour-replay"><span class="n">03</span> Replay</a>
+        <a class="tour-chip runs" href="#tour-runs"><span class="n">04</span> Runs</a>
+        <a class="tour-chip stats" href="#tour-stats"><span class="n">05</span> Statistics</a>
+        <a class="tour-chip compare" href="#tour-compare"><span class="n">06</span> Compare</a>
       </div>
 
       <article class="tour-card trace" id="tour-trace">
@@ -808,7 +838,7 @@ graphviagent serve . --host 0.0.0.0 --expose</pre>
           <div class="tour-facts">
             <div class="tour-fact"><b>Graph / Gantt / Agents</b><span>Topology, wall-clock bars, or a speaker chain when a node returns <code>messages</code>.</span></div>
             <div class="tour-fact"><b>Steps</b><span>Visit order, duration, spark metrics. Final state, Log, Memory, and Text tree fold under it.</span></div>
-            <div class="tour-fact"><b>Break &amp; HITL</b><span>Gutter dots pause. <strong>Continue</strong> / <strong>Step</strong>. <code>interrupt(...)</code> gets a resume-value box.</span></div>
+            <div class="tour-fact"><b>Stop here</b><span>Gutter dots, <strong>Continue</strong> / <strong>Step</strong>, and HITL — see <a href="#tour-break">Stop</a>.</span></div>
             <div class="tour-fact"><b>Keep the run</b><span>Export, import, or drop JSON. Jump to <strong>Runs</strong> / <strong>Statistics</strong>. <strong>Delete run</strong> is red.</span></div>
           </div>
         </div>
@@ -833,9 +863,42 @@ graphviagent serve . --host 0.0.0.0 --expose</pre>
         </div>
       </article>
 
+      <article class="tour-card break flip" id="tour-break">
+        <div class="tour-copy">
+          <p class="tour-kicker"><span class="tour-step">02</span> Pause before a node</p>
+          <h3>Stop</h3>
+          <p class="tour-lead">Click the gutter dot on a topology card to break before that node. LangGraph sees <code>interrupt_before</code>. Dots persist per pipeline until you clear them.</p>
+          <div class="tour-facts">
+            <div class="tour-fact"><b>Continue</b><span>Resumes and keeps those breakpoints. The next matching node pauses again.</span></div>
+            <div class="tour-fact"><b>Step</b><span>Runs the next node, then pauses. Use it to walk the graph one visit at a time.</span></div>
+            <div class="tour-fact"><b>HITL</b><span><code>interrupt(...)</code> pauses with a resume-value box. <strong>Continue</strong> sends that JSON.</span></div>
+            <div class="tour-fact"><b>Cancel</b><span>Abandons a paused run (stored as canceled, not failed). Closing the tab does the same for a live run.</span></div>
+          </div>
+        </div>
+        <div class="tour-viz" aria-hidden="true">
+          <div class="mock-chrome">
+            <span class="traffic r"></span><span class="traffic y"></span><span class="traffic g"></span>
+            <span class="mock-chrome-title">Trace · wait_pipeline</span>
+            <span class="live"><i></i> Paused</span>
+          </div>
+          <div class="tour-viz-body">
+            <div class="viz-flow">
+              <div class="viz-node"><span class="bp"></span> wait_a · done</div>
+              <div class="viz-stem"></div>
+              <div class="viz-node paused"><span class="bp on"></span> wait_b · break before</div>
+            </div>
+            <div class="viz-toolbar">
+              <span>Cancel</span>
+              <span class="on">Continue</span>
+              <span class="on">Step</span>
+            </div>
+          </div>
+        </div>
+      </article>
+
       <article class="tour-card replay flip" id="tour-replay">
         <div class="tour-copy">
-          <p class="tour-kicker"><span class="tour-step">02</span> Same node, other branch</p>
+          <p class="tour-kicker"><span class="tour-step">03</span> Same node, other branch</p>
           <h3>Replay</h3>
           <p class="tour-lead"><strong>Replay step</strong> runs only the selected node. <strong>Replay from</strong> continues from that checkpoint so routing can take the other branch.</p>
           <div class="tour-facts">
@@ -866,7 +929,7 @@ graphviagent serve . --host 0.0.0.0 --expose</pre>
 
       <article class="tour-card runs" id="tour-runs">
         <div class="tour-copy">
-          <p class="tour-kicker"><span class="tour-step">03</span> The board</p>
+          <p class="tour-kicker"><span class="tour-step">04</span> The board</p>
           <h3>Runs</h3>
           <p class="tour-lead">Airflow-style cards: duration bars, then task × run (<code>✓</code> / <code>✕</code> / <code>○</code>). Failed nodes stay in history and show as red.</p>
           <div class="tour-facts">
@@ -902,7 +965,7 @@ graphviagent serve . --host 0.0.0.0 --expose</pre>
 
       <article class="tour-card stats flip" id="tour-stats">
         <div class="tour-copy">
-          <p class="tour-kicker"><span class="tour-step">04</span> Across every visit</p>
+          <p class="tour-kicker"><span class="tour-step">05</span> Across every visit</p>
           <h3>Statistics</h3>
           <p class="tour-lead">Same topology as Trace. Pick a pipeline — there is no <strong>all</strong> view. Colored jump buttons keep you on that graph.</p>
           <div class="tour-facts">
@@ -938,7 +1001,7 @@ graphviagent serve . --host 0.0.0.0 --expose</pre>
 
       <article class="tour-card compare" id="tour-compare">
         <div class="tour-copy">
-          <p class="tour-kicker"><span class="tour-step">05</span> Run A vs Run B</p>
+          <p class="tour-kicker"><span class="tour-step">06</span> Run A vs Run B</p>
           <h3>Compare</h3>
           <p class="tour-lead">Filter by pipeline (default all). Diff input, path, per-node output, and timing. Hover a cell to copy.</p>
           <div class="tour-facts">
@@ -1026,7 +1089,7 @@ file = "decision_pipeline.py"</pre>
         </article>
         <article class="cli-card">
           <h3>graphviagent serve .<br/>graphviagent serve . --open</h3>
-          <p>Open the UI (default <code>127.0.0.1:8765</code>). <code>--open</code> launches a browser. <code>--host</code> and <code>--port</code> override the bind address. Binding beyond localhost requires <code>--expose</code> (and prints a warning): the server runs your pipeline Python, and only same-origin pages may call it.</p>
+          <p>Open the UI (default <code>127.0.0.1:8765</code>). <code>--open</code> launches a browser. <code>--host</code> and <code>--port</code> override the bind address. Binding beyond localhost requires <code>--expose</code>. <code>--concurrent N</code> is in-flight graphs (default 3); <code>--queue-limit N</code> is how many may wait; <code>--node-concurrency N</code> is LangGraph node fan-out (omitted = unlimited).</p>
         </article>
       </div>
       <p style="margin-top:14px">With a clone of the repo you can also run <code>graphviagent serve examples</code> to browse the bundled pipelines (branch, loop, parallel <code>Send</code>, tools, agents, waits, runtime <code>context</code>, errors).</p>
@@ -1034,7 +1097,7 @@ file = "decision_pipeline.py"</pre>
   </main>
 
   <footer>
-    <div><span class="wordmark">GraphV<span class="ia">IA</span>gent</span> · 1.3.0 · MIT · @antsticky</div>
+    <div><span class="wordmark">GraphV<span class="ia">IA</span>gent</span> · 1.4.0-dev · MIT · @antsticky</div>
     <div>
       <a href="https://pypi.org/project/graphviagent/">PyPI</a>
       ·

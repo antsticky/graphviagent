@@ -6,8 +6,10 @@ Local Graph-View-Agent for LangGraph. Scan `*_pipeline.py` files, record runs un
 
 Pipeline files do not import GraphVIAgent. Only runs you start from the UI or CLI are stored.
 
-## What's new in 1.2.1-dev
+## What's new in 1.3.0-dev
 
+- Parallel `Send` nodes keep timing, logs, tokens, and cancellable `time.sleep` on worker threads
+- `graphviagent.toml` `context` is passed into runs as LangGraph runtime context
 - Routing strip counts paused with success / failed / canceled. Runtime average vs longest uses successful runs only
 - Cancel mid-node keeps that visit’s timing; Routing shows **canceled**, not END
 

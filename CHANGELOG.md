@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.2.1-dev
+## 1.3.0-dev
 
 ### Fixed
 - Parallel `Send` nodes keep probe timing, print/log capture, token attribution, and cancellable `time.sleep` when LangGraph runs them on a worker thread; multiple visits of the same node in one superstep are recorded separately

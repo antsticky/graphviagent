@@ -1,6 +1,15 @@
 # Changelog
 
-## 1.4.1-dev
+## 1.4.2-dev
+
+### Fixed
+- Continue / Step keep per-node visit ids (`agent#2` after `agent#1`); Replay no longer hits the earlier loop visit
+- A second start of the same `run_id` no longer deletes the in-flight stub of the request that won the slot
+- `graphviagent run` records HITL / breakpoint pauses as **paused** (exit 1), not a successful truncated run
+- **Step** runs every paused `next` node (parallel `Send`), not only the first; other branches are not left on `interrupt_before`
+- Token maps keep a billed `0` (`input_tokens: 0` is not replaced by `prompt`)
+
+## 1.4.1
 
 ### Changed
 - Missing `thread_id` on node `invoke` / `ainvoke` uses the already-bound TLS capture or the only live run (1.4.0 left that uninferred)

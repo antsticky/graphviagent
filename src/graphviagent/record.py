@@ -289,12 +289,23 @@ def _as_int(value: Any) -> int:
         return 0
 
 
+def _mapping_int(obj: dict, *keys: str) -> int:
+    for key in keys:
+        if key not in obj:
+            continue
+        value = obj[key]
+        if value is None:
+            continue
+        return _as_int(value)
+    return 0
+
+
 def _tokens_from_mapping(obj: Any) -> tuple[int, int]:
     if not isinstance(obj, dict):
         return 0, 0
-    prompt = obj.get("input_tokens") or obj.get("prompt_tokens") or obj.get("prompt") or 0
-    completion = obj.get("output_tokens") or obj.get("completion_tokens") or obj.get("completion") or 0
-    return _as_int(prompt), _as_int(completion)
+    prompt = _mapping_int(obj, "input_tokens", "prompt_tokens", "prompt")
+    completion = _mapping_int(obj, "output_tokens", "completion_tokens", "completion")
+    return prompt, completion
 
 
 def _usage_from_obj(obj: Any) -> tuple[int, int]:
@@ -1952,6 +1963,7 @@ def _execute_run(
     resume_value: Any = None,
     use_command: bool = False,
     context: dict[str, Any] | None = None,
+    prior_steps: list[dict] | None = None,
 ) -> None:
     run_id = thread_id or uuid4().hex
     usage = _UsageHandler()
@@ -1967,6 +1979,12 @@ def _execute_run(
     state: dict = copy.deepcopy(user_input) if isinstance(user_input, dict) else {}
     steps: list[dict] = []
     visits: dict[str, int] = {}
+    for step in prior_steps or []:
+        if not isinstance(step, dict):
+            continue
+        node = str(step.get("node") or "")
+        if node:
+            visits[node] = visits.get(node, 0) + 1
     edges = graph_edges(app)
     raw_events: list[tuple[str, dict, float]] = []
     logs: list[dict] = []
@@ -2286,6 +2304,7 @@ def iter_run_events(
     resume_value: Any = None,
     use_command: bool = False,
     context: dict[str, Any] | None = None,
+    prior_steps: list[dict] | None = None,
 ) -> Iterator[dict]:
     pending: queue.Queue[dict | None] = queue.Queue()
 
@@ -2310,6 +2329,7 @@ def iter_run_events(
                 resume_value=resume_value,
                 use_command=use_command,
                 context=context,
+                prior_steps=prior_steps,
             )
         except Exception as exc:
             pending.put({"type": "error", "error": _format_error(exc)})

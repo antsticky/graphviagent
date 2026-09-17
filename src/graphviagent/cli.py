@@ -91,6 +91,7 @@ def _cmd_run(file: str, raw_input: str, config: GVAConfig) -> int:
         has_checkpointer=loaded.has_checkpointer,
         max_concurrency=config.node_concurrency,
         context=loaded.context,
+        pause=True,
     )
     saved = save_run(
         config.root,

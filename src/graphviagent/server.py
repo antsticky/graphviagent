@@ -4840,13 +4840,14 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     async function stepRun() {
-      const next = ((currentRun && currentRun.next) || [])[0];
-      if (!next) {
+      const next = ((currentRun && currentRun.next) || []).filter(Boolean);
+      if (!next.length) {
         alert("Nothing to step");
         return;
       }
-      const before = interruptBeforeList().filter((name) => name !== next);
-      await streamLive({ resume: true, interrupt_before: before, interrupt_after: [next] });
+      const skip = new Set(next);
+      const before = interruptBeforeList().filter((name) => !skip.has(name));
+      await streamLive({ resume: true, interrupt_before: before, interrupt_after: next });
     }
 
     async function cancelRuns() {
@@ -6497,11 +6498,12 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         try:
             sched.submit(job)
         except (QueueFull, DuplicateRun):
-            if snapshot is not None:
-                if not sched.has_job(job.run_id):
+            # DuplicateRun: the other request owns this id. Do not touch its file.
+            if not sched.has_job(job.run_id):
+                if snapshot is not None:
                     save_run(self.workspace, job.stem, snapshot)
-            else:
-                delete_run(self.workspace, job.run_id)
+                else:
+                    delete_run(self.workspace, job.run_id)
             raise
 
     def _sse_pump(self, job: RunJob) -> None:
@@ -6603,6 +6605,7 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                 resume_value=job.resume_value if job.use_command else None,
                 use_command=job.use_command,
                 context=loaded.context,
+                prior_steps=(job.previous or {}).get("steps"),
             ):
                 kind = event.get("type")
                 if kind in {"done", "paused"}:

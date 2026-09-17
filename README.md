@@ -6,18 +6,15 @@ Local Graph-View-Agent for LangGraph. Scan `*_pipeline.py` files, record runs un
 
 Pipeline files do not import GraphVIAgent. Only runs you start from the UI or CLI are stored.
 
-## What's new in 1.4.1-dev
+## What's new in 1.4.2-dev
 
-- Continue / Step keep in-memory checkpoints after a pipeline or toml reload. **Replay** still asks if the graph is outdated; Continue / Step do not — they reuse the interned checkpointer, including after a topology change. Savers for deleted / unlisted files are dropped
-- File watch picks up pipeline dirs added to toml after `serve` started. Hashing still skips same-size edits (cloud-sync `mtime` jitter); click **Run** to re-read the file
-- `POST /api/rerun` returns JSON again (like `POST /api/run`). The UI Replay buttons use `POST /api/rerun/stream`
-- Ctrl+C no longer waits out the current LLM / `sleep`. Host loopback checks real IPs, not names that start with `127.`
-- HITL resume-value box keeps your edits. Cancel on a queued Continue stores canceled. Runs board cells show canceled visits
-- Node probes still record a visit when LangGraph omits `thread_id`; async nodes (`ainvoke`) are probed too
-- Parallel `Send` visits keep their own `state_out`. A failed checkpoint fork is a failed Replay, not a silent approximate run
-- Same-host HTTPS behind a TLS reverse proxy is no longer 403. Trace **Fit** fills the pane. UI run ids stay 32 hex characters
+- Continue / Step keep per-node visit ids after a pause in a loop (`agent#2`, not a second `agent#1`), so Replay hits the visit you selected
+- A second start of the same `run_id` no longer deletes the in-flight stub of the request that won the slot
+- `graphviagent run` records HITL / breakpoint pauses as **paused** (exit 1), not a successful truncated run
+- **Step** runs every paused `next` node (parallel `Send`), not only the first
+- Token maps keep a billed `0` (`input_tokens: 0` is not replaced by `prompt`)
 
-See [CHANGELOG.md](CHANGELOG.md) for 1.4.0.
+See [CHANGELOG.md](CHANGELOG.md) for 1.4.1.
 
 ## Requirements
 
@@ -104,7 +101,7 @@ You should see `echo_pipeline.py  ok  examples=2`. If you see `no pipelines`, yo
 graphviagent run echo_pipeline.py --input '{"text":"hi"}'
 ```
 
-The run is stored under `.graphviagent/` in the current directory. Exit status is 1 if the graph raised.
+The run is stored under `.graphviagent/` in the current directory. Exit status is 1 if the graph raised or paused (`interrupt`).
 
 ## Open the UI
 
@@ -141,7 +138,7 @@ New or edited `*_pipeline.py` files (and toml-listed pipelines, including files 
 2. Edit the JSON input (the first `EXAMPLES` item is prefilled).
 3. Click **Run**.
 4. Single-click a node to select it. Double-click to open **Node view**. Node cards show `file:line`; click to open in the editor. Failed nodes include a traceback. Parallel `Send` visits show that visit’s `state_in` / `state_out`, not the merged superstep.
-5. Click the gutter dot on a topology card to break before that node. Breakpoints persist per pipeline. **Continue** resumes with those breakpoints; **Step** runs the next node and pauses again.
+5. Click the gutter dot on a topology card to break before that node. Breakpoints persist per pipeline. **Continue** resumes with those breakpoints; **Step** runs the pending node(s) — all of them if several are next — and pauses again.
 6. Human-in-the-loop graphs (`interrupt(...)`) pause with a resume-value box. **Continue** sends that JSON (`true` to keep a draft, or `"edit this"` to replace it). The box keeps what you type until you Continue or a new pause starts. Editing the pipeline or toml in the same `serve` process keeps the in-memory checkpointer, so Continue / Step still work. Replay asks before using an outdated graph; Continue / Step do not — they feed that checkpoint into the newly compiled graph (right for a whitespace save, wrong if you renamed a node or changed routing). Restarting `serve`, or deleting / unlisting that pipeline file, drops those checkpoints.
 7. Filter the run list by status (all / success / paused / canceled / failed) or input text.
 8. **Export** downloads the open run as JSON. **Import** or drop a JSON file on the run list.

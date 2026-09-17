@@ -976,8 +976,14 @@ def merge_resume_run(previous: dict, current: dict) -> dict:
     ]
     new_steps = [dict(step) for step in (current.get("steps") or []) if isinstance(step, dict)]
     steps = prev_steps + new_steps
+    visits: dict[str, int] = {}
     for index, step in enumerate(steps):
         step["index"] = index
+        node = str(step.get("node") or "")
+        if not node:
+            continue
+        visits[node] = visits.get(node, 0) + 1
+        step["step_id"] = f"{node}#{visits[node]}"
     merged["steps"] = steps
     merged["logs"] = list(previous.get("logs") or []) + list(current.get("logs") or [])
     try:

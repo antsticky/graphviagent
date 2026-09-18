@@ -2625,12 +2625,17 @@ PAGE = r"""<!DOCTYPE html>
       $("navPipelines").classList.toggle("active", currentView === "runs");
       $("navCompare").classList.toggle("active", currentView === "compare");
       $("navStats").classList.toggle("active", currentView === "statistics");
+      if (currentView === "statistics" && !statsPipePreferred) {
+        const pipe = currentPipeline();
+        if (pipe && pipe.stem) statsPipePreferred = pipe.stem;
+      }
       if (currentView === "runs") renderPipeBoard();
       if (currentView === "compare") loadCompare().catch((e) => alert(e.message));
       if (currentView === "statistics") loadStats().catch((e) => alert(e.message));
       if (currentView === "trace") scheduleTraceGraphLayout();
       let hash = "#/" + currentView;
       if (currentView === "runs" && runsFocusStem) hash += "/" + encodeURIComponent(runsFocusStem);
+      if (currentView === "statistics" && statsPipePreferred) hash += "/" + encodeURIComponent(statsPipePreferred);
       if (location.hash !== hash) location.hash = hash;
       if (currentView === "runs" && runsFocusStem) {
         requestAnimationFrame(() => {
@@ -6333,7 +6338,7 @@ PAGE = r"""<!DOCTYPE html>
       showView("runs");
     };
     $("navCompare").onclick = () => showView("compare");
-    $("navStats").onclick = () => showView("statistics");
+    $("navStats").onclick = () => jumpToStatistics();
     $("gotoRunsFromTrace").onclick = () => jumpToRuns();
     $("gotoStatsFromTrace").onclick = () => jumpToStatistics();
     $("gotoTraceFromStats").onclick = () => {
@@ -6345,6 +6350,10 @@ PAGE = r"""<!DOCTYPE html>
     $("statsPipe").onchange = () => {
       statsChoice = null;
       statsPipePreferred = statsPipeFilter();
+      if (currentView === "statistics") {
+        const hash = "#/statistics" + (statsPipePreferred ? "/" + encodeURIComponent(statsPipePreferred) : "");
+        if (location.hash !== hash) location.hash = hash;
+      }
       renderStats();
     };
     $("statsTabRouting").onclick = () => setStatsTab("routing");

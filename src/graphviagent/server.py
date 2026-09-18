@@ -22,7 +22,7 @@ from graphviagent.config import (
     effective_queue_limit,
     load_config,
 )
-from graphviagent.discover import discover_pipelines
+from graphviagent.discover import abs_path
 from graphviagent.graph_hash import attach_graph_meta
 from graphviagent.load import LoadedPipeline, load_pipeline, retain_memory_savers
 from graphviagent.record import iter_run_events, replay_step, resume_from_step
@@ -48,7 +48,7 @@ from graphviagent.store import (
     save_queued_stub,
     save_run,
 )
-from graphviagent.watch import PipelineWatcher, file_sha256, snapshot_files
+from graphviagent.watch import PipelineWatcher, file_sha256, public_file_row, snapshot_files
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1"}
 _WILDCARD_BINDS = {"0.0.0.0", "::", "::0", "*", ""}
@@ -6863,51 +6863,70 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length) if length else b"{}"
         return json.loads(raw.decode() or "{}")
 
-    def _rel_id(self, path: Path) -> str:
-        resolved = path.resolve()
-        workspace = self.workspace.resolve()
-        try:
-            return resolved.relative_to(workspace).as_posix()
-        except ValueError:
-            return resolved.as_posix()
+    def _pipeline_rows(self) -> list[dict]:
+        if self.watcher is not None:
+            self.watcher.maybe_refresh()
+            return self.watcher.rows()
+        return list(snapshot_files(self.workspace, self.config).values())
 
-    def _pipelines(self) -> list[Path]:
-        return discover_pipelines(self.workspace, self.config)
+    def _row_by_id(self, file_id: str) -> dict | None:
+        for row in self._pipeline_rows():
+            if row.get("id") == file_id:
+                return row
+        return None
+
+    def _path_from_row(self, row: dict) -> Path | None:
+        raw = row.get("path")
+        if raw:
+            return Path(str(raw))
+        file_id = str(row.get("id") or "")
+        if not file_id:
+            return None
+        candidate = Path(file_id)
+        if candidate.is_absolute():
+            return abs_path(candidate)
+        return abs_path(self.workspace / file_id)
+
+    def _rel_id(self, path: Path) -> str:
+        full = abs_path(path)
+        workspace = abs_path(self.workspace)
+        try:
+            return full.relative_to(workspace).as_posix()
+        except ValueError:
+            return full.as_posix()
 
     def _pipeline_stem(self, path: Path) -> str:
         return self.config.stem_for(path)
 
     def _inside_workspace(self, path: Path) -> bool:
-        workspace = self.workspace.resolve()
+        workspace = abs_path(self.workspace)
         try:
             resolved = path.resolve()
         except OSError:
             return False
-        return resolved == workspace or workspace in resolved.parents
+        return resolved == workspace.resolve() or workspace.resolve() in resolved.parents
 
     def _resolve_file_id(self, file_id: str) -> Path | None:
         if not file_id:
             return None
-        for path in self._pipelines():
-            resolved = path.resolve()
-            if self._rel_id(resolved) == file_id:
-                return resolved
+        row = self._row_by_id(file_id)
+        if row is not None:
+            path = self._path_from_row(row)
+            if path is not None:
+                return path
         spec = self.config.pipelines.get(file_id)
         if spec is not None:
-            return spec.file.resolve()
+            return abs_path(spec.file)
         raw = Path(file_id)
-        try:
-            path = raw.resolve() if raw.is_absolute() else (self.workspace / file_id).resolve()
-        except OSError:
-            return None
+        path = abs_path(raw) if raw.is_absolute() else abs_path(self.workspace / file_id)
         if self._inside_workspace(path):
             return path
-        for known in self._pipelines():
-            if known.resolve() == path:
-                return path
         return None
 
     def _stem_for_file_id(self, file_id: str) -> str:
+        row = self._row_by_id(file_id)
+        if row is not None and row.get("stem"):
+            return str(row["stem"])
         path = self._resolve_file_id(file_id)
         if path is not None:
             return self._pipeline_stem(path)
@@ -6917,7 +6936,15 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         return Path(file_id).stem if file_id else ""
 
     def _known_stems(self) -> list[str]:
-        return [self._pipeline_stem(path) for path in self._pipelines()]
+        stems: list[str] = []
+        for row in self._pipeline_rows():
+            stem = row.get("stem")
+            if stem:
+                stems.append(str(stem))
+                continue
+            path = self._path_from_row(row)
+            stems.append(self._pipeline_stem(path) if path is not None else Path(str(row.get("id") or "")).stem)
+        return stems
 
     def _query_int(self, query: dict, name: str) -> int | None:
         raw = (query.get(name) or [""])[0]
@@ -6963,39 +6990,76 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         if self.watcher is not None:
             self.watcher.maybe_refresh()
             return self.watcher.files()
-        return list(snapshot_files(self.workspace, self.config).values())
+        return [public_file_row(item) for item in snapshot_files(self.workspace, self.config).values()]
 
-    def _cached_pipeline(self, file_id: str) -> LoadedPipeline:
-        path = self._resolve_file_id(file_id)
+    def _cached_pipeline(
+        self,
+        file_id: str,
+        row: dict | None = None,
+        *,
+        verify: bool = False,
+    ) -> LoadedPipeline:
+        if row is None:
+            row = self._row_by_id(file_id)
+        path = self._path_from_row(row) if row is not None else self._resolve_file_id(file_id)
         if path is None:
             loaded = LoadedPipeline(path=Path(file_id), stem=Path(file_id).stem)
             loaded.error = "path outside workspace"
             return loaded
-        try:
-            sha = file_sha256(path)
-        except OSError:
-            sha = None
+        size = row.get("size") if row is not None else None
+        if size is None:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = None
         cached = self.cache.get(file_id)
-        if (
+        digest: str | None
+        if verify:
+            try:
+                digest = file_sha256(path)
+            except OSError:
+                digest = None
+            if (
+                cached is not None
+                and not cached.error
+                and digest is not None
+                and getattr(cached, "_sha256", None) == digest
+            ):
+                if size is not None:
+                    cached._size = size  # type: ignore[attr-defined]
+                if digest and size is not None and self.watcher is not None:
+                    self.watcher.remember_sha(file_id, int(size), digest)
+                return cached
+        elif (
             cached is not None
             and not cached.error
-            and sha is not None
-            and getattr(cached, "_sha256", None) == sha
+            and size is not None
+            and getattr(cached, "_size", None) == size
         ):
             return cached
-        loaded = load_pipeline(path, self.config)
-        loaded._sha256 = sha  # type: ignore[attr-defined]
+        else:
+            digest = row.get("sha256") if row is not None else None
+            if not digest:
+                try:
+                    digest = file_sha256(path)
+                except OSError:
+                    digest = None
+        loaded = load_pipeline(path, self.config, digest=digest)
+        loaded._size = size  # type: ignore[attr-defined]
+        loaded._sha256 = digest  # type: ignore[attr-defined]
+        if digest and size is not None and self.watcher is not None:
+            self.watcher.remember_sha(file_id, int(size), digest)
         if loaded.error:
             self.cache.pop(file_id, None)
         else:
             self.cache[file_id] = loaded
         return loaded
 
-    def _load_listed(self, file_id: str) -> LoadedPipeline:
-        return self._cached_pipeline(file_id)
+    def _load_listed(self, file_id: str, row: dict | None = None) -> LoadedPipeline:
+        return self._cached_pipeline(file_id, row)
 
     def _get_loaded(self, file_id: str) -> LoadedPipeline:
-        cached = self._cached_pipeline(file_id)
+        cached = self._cached_pipeline(file_id, verify=True)
         if cached.error:
             raise RuntimeError(cached.error)
         if cached.app is None:
@@ -7050,10 +7114,10 @@ class GraphVIHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/pipelines":
             items = []
-            for path in self._pipelines():
-                file_id = self._rel_id(path)
-                loaded = self._load_listed(file_id)
-                stem = self._pipeline_stem(path)
+            for row in self._pipeline_rows():
+                file_id = str(row["id"])
+                loaded = self._load_listed(file_id, row)
+                stem = str(row.get("stem") or loaded.stem)
                 runs = [
                     self._annotate_queue(item)
                     for item in list_runs(self.workspace, stem, include_steps=True, limit=30)
@@ -7064,9 +7128,9 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                         "stem": stem,
                         "examples": loaded.examples,
                         "error": loaded.error,
-                            "graph": loaded.graph,
-                            "graph_hash": loaded.graph_hash,
-                            "file_sha256": loaded.file_sha256,
+                        "graph": loaded.graph,
+                        "graph_hash": loaded.graph_hash,
+                        "file_sha256": loaded.file_sha256,
                         "last_run": runs[0] if runs else None,
                         "recent": runs,
                     }
@@ -7236,13 +7300,13 @@ class GraphVIHandler(BaseHTTPRequestHandler):
                     self._json(404, {"error": "run not found"})
                     return
                 matches = [
-                    path
-                    for path in self._pipelines()
-                    if self._pipeline_stem(path) == run["pipeline"]
+                    row
+                    for row in self._pipeline_rows()
+                    if row.get("stem") == run["pipeline"]
                 ]
                 if not matches:
                     raise RuntimeError(f"pipeline {run['pipeline']} not found")
-                file_id = self._rel_id(matches[0])
+                file_id = str(matches[0]["id"])
                 loaded = self._get_loaded(file_id)
                 mode = payload.get("mode") or "replay"
                 kind = "replay_from" if mode == "resume" else "replay"
@@ -7357,7 +7421,20 @@ def serve(
         )
 
     def retain_savers() -> None:
-        retain_memory_savers(discover_pipelines(GraphVIHandler.workspace, GraphVIHandler.config))
+        watcher = GraphVIHandler.watcher
+        if watcher is not None:
+            paths = [
+                Path(str(row["path"]))
+                for row in watcher.rows()
+                if row.get("path")
+            ]
+        else:
+            paths = [
+                Path(str(row["path"]))
+                for row in snapshot_files(GraphVIHandler.workspace, GraphVIHandler.config).values()
+                if row.get("path")
+            ]
+        retain_memory_savers(paths)
 
     def invalidate(file_ids: list[str]) -> None:
         for file_id in file_ids:
@@ -7385,8 +7462,8 @@ def serve(
         config=config,
         on_config=on_config,
     )
-    watcher.start()
     GraphVIHandler.watcher = watcher
+    watcher.start()
     scheduler = RunScheduler(
         concurrent_fn=lambda: GraphVIHandler.concurrent,
         queue_limit_fn=lambda: GraphVIHandler.queue_limit,

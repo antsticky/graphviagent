@@ -11,11 +11,12 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 from graphviagent.config import CONFIG_NAME, GVAConfig, activate_config, load_config
-from graphviagent.discover import discover_pipelines, path_is_skipped
+from graphviagent.discover import abs_path, discover_pipelines, path_is_skipped
 
 _DEBOUNCE_S = 0.2
 _EVENT_CAP = 200
 _STALE_REFRESH_S = 45
+_PUBLIC_FILE_KEYS = ("id", "stem", "mtime", "size", "sha256")
 
 
 def _is_pipeline_name(name: str) -> bool:
@@ -28,40 +29,42 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def public_file_row(item: dict[str, Any]) -> dict[str, Any]:
+    return {key: item.get(key) for key in _PUBLIC_FILE_KEYS}
+
+
 def snapshot_files(
     workspace: Path,
     config: GVAConfig | None = None,
     previous: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    workspace = workspace.resolve()
+    workspace = abs_path(workspace)
     prev = previous or {}
     items: dict[str, dict[str, Any]] = {}
     for path in discover_pipelines(workspace, config):
         try:
-            resolved = path.resolve()
-            stat = resolved.stat()
+            full = abs_path(path)
+            stat = full.stat()
         except OSError:
             continue
         try:
-            rel = resolved.relative_to(workspace).as_posix()
+            rel = full.relative_to(workspace).as_posix()
         except ValueError:
-            rel = resolved.as_posix()
+            rel = full.as_posix()
         size = stat.st_size
         before = prev.get(rel)
-        if before is not None and before.get("size") == size and before.get("sha256"):
-            sha = before["sha256"]
+        if before is not None and before.get("size") == size:
+            sha = before.get("sha256")
         else:
-            try:
-                sha = file_sha256(resolved)
-            except OSError:
-                continue
-        stem = config.stem_for(resolved) if config is not None else resolved.stem
+            sha = None
+        stem = config.stem_for(full) if config is not None else full.stem
         items[rel] = {
             "id": rel,
             "stem": stem,
             "mtime": stat.st_mtime,
             "size": size,
             "sha256": sha,
+            "path": str(full),
         }
     return items
 
@@ -94,7 +97,7 @@ class PipelineWatcher:
         config: GVAConfig | None = None,
         on_config: Callable[[GVAConfig], None] | None = None,
     ) -> None:
-        self.workspace = workspace.resolve()
+        self.workspace = abs_path(workspace)
         self._on_change = on_change
         self._on_config = on_config
         self._config = config
@@ -125,46 +128,41 @@ class PipelineWatcher:
     def watches(self, path: Path) -> bool:
         if path.name == CONFIG_NAME:
             return True
-        try:
-            resolved = path.resolve()
-        except OSError:
-            resolved = path
+        full = abs_path(path)
         config = self._config
-        if config is not None and any(
-            spec.file.resolve() == resolved for spec in config.pipelines.values()
-        ):
+        if config is not None and any(abs_path(spec.file) == full for spec in config.pipelines.values()):
             return True
         if _is_pipeline_name(path.name):
             return True
         try:
-            key = resolved.relative_to(self.workspace).as_posix()
+            key = full.relative_to(self.workspace).as_posix()
         except ValueError:
-            key = resolved.as_posix()
+            key = full.as_posix()
         with self._lock:
             return key in self._files
 
-    def _outside_workspace(self, folder: Path) -> bool:
-        return folder != self.workspace and self.workspace not in folder.parents
-
     def _watch_folders(self) -> list[Path]:
-        folders = [self.workspace]
-        seen = {str(self.workspace)}
+        folders: list[Path] = []
+        seen: set[str] = set()
 
         def add(folder: Path) -> None:
-            folder = folder.resolve()
-            if not self._outside_workspace(folder):
-                return
+            folder = abs_path(folder)
             key = str(folder)
             if key in seen:
                 return
             seen.add(key)
             folders.append(folder)
 
+        add(self.workspace)
         config = self._config
         if config is not None and config.path is not None:
             add(config.path.parent)
-        for path in discover_pipelines(self.workspace, config):
-            add(path.resolve().parent)
+        with self._lock:
+            items = list(self._files.values())
+        for item in items:
+            raw = item.get("path")
+            if raw:
+                add(Path(str(raw)).parent)
         return folders
 
     def _sync_watch_folders(self) -> None:
@@ -188,7 +186,7 @@ class PipelineWatcher:
                 continue
             try:
                 self._watches[key] = observer.schedule(
-                    handler, str(folder), recursive=True
+                    handler, str(folder), recursive=False
                 )
             except OSError:
                 continue
@@ -216,7 +214,17 @@ class PipelineWatcher:
 
     def files(self) -> list[dict[str, Any]]:
         with self._lock:
+            return [public_file_row(item) for item in self._files.values()]
+
+    def rows(self) -> list[dict[str, Any]]:
+        with self._lock:
             return [dict(item) for item in self._files.values()]
+
+    def remember_sha(self, file_id: str, size: int, sha: str) -> None:
+        with self._lock:
+            item = self._files.get(file_id)
+            if item is not None and item.get("size") == size:
+                item["sha256"] = sha
 
     def changes(self, since: int = 0) -> list[dict[str, Any]]:
         with self._lock:
@@ -243,7 +251,6 @@ class PipelineWatcher:
         with self._lock:
             self._last_refresh = time.monotonic()
         reloaded = self._reload_config()
-        self._sync_watch_folders()
         with self._lock:
             prev = self._files
         nxt = snapshot_files(self.workspace, self._config, previous=prev)
@@ -256,11 +263,14 @@ class PipelineWatcher:
                 before = prev.get(file_id)
                 if before is None or before.get("sha256") != item.get("sha256"):
                     changed.append(file_id)
+                elif before.get("size") != item.get("size"):
+                    changed.append(file_id)
             for file_id in prev:
                 if file_id not in nxt:
                     changed.append(file_id)
             self._files = nxt
             self._timer = None
+        self._sync_watch_folders()
         if reloaded:
             changed.append(CONFIG_NAME)
         if changed and self._on_change is not None:
@@ -293,7 +303,7 @@ class PipelineWatcher:
         self._toml_mtime = mtime
         self._toml_size = size
         self._toml_sha256 = digest
-        self.workspace = config.root
+        self.workspace = abs_path(config.root)
         if self._on_config is not None:
             self._on_config(config)
         return True

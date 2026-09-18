@@ -191,9 +191,13 @@ def _package_context(path: Path) -> tuple[str, str | None, Path]:
     return module_name, parent, pkg_dir
 
 
-def load_module(path: Path, extra_roots: list[Path] | None = None) -> Any:
+def load_module(
+    path: Path,
+    extra_roots: list[Path] | None = None,
+    digest: str | None = None,
+) -> Any:
     path = path.resolve()
-    digest = file_sha256(path)
+    digest = digest or file_sha256(path)
     module_name, parent, pkg_root = _package_context(path)
 
     with _load_lock:
@@ -283,7 +287,11 @@ def _extract_graph(module: Any, factory: str | None = None) -> Any:
     )
 
 
-def load_pipeline(path: Path, config: GVAConfig | None = None) -> LoadedPipeline:
+def load_pipeline(
+    path: Path,
+    config: GVAConfig | None = None,
+    digest: str | None = None,
+) -> LoadedPipeline:
     path = path.resolve()
     stem = config.stem_for(path) if config is not None else path.stem
     loaded = LoadedPipeline(path=path, stem=stem)
@@ -292,15 +300,13 @@ def load_pipeline(path: Path, config: GVAConfig | None = None) -> LoadedPipeline
     try:
         extra_roots = list(config.pythonpath) if config is not None else None
         factory = config.factory_for(path) if config is not None else None
-        module = load_module(path, extra_roots=extra_roots)
+        digest = digest or file_sha256(path)
+        module = load_module(path, extra_roots=extra_roots, digest=digest)
         loaded.module = module
         loaded.examples = normalize_examples(getattr(module, "EXAMPLES", None))
         candidate = _extract_graph(module, factory=factory)
         loaded.app, loaded.has_checkpointer = _compile_if_needed(candidate, path)
-        try:
-            loaded.file_sha256 = file_sha256(path)
-        except OSError:
-            loaded.file_sha256 = None
+        loaded.file_sha256 = digest
         if loaded.app is not None:
             loaded.graph, loaded.graph_hash = fingerprint_graph(
                 loaded.app,

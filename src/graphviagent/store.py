@@ -662,7 +662,51 @@ def _iter_run_dicts(workspace: Path, stem: str | None = None):
             yield data
 
 
-def collect_stats(workspace: Path, stem: str | None = None) -> dict:
+def _stats_status_filter(value: str | None) -> str | None:
+    raw = str(value or "").strip().lower()
+    if raw in {"ok", "success"}:
+        return "ok"
+    if raw in {"error", "failed", "fail"}:
+        return "error"
+    return None
+
+
+def _stats_node_filter(nodes: str | None | list[str] | set[str]) -> set[str] | None:
+    if nodes is None or nodes == "":
+        return None
+    if isinstance(nodes, str):
+        items = [part.strip() for part in nodes.split(",") if part.strip()]
+    else:
+        items = [str(part).strip() for part in nodes if str(part).strip()]
+    wanted = {
+        _topo_name(name)
+        for name in items
+        if name and _topo_name(name) not in {"", "START", "END"}
+    }
+    return wanted or None
+
+
+def _stats_last_filter(value: str | None) -> int | None:
+    raw = str(value if value is not None else "10").strip().lower()
+    if raw in {"all"}:
+        return None
+    try:
+        count = int(raw)
+    except ValueError:
+        count = 10
+    if count <= 0:
+        return None
+    return count
+
+
+def collect_stats(
+    workspace: Path,
+    stem: str | None = None,
+    *,
+    status: str | None = None,
+    nodes: str | None | list[str] | set[str] = None,
+    last: str | None = "10",
+) -> dict:
     pipe_acc: dict[str, dict] = {}
     node_acc: dict[tuple[str, str], dict] = {}
     decision_acc: dict[tuple[str, str, str], dict] = {}
@@ -729,9 +773,33 @@ def collect_stats(workspace: Path, stem: str | None = None) -> dict:
             prev_max = 0.0
         bucket["elapsed_max"] = max(prev_max, ms)
 
+    status_key = _stats_status_filter(status)
+    wanted_nodes = _stats_node_filter(nodes)
+    last_n = _stats_last_filter(last)
+
+    eligible: list[dict] = []
     for data in _iter_run_dicts(workspace, stem):
         if data.get("queued") or data.get("running"):
             continue
+        run_status = run_status_of(data)
+        if status_key and run_status != status_key:
+            continue
+        steps = [step for step in (data.get("steps") or []) if isinstance(step, dict)]
+        if wanted_nodes:
+            visited = {
+                _topo_name(str(step.get("node") or ""))
+                for step in steps
+                if step.get("node")
+            }
+            if not (visited & wanted_nodes):
+                continue
+        eligible.append(data)
+    eligible.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    if last_n is not None:
+        eligible = eligible[:last_n]
+
+    for data in eligible:
+        run_status = run_status_of(data)
         pipe = str(data.get("pipeline") or "unknown")
         steps = [step for step in (data.get("steps") or []) if isinstance(step, dict)]
         prompt = 0
@@ -739,14 +807,15 @@ def collect_stats(workspace: Path, stem: str | None = None) -> dict:
         saw_unavailable = False
         saw_usage = False
         step_elapsed_sum = 0.0
-        ok_step_elapsed_sum = 0.0
-        run_ok = run_status_of(data) == "ok"
+        included_elapsed_sum = 0.0
         try:
             run_elapsed = float(data.get("elapsed_ms") or 0)
         except (TypeError, ValueError):
             run_elapsed = 0.0
         for index, step in enumerate(steps):
             node = str(step.get("node") or "")
+            node_key = _topo_name(node)
+            include_node = not wanted_nodes or node_key in wanted_nodes
             try:
                 step_ms = float(step.get("elapsed_ms") or 0)
             except (TypeError, ValueError):
@@ -760,15 +829,18 @@ def collect_stats(workspace: Path, stem: str | None = None) -> dict:
             if isinstance(tokens, dict):
                 if tokens.get("unavailable"):
                     step_unavailable = True
-                    saw_unavailable = True
                 else:
                     step_prompt = _token_int(tokens.get("prompt"))
                     step_completion = _token_int(tokens.get("completion"))
-                    if step_prompt or step_completion:
-                        saw_usage = True
+            if not include_node:
+                continue
+            if step_unavailable:
+                saw_unavailable = True
+            elif step_prompt or step_completion:
+                saw_usage = True
             prompt += step_prompt
             completion += step_completion
-            step_ok = run_ok and not step.get("error") and not step.get("canceled")
+            step_timed = not step.get("canceled")
             if node:
                 bucket = node_bucket(pipe, node)
                 bucket["prompt"] += step_prompt
@@ -777,10 +849,10 @@ def collect_stats(workspace: Path, stem: str | None = None) -> dict:
                 bucket["visits"] += 1
                 if step_unavailable:
                     bucket["unavailable"] += 1
-                if step_ok:
+                if step_timed:
                     add_elapsed(bucket, step_ms)
                     if step_ms > 0:
-                        ok_step_elapsed_sum += step_ms
+                        included_elapsed_sum += step_ms
 
             choices = _step_route_choices(step)
             if not choices and not step.get("pending"):
@@ -812,15 +884,15 @@ def collect_stats(workspace: Path, stem: str | None = None) -> dict:
             if step.get("node") and not step.get("pending")
         ]
         if completed:
-            bump_edge(pipe, "START", str(completed[0].get("node") or ""))
-            for index in range(len(completed) - 1):
-                bump_edge(
-                    pipe,
-                    str(completed[index].get("node") or ""),
-                    str(completed[index + 1].get("node") or ""),
-                )
+            names = [_topo_name(str(step.get("node") or "")) for step in completed]
+            if not wanted_nodes or names[0] in wanted_nodes:
+                bump_edge(pipe, "START", names[0])
+            for index in range(len(names) - 1):
+                src, dest = names[index], names[index + 1]
+                if not wanted_nodes or src in wanted_nodes or dest in wanted_nodes:
+                    bump_edge(pipe, src, dest)
             last = completed[-1]
-            last_name = str(last.get("node") or "")
+            last_name = names[-1]
             unused = {_topo_name(str(item)) for item in (last.get("unused") or [])}
             finished = (
                 not data.get("error")
@@ -829,8 +901,12 @@ def collect_stats(workspace: Path, stem: str | None = None) -> dict:
                 and not last.get("error")
             )
             if last_name and finished and "END" not in unused:
-                bump_edge(pipe, last_name, "END")
+                if not wanted_nodes or last_name in wanted_nodes:
+                    bump_edge(pipe, last_name, "END")
 
+        if run_elapsed <= 0 and step_elapsed_sum > 0:
+            run_elapsed = step_elapsed_sum
+        pipe_elapsed = included_elapsed_sum if wanted_nodes else run_elapsed
         bucket = pipe_bucket(pipe)
         bucket["runs"] += 1
         bucket["prompt"] += prompt
@@ -840,23 +916,20 @@ def collect_stats(workspace: Path, stem: str | None = None) -> dict:
             bucket["usage_runs"] += 1
         elif saw_unavailable:
             bucket["unavailable_runs"] += 1
-        if run_elapsed <= 0 and step_elapsed_sum > 0:
-            run_elapsed = step_elapsed_sum
-        if run_ok:
-            add_elapsed(bucket, run_elapsed)
-            bucket["node_elapsed_ms"] = float(bucket.get("node_elapsed_ms") or 0) + ok_step_elapsed_sum
+        add_elapsed(bucket, pipe_elapsed)
+        bucket["node_elapsed_ms"] = float(bucket.get("node_elapsed_ms") or 0) + included_elapsed_sum
 
         run_rows.append(
             {
                 "id": data.get("id") or "",
                 "pipeline": pipe,
                 "created_at": data.get("created_at"),
-                "status": run_status_of(data),
+                "status": run_status,
                 "prompt": prompt,
                 "completion": completion,
                 "total": prompt + completion,
                 "unavailable": (not saw_usage) and saw_unavailable,
-                "elapsed_ms": round(run_elapsed, 2) if run_elapsed else 0,
+                "elapsed_ms": round(pipe_elapsed, 2) if pipe_elapsed else 0,
             }
         )
 

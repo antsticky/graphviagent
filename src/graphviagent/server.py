@@ -1072,6 +1072,11 @@ PAGE = r"""<!DOCTYPE html>
       display: flex; align-items: flex-end; justify-content: space-between;
       gap: 16px; flex-wrap: wrap; margin: 0 0 20px;
     }
+    .st-filters {
+      display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; min-width: 0;
+    }
+    .st-toolbar .cmp-filter { margin: 0; max-width: 220px; }
+    .st-toolbar .cmp-filter select { min-width: 120px; }
     .st-toolbar .st-nav {
       display: flex; align-items: center; gap: 8px;
     }
@@ -1498,11 +1503,37 @@ PAGE = r"""<!DOCTYPE html>
   <section id="statsView" class="page" hidden>
     <div class="page-inner">
       <div class="st-toolbar">
-        <div class="cmp-filter">
-          <label for="statsPipe">Pipeline</label>
-          <select id="statsPipe">
-            <option value="">Select a pipeline</option>
-          </select>
+        <div class="st-filters">
+          <div class="cmp-filter">
+            <label for="statsPipe">Pipeline</label>
+            <select id="statsPipe">
+              <option value="">Select a pipeline</option>
+            </select>
+          </div>
+          <div class="cmp-filter">
+            <label for="statsStatus">Status</label>
+            <select id="statsStatus">
+              <option value="ok" selected>success</option>
+              <option value="error">failed</option>
+              <option value="all">all</option>
+            </select>
+          </div>
+          <div class="cmp-filter">
+            <label for="statsNode">Nodes</label>
+            <select id="statsNode">
+              <option value="">all</option>
+            </select>
+          </div>
+          <div class="cmp-filter">
+            <label for="statsLast">Last</label>
+            <select id="statsLast">
+              <option value="10" selected>10</option>
+              <option value="20">20</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+              <option value="all">all</option>
+            </select>
+          </div>
         </div>
         <span class="st-nav">
           <span class="view-switch">
@@ -5378,6 +5409,18 @@ PAGE = r"""<!DOCTYPE html>
       return ($("statsPipe") && $("statsPipe").value) || "";
     }
 
+    function statsStatusFilter() {
+      return ($("statsStatus") && $("statsStatus").value) || "ok";
+    }
+
+    function statsNodeFilter() {
+      return ($("statsNode") && $("statsNode").value) || "";
+    }
+
+    function statsLastFilter() {
+      return ($("statsLast") && $("statsLast").value) || "10";
+    }
+
     function statsMatchesPipe(row) {
       const pipe = statsPipeFilter();
       return !!pipe && row.pipeline === pipe;
@@ -5426,6 +5469,29 @@ PAGE = r"""<!DOCTYPE html>
       });
       sel.value = stems.indexOf(keep) >= 0 ? keep : "";
       statsPipePreferred = sel.value;
+      fillStatsNodeFilter();
+    }
+
+    function fillStatsNodeFilter() {
+      const sel = $("statsNode");
+      if (!sel) return;
+      const keep = sel.value || "";
+      const stem = statsPipeFilter();
+      const spec = pipelineGraph(stem);
+      const names = Array.from(new Set([
+        ...((spec && spec.nodes) || []).map(topoName),
+        ...(statsData.nodes || [])
+          .filter((row) => row.pipeline === stem)
+          .map((row) => topoName(row.node)),
+      ].filter((name) => name && name !== "START" && name !== "END"))).sort();
+      sel.innerHTML = '<option value="">all</option>';
+      names.forEach((name) => {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        sel.appendChild(opt);
+      });
+      sel.value = names.indexOf(keep) >= 0 ? keep : "";
     }
 
     function setStatsTab(name) {
@@ -5799,7 +5865,7 @@ PAGE = r"""<!DOCTYPE html>
       const row = statsPipeRow(stem);
       const runs = Number(row.runs) || 0;
       const times = (statsData.runs || [])
-        .filter((item) => item.pipeline === stem && item.status === "ok")
+        .filter((item) => item.pipeline === stem)
         .map((item) => Number(item.elapsed_ms))
         .filter((n) => Number.isFinite(n) && n > 0)
         .sort((a, b) => a - b);
@@ -5809,11 +5875,11 @@ PAGE = r"""<!DOCTYPE html>
       const pcts = statsBarPercents([avg, maxMs]);
       const others = Math.max(0, runs - times.length);
       let meta = "";
-      if (!times.length) meta = "no successful timing";
+      if (!times.length) meta = "no timing in this filter";
       else {
         meta = formatElapsed(avg) + " avg · " + formatElapsed(maxMs) + " max · " +
-          times.length + " successful";
-        if (others) meta += " · " + others + " other";
+          times.length + " run" + (times.length === 1 ? "" : "s");
+        if (others) meta += " · " + others + " without timing";
       }
       const el = document.createElement("div");
       el.className = "st-sum";
@@ -5918,7 +5984,14 @@ PAGE = r"""<!DOCTYPE html>
     }
 
     async function loadStats() {
-      statsData = await api("/api/stats");
+      const params = new URLSearchParams();
+      params.set("status", statsStatusFilter());
+      params.set("last", statsLastFilter());
+      const node = statsNodeFilter();
+      if (node) params.set("nodes", node);
+      const stem = statsPipePreferred || statsPipeFilter();
+      if (stem) params.set("pipeline", stem);
+      statsData = await api("/api/stats?" + params.toString());
       fillStatsPipeFilter();
       renderStats();
     }
@@ -6350,11 +6423,18 @@ PAGE = r"""<!DOCTYPE html>
     $("statsPipe").onchange = () => {
       statsChoice = null;
       statsPipePreferred = statsPipeFilter();
+      if ($("statsNode")) $("statsNode").value = "";
       if (currentView === "statistics") {
         const hash = "#/statistics" + (statsPipePreferred ? "/" + encodeURIComponent(statsPipePreferred) : "");
         if (location.hash !== hash) location.hash = hash;
       }
-      renderStats();
+      loadStats().catch((e) => alert(e.message));
+    };
+    $("statsStatus").onchange = () => loadStats().catch((e) => alert(e.message));
+    $("statsLast").onchange = () => loadStats().catch((e) => alert(e.message));
+    $("statsNode").onchange = () => {
+      statsChoice = null;
+      loadStats().catch((e) => alert(e.message));
     };
     $("statsTabRouting").onclick = () => setStatsTab("routing");
     $("statsTabCost").onclick = () => setStatsTab("cost");
@@ -7190,8 +7270,21 @@ class GraphVIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/stats":
             query = parse_qs(parsed.query)
             file_id = (query.get("file") or [""])[0]
-            stem = self._stem_for_file_id(file_id) if file_id else None
-            self._json(200, collect_stats(self.workspace, stem or None))
+            pipeline = (query.get("pipeline") or [""])[0].strip()
+            status = (query.get("status") or ["all"])[0]
+            nodes = (query.get("nodes") or [""])[0]
+            last = (query.get("last") or ["10"])[0]
+            stem = pipeline or (self._stem_for_file_id(file_id) if file_id else None)
+            self._json(
+                200,
+                collect_stats(
+                    self.workspace,
+                    stem or None,
+                    status=status,
+                    nodes=nodes or None,
+                    last=last,
+                ),
+            )
             return
         self._json(404, {"error": "not found"})
 

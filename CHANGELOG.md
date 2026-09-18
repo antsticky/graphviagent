@@ -1,6 +1,12 @@
 # Changelog
 
-## 1.4.4-dev
+## 1.5.0-dev
+
+### Changed
+- Header **Statistics** uses the Trace-selected pipeline (same as the in-page jump); the hash is `#/statistics/<stem>`
+- Statistics filters **status** (success / failed / all, default success), **nodes** (default all), and **last** (10 / 20 / 50 / 100 / all, default 10). Routing, Runtime, and Cost recompute from that selection. `GET /api/stats` accepts `status`, `nodes`, `pipeline`, and `last`
+
+## 1.4.4
 
 ### Changed
 - `/api/pipelines` reads the watcher snapshot (no N+1 glob). SHA-256 of pipeline files is deferred until **Run** or a size change; listing compares file size only

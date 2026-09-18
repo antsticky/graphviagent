@@ -6,13 +6,12 @@ Local Graph-View-Agent for LangGraph. Scan `*_pipeline.py` files, record runs un
 
 Pipeline files do not import GraphVIAgent. Only runs you start from the UI or CLI are stored.
 
-## What's new in 1.4.4-dev
+## What's new in 1.5.0-dev
 
-- `/api/pipelines` uses the watcher snapshot (no N+1 walk). SHA-256 waits until **Run** or a size change
-- Watchdog watches the workspace root and pipeline folders only (`recursive=False`); `.venv` and other skipped trees are never scheduled. A pipeline in a **new** folder can take up to 45s to appear
-- Env skip: name first, then env-like dirs only get `pyvenv.cfg` / `conda-meta` / `bin`/`Scripts` python plus `lib`/`Lib`
+- Header **Statistics** opens the Trace-selected pipeline (`#/statistics/<name>`)
+- Statistics filters **status** (success / failed / all, default success), **nodes** (default all), and **last** (10 / 20 / 50 / 100 / all, default 10). Every metric follows that selection
 
-See [CHANGELOG.md](CHANGELOG.md) for 1.4.3.
+See [CHANGELOG.md](CHANGELOG.md) for 1.4.4.
 
 ## Requirements
 
@@ -160,7 +159,7 @@ Open **Compare**. Filter by pipeline (default **all**). When a pipeline is selec
 
 ### Statistics
 
-Open **Statistics** (`#/statistics/<name>`). Choose a pipeline — there is no **all** view. **Trace** and **Runs** jump to that pipeline. **Routing**, **Runtime**, and **Cost** draw the same topology as Trace. Routing shows run count, average node visits per run, and a success / failed / canceled / paused split. Runtime writes average duration on each node and a pipeline grand total / average per successful run (violet average vs orange max on the same strip as Cost / Routing). Failed, canceled, and paused visits are omitted from those times, including the node panel. Cost writes average in/out tokens on each node, a total badge, and a pipeline grand total / average per run. Hover a color strip for a legend of color dots and labels, one per line. Click a node on Routing to see branches grouped together, with similar `reason` text collapsed into a pattern. Click a node on Runtime for min / avg / max from successful visits.
+Open **Statistics** (`#/statistics/<name>`). Choose a pipeline — there is no **all** view. **Trace** and **Runs** jump to that pipeline. Filter **status** (success, failed, or all; default success), **nodes** (default all), and **last** (10, 20, 50, 100, or all; default 10). Routing, Runtime, and Cost, including the summary strip and per-node numbers, use only that selection. **Routing**, **Runtime**, and **Cost** draw the same topology as Trace. Routing shows run count, average node visits per run, and a success / failed / canceled / paused split of the filtered runs. Runtime writes average duration on each node and a pipeline grand total / average per filtered run (violet average vs orange max on the same strip as Cost / Routing). Cost writes average in/out tokens on each node, a total badge, and a pipeline grand total / average per run. Hover a color strip for a legend of color dots and labels, one per line. Click a node on Routing to see branches grouped together, with similar `reason` text collapsed into a pattern. Click a node on Runtime for min / avg / max from the filtered visits.
 
 ## Where runs are stored
 

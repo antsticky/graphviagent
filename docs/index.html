@@ -619,7 +619,7 @@
   <main>
     <section class="hero">
       <div>
-        <p class="kicker">Graph-View-Agent <span class="ver">1.4.4-dev</span></p>
+        <p class="kicker">Graph-View-Agent <span class="ver">1.5.0-dev</span></p>
         <h1>See your LangGraph run <em>as it happens</em>.</h1>
         <p class="lede">
           GraphVIAgent is an inspector for LangGraph. Point it at a folder of
@@ -728,7 +728,7 @@
         </article>
         <article class="af-card">
           <h3><span class="af-mark stats"></span> Statistics: Routing, Runtime, and Cost</h3>
-          <p>Same topology as Trace. Routing shows run count, average node visits, and success vs failed vs canceled. Runtime writes average duration, a pipeline grand total, and average vs longest run — successful visits only, including the node min / avg / max panel. Cost writes average in/out tokens, a pipeline grand total, and average per run. Hover a color strip for a dotted legend (one label per color). Colored jumps keep you on that pipeline.</p>
+          <p>Same topology as Trace. Filter status (success, failed, or all; default success), nodes (default all), and last (10 / 20 / 50 / 100 / all; default 10); every metric follows that selection. Routing shows run count, average node visits, and success vs failed vs canceled. Runtime writes average duration, a pipeline grand total, and average vs longest run, including the node min / avg / max panel. Cost writes average in/out tokens, a pipeline grand total, and average per run. Hover a color strip for a dotted legend (one label per color). Colored jumps keep you on that pipeline.</p>
         </article>
         <article class="af-card">
           <h3><span class="af-mark break"></span> Stop, step, and HITL</h3>
@@ -967,10 +967,10 @@ graphviagent serve . --host 0.0.0.0 --expose</pre>
         <div class="tour-copy">
           <p class="tour-kicker"><span class="tour-step">05</span> Across every visit</p>
           <h3>Statistics</h3>
-          <p class="tour-lead">Same topology as Trace. Pick a pipeline — there is no <strong>all</strong> view. Colored jump buttons keep you on that graph.</p>
+          <p class="tour-lead">Same topology as Trace. Pick a pipeline — there is no <strong>all</strong> view — then filter status, nodes, and last N. Colored jump buttons keep you on that graph.</p>
           <div class="tour-facts">
             <div class="tour-fact"><b>Routing</b><span>Run count, average visits, success / failed / canceled. Click a node for grouped <code>reason</code>s.</span></div>
-            <div class="tour-fact"><b>Runtime</b><span>Grand total, average per run, violet average vs orange longest. Click a node for min / avg / max from successful visits.</span></div>
+            <div class="tour-fact"><b>Runtime</b><span>Grand total, average per run, violet average vs orange longest. Click a node for min / avg / max from the filtered visits.</span></div>
             <div class="tour-fact"><b>Cost</b><span>Average in/out tokens per node, pipeline totals. Tokens, not dollars.</span></div>
             <div class="tour-fact"><b>Legend</b><span>Hover a color strip for one label per color. <strong>Trace</strong> and <strong>Runs</strong> sit before the modes.</span></div>
           </div>
@@ -1098,7 +1098,7 @@ file = "decision_pipeline.py"</pre>
   </main>
 
   <footer>
-    <div><span class="wordmark">GraphV<span class="ia">IA</span>gent</span> · 1.4.4-dev · MIT · @antsticky</div>
+    <div><span class="wordmark">GraphV<span class="ia">IA</span>gent</span> · 1.5.0-dev · MIT · @antsticky</div>
     <div>
       <a href="https://pypi.org/project/graphviagent/">PyPI</a>
       ·

@@ -167,7 +167,7 @@ def _write_text_atomic(path: Path, text: str) -> None:
         raise
 
 
-def _read_run_file(path: Path) -> dict | None:
+def _read_run_file(path: Path, *, ignore_newer: bool = True) -> dict | None:
     if path.name.startswith("."):
         return None
     try:
@@ -179,7 +179,9 @@ def _read_run_file(path: Path) -> dict | None:
     try:
         return migrate_run(data)
     except ValueError:
-        return None
+        if ignore_newer:
+            return None
+        raise
 
 
 def save_run(workspace: Path, stem: str, run: dict) -> dict:
@@ -438,7 +440,7 @@ def pipeline_has_busy_runs(workspace: Path, stem: str) -> bool:
 
 def load_run(workspace: Path, run_id: str) -> dict | None:
     for path in _run_json_paths(workspace, run_id):
-        data = _read_run_file(path)
+        data = _read_run_file(path, ignore_newer=False)
         if data is not None:
             return data
     return None

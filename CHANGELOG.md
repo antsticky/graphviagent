@@ -16,6 +16,10 @@
 - Replay seeds only when the original thread is gone; a failed checkpoint fork is stored as a failed replay
 - Cancel on a paused run no longer blocks Cancel on a different paused run (`pendingCancel` is per `runId`)
 - Fast history clicks keep the last selection; a slower `GET /api/runs/{id}` does not replace Trace
+- A rejected Run / Replay (HTTP 429 queue full, 400, missing pipeline) no longer leaves Trace stuck on a fake **queued** run that was never stored
+- `GET /api/runs/{id}` returns HTTP 409 when the file is from a newer GraphVIAgent instead of looking like a missing run
+- Same-size `graphviagent.toml` edits reload (hash, not file size)
+- Interned checkpointers survive a scan that briefly misses a pipeline file that is still on disk
 
 ## 1.4.2
 

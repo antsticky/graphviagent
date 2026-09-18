@@ -13,6 +13,7 @@ Pipeline files do not import GraphVIAgent. Only runs you start from the UI or CL
 - Trace history loads 40 runs, then the next page when you scroll
 - Cancel stays **Canceling** (red, spinner) with a red **canceling** pill until the run stops
 - Queued pills are **queued** only (no `#1`); a history click still opens the saved run
+- A rejected Run no longer leaves Trace stuck on a fake queued job; `graphviagent.toml` same-size edits reload
 
 See [CHANGELOG.md](CHANGELOG.md) for 1.4.2.
 

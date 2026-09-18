@@ -96,8 +96,14 @@ def retain_memory_savers(paths: Iterable[Path]) -> None:
             keep.add(str(resolved))
     with _saver_lock:
         for key in list(_savers):
-            if key not in keep:
-                _savers.pop(key, None)
+            if key in keep:
+                continue
+            try:
+                if Path(key).is_file():
+                    continue
+            except OSError:
+                continue
+            _savers.pop(key, None)
 
 
 def _builder_compile(obj: Any) -> Any | None:

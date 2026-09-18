@@ -100,12 +100,15 @@ class PipelineWatcher:
         self._config = config
         self._toml_mtime: float | None = None
         self._toml_size: int | None = None
+        self._toml_sha256: str | None = None
         if config is not None and config.path is not None:
             try:
                 stat = config.path.stat()
+                self._toml_sha256 = file_sha256(config.path)
             except OSError:
                 self._toml_mtime = None
                 self._toml_size = None
+                self._toml_sha256 = None
             else:
                 self._toml_mtime = stat.st_mtime
                 self._toml_size = stat.st_size
@@ -275,18 +278,21 @@ class PipelineWatcher:
             return False
         try:
             stat = toml_path.stat()
+            digest = file_sha256(toml_path)
         except OSError:
             return False
         size = stat.st_size
         mtime = stat.st_mtime
-        if self._toml_size is not None and size == self._toml_size:
+        if self._toml_sha256 is not None and digest == self._toml_sha256:
             self._toml_mtime = mtime
+            self._toml_size = size
             return False
         config = load_config(self.workspace)
         activate_config(config)
         self._config = config
         self._toml_mtime = mtime
         self._toml_size = size
+        self._toml_sha256 = digest
         self.workspace = config.root
         if self._on_config is not None:
             self._on_config(config)

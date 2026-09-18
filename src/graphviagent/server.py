@@ -2695,7 +2695,7 @@ PAGE = r"""<!DOCTYPE html>
         btn.title = p.error || p.id;
         btn.onclick = () => {
           if (p.id === fileId) return;
-          selectPipeline(p.id);
+          selectPipeline(p.id).catch((e) => alert(e.message));
         };
         box.appendChild(btn);
       });
@@ -4960,7 +4960,20 @@ PAGE = r"""<!DOCTYPE html>
         if (watching && keepId && job.fileId === fileId) {
           try {
             await openRun(keepId);
-          } catch (err) {}
+          } catch (err) {
+            const fallback = job.restore;
+            if (fallback && fallback.id) {
+              currentRun = fallback;
+              selectedStep = null;
+              renderRun(currentRun);
+            } else if (currentRun && (currentRun.id === job.id || currentRun.id === keepId)) {
+              currentRun = null;
+              selectedStep = null;
+              renderRun(null);
+            }
+            renderHistory();
+            syncRunControls();
+          }
         }
       }
     }
@@ -4993,6 +5006,7 @@ PAGE = r"""<!DOCTYPE html>
         queued: true,
         position: 0,
         run: liveRun,
+        restore: currentRun,
       };
       inflightRuns.push(job);
       selectedStep = null;
@@ -5207,6 +5221,7 @@ PAGE = r"""<!DOCTYPE html>
         resume: false,
         queued: true,
         position: 0,
+        restore: currentRun,
         run: {
           id: runId,
           input: currentRun.input,

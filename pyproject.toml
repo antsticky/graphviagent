@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "graphviagent"
-version = "1.4.3-dev"
+version = "1.4.4-dev"
 description = "Local Graph-View-Agent for inspecting and replaying LangGraph pipelines"
 readme = "README.md"
 license = "MIT"

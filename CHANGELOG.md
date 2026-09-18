@@ -1,6 +1,16 @@
 # Changelog
 
-## 1.4.3-dev
+## 1.4.4-dev
+
+### Changed
+- `/api/pipelines` reads the watcher snapshot (no N+1 glob). SHA-256 of pipeline files is deferred until **Run** or a size change; listing compares file size only
+- Watchdog watches the workspace root and each pipeline parent with `recursive=False`. Skipped trees (`.venv`, `node_modules`, …) are never scheduled. A `*_pipeline.py` added in a new nested folder can take up to 45s to appear
+- Env skip: name set first; only env-like directory names are probed for `pyvenv.cfg` / `conda-meta` / `bin/python` or `Scripts/python.exe` plus `lib`/`Lib`
+
+### Fixed
+- File-watch skip no longer `resolve()`s paths (junction / symlink targets outside the workspace, and a `.venv` *above* the serve root, no longer invert skip)
+
+## 1.4.3
 
 ### Changed
 - Trace run list uses the same **success** label (green) as the status filter, instead of **run**

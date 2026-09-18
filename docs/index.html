@@ -619,7 +619,7 @@
   <main>
     <section class="hero">
       <div>
-        <p class="kicker">Graph-View-Agent <span class="ver">1.4.3-dev</span></p>
+        <p class="kicker">Graph-View-Agent <span class="ver">1.4.4-dev</span></p>
         <h1>See your LangGraph run <em>as it happens</em>.</h1>
         <p class="lede">
           GraphVIAgent is an inspector for LangGraph. Point it at a folder of
@@ -803,7 +803,7 @@ def build_graph():
         <pre>graphviagent serve . --port 9000
 graphviagent serve . --host 127.0.0.1
 graphviagent serve . --host 0.0.0.0 --expose</pre>
-        <p><code>--expose</code> prints a warning. Anyone who can open that URL can run your pipelines and read stored runs. New or edited <code>*_pipeline.py</code> files (and toml-listed pipelines, including files outside the serve root) refresh the sidebar without a restart. Same-size edits are not re-hashed until you click <strong>Run</strong>.</p>
+        <p><code>--expose</code> prints a warning. Anyone who can open that URL can run your pipelines and read stored runs. New or edited <code>*_pipeline.py</code> files (and toml-listed pipelines, including files outside the serve root) refresh the sidebar without a restart. Watchdog watches the workspace root and each pipeline parent (not <code>.venv</code>). A file in a <strong>new</strong> nested folder can take up to 45s to appear. The first snapshot does not hash; same-size edits are not re-hashed until you click <strong>Run</strong>.</p>
       </article>
       <article class="step-card">
         <span class="step-n">4</span>
@@ -1054,7 +1054,7 @@ context = {}
 
 [pipeline.decision]
 file = "decision_pipeline.py"</pre>
-          <p>With <code>[pipeline.*]</code> tables, those files are the graphs (<code>file</code> may be any <code>.py</code>, including a path outside the serve root). Those files are watched too. Without them, GraphVIAgent globs <code>*_pipeline.py</code>.</p>
+          <p>With <code>[pipeline.*]</code> tables, those files are the graphs (<code>file</code> may be any <code>.py</code>, including a path outside the serve root). Those files are watched too. Without them, GraphVIAgent globs <code>*_pipeline.py</code>, skipping environments by directory name (<code>.venv</code> / <code>venv</code>, tox / pixi / direnv, <code>node_modules</code>). Folders whose names look like envs are probed for <code>pyvenv.cfg</code>, <code>conda-meta</code>, or <code>bin</code>/<code>Scripts</code> python plus <code>lib</code>/<code>Lib</code>.</p>
           <p><code>context</code> is LangGraph runtime context (<code>runtime.context</code> / <code>get_runtime()</code>), not graph state. It is passed on every UI, CLI, HITL resume, and replay run. Empty <code>{}</code> is omitted.</p>
         </article>
         <article class="topic">
@@ -1069,7 +1069,7 @@ file = "decision_pipeline.py"</pre>
             <li>Alpha: APIs, UI, and on-disk run format may change. <code>POST /api/run</code> and <code>POST /api/rerun</code> return one JSON run. The live UI uses <code>POST /api/run/stream</code> and <code>POST /api/rerun/stream</code> (<code>text/event-stream</code>).</li>
             <li>Local only. Nothing is uploaded.</li>
             <li><code>logging</code> still respects the logger’s level. Root defaults to WARNING, so <code>logger.info</code> appears only if that logger is enabled for INFO.</li>
-            <li>File watch skips hashing when size is unchanged (cloud-sync <code>mtime</code> jitter). Same-size edits do not refresh the sidebar hash until you click <strong>Run</strong>. UI scan/change polls read the watcher snapshot; they re-walk at most every 45s if watchdog missed an event.</li>
+            <li>File watch is non-recursive on the workspace root and pipeline parents; skipped trees are never scheduled. Hashing is skipped when size is unchanged (cloud-sync <code>mtime</code> jitter), including the first snapshot. Same-size edits do not refresh the sidebar hash until you click <strong>Run</strong>. UI scan/change/<code>/api/pipelines</code> polls read the watcher snapshot; they re-walk at most every 45s if watchdog missed an event.</li>
             <li>Cancel interrupts <code>time.sleep</code> quickly. Other blocking calls (network, LLM) still finish before the run stops.</li>
           </ul>
         </article>
@@ -1098,7 +1098,7 @@ file = "decision_pipeline.py"</pre>
   </main>
 
   <footer>
-    <div><span class="wordmark">GraphV<span class="ia">IA</span>gent</span> · 1.4.3-dev · MIT · @antsticky</div>
+    <div><span class="wordmark">GraphV<span class="ia">IA</span>gent</span> · 1.4.4-dev · MIT · @antsticky</div>
     <div>
       <a href="https://pypi.org/project/graphviagent/">PyPI</a>
       ·

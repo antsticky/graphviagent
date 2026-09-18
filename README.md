@@ -6,16 +6,13 @@ Local Graph-View-Agent for LangGraph. Scan `*_pipeline.py` files, record runs un
 
 Pipeline files do not import GraphVIAgent. Only runs you start from the UI or CLI are stored.
 
-## What's new in 1.4.3-dev
+## What's new in 1.4.4-dev
 
-- First UI open shows a **scanning** overlay until the pipeline list returns (OneDrive / slow disks)
-- Scan/change polls read the watcher snapshot; a walk still runs if it is older than 45s
-- Trace history loads 40 runs, then the next page when you scroll
-- Cancel stays **Canceling** (red, spinner) with a red **canceling** pill until the run stops
-- Queued pills are **queued** only (no `#1`); a history click still opens the saved run
-- A rejected Run no longer leaves Trace stuck on a fake queued job; `graphviagent.toml` same-size edits reload
+- `/api/pipelines` uses the watcher snapshot (no N+1 walk). SHA-256 waits until **Run** or a size change
+- Watchdog watches the workspace root and pipeline folders only (`recursive=False`); `.venv` and other skipped trees are never scheduled. A pipeline in a **new** folder can take up to 45s to appear
+- Env skip: name first, then env-like dirs only get `pyvenv.cfg` / `conda-meta` / `bin`/`Scripts` python plus `lib`/`Lib`
 
-See [CHANGELOG.md](CHANGELOG.md) for 1.4.2.
+See [CHANGELOG.md](CHANGELOG.md) for 1.4.3.
 
 ## Requirements
 
@@ -131,7 +128,7 @@ graphviagent serve . --host 0.0.0.0 --expose
 
 `--expose` prints a warning. Anyone who can open that URL can run your pipelines and read stored runs.
 
-New or edited `*_pipeline.py` files (and toml-listed pipelines, including files outside the serve root) refresh the sidebar on their own. You do not need to restart `serve`. The UI poll reads the in-memory snapshot; the tree is re-walked when the file watcher sees an event, and at most every 45s if an event was missed. A file-change panel (bottom right) shows when a pipeline appears, is modified, or its SHA256 hash changes. Hashing is skipped when the file size did not change, so a same-size edit is invisible there until you click **Run**, which always re-reads the file.
+New or edited `*_pipeline.py` files (and toml-listed pipelines, including files outside the serve root) refresh the sidebar on their own. You do not need to restart `serve`. The UI poll reads the in-memory snapshot; Watchdog watches the workspace root and each pipeline's parent directory (not `.venv` or other skipped trees). The tree is re-walked when a watched folder sees an event, and at most every 45s if an event was missed — so a pipeline added in a **new** nested folder can take up to 45s to appear. A file-change panel (bottom right) shows when a pipeline appears, is modified, or its SHA256 hash changes. The first snapshot does not hash files. Hashing is skipped when the file size did not change, so a same-size edit is invisible there until you click **Run**, which always re-reads the file.
 
 ### Trace
 
@@ -214,7 +211,7 @@ file = "decision_pipeline.py"
 - `node_concurrency` is LangGraph’s per-run node fan-out cap. Omit it (the default) so parallel `Send` nodes are not serialized. `GVA_NODE_CONCURRENCY` and `--node-concurrency` override it
 - `context` is LangGraph runtime context (`runtime.context` / `get_runtime()`), not graph state. It is passed on every UI, CLI, HITL resume, and replay run. Empty `{}` is omitted
 - If any `[pipeline.*]` tables exist, those files are the pipelines (`file` may be any `.py`, including a path outside the serve root). Optional `factory = "build_graph"`
-- If there are no `[pipeline.*]` tables, GraphVIAgent still globs `*_pipeline.py`, skipping Python environments (`.venv` / `venv`, `pyvenv.cfg`, `conda-meta`, tox / pixi / direnv caches) instead of walking them
+- If there are no `[pipeline.*]` tables, GraphVIAgent still globs `*_pipeline.py`, skipping Python environments by directory name (`.venv` / `venv`, tox / pixi / direnv caches, `node_modules`, …). Folders whose names look like envs (`env`, `python3.12`, `miniconda3`, `analysis-env`) are probed for `pyvenv.cfg`, `conda-meta`, or `bin`/`Scripts` python plus `lib`/`Lib`. Other names (`src`, `.cursor`) are not probed.
 
 `graphviagent serve /path/to/proj` uses that project's toml even when cwd is elsewhere.
 
